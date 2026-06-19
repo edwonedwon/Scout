@@ -20,14 +20,19 @@ public actor ClaudeService {
 
     /// Asks Claude to search for film locations matching the given query.
     /// Claude uses tool calls to fan out to Google Places, web search, etc.
-    public func searchLocations(query: String, onLocation: @escaping (ScoutLocation) -> Void) async throws {
+    public func searchLocations(
+        query: String,
+        mapRegion: GooglePlacesService.MapRegion? = nil,
+        onLocation: @escaping (ScoutLocation) -> Void,
+        onStatus: @escaping (String) -> Void = { _ in }
+    ) async throws {
         guard let apiKey else {
             dlog("No Anthropic API key set", level: .error, tag: "Claude")
             throw ClaudeError.missingAPIKey
         }
         dlog("Starting AI Scout search: \"\(query)\"", level: .info, tag: "Claude")
 
-        let systemPrompt = """
+        var systemPrompt = """
         You are an expert film location scout assistant. The user will describe locations they're looking for.
         Your job is to search for real, specific locations that match their description using the available tools.
 
@@ -41,6 +46,16 @@ public actor ClaudeService {
 
         Search thoroughly and return as many relevant locations as possible.
         """
+
+        if let r = mapRegion {
+            systemPrompt += """
+
+            IMPORTANT: The user is looking at a specific area on the map. Restrict all results to this viewport:
+            Center: \(String(format: "%.4f", r.centerLat)), \(String(format: "%.4f", r.centerLng))
+            Span: ±\(String(format: "%.3f", r.latDelta / 2))° lat, ±\(String(format: "%.3f", r.lngDelta / 2))° lng
+            Only report locations within this bounding box. Do not return locations outside this area.
+            """
+        }
 
         let tools: [[String: Any]] = [
             googlePlacesTool(),
@@ -69,7 +84,7 @@ public actor ClaudeService {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         // Run the agentic tool loop
-        try await runToolLoop(request: request, apiKey: apiKey, onLocation: onLocation)
+        try await runToolLoop(request: request, apiKey: apiKey, mapRegion: mapRegion, onLocation: onLocation, onStatus: onStatus)
     }
 
     // MARK: - Tool Loop
@@ -77,7 +92,9 @@ public actor ClaudeService {
     private func runToolLoop(
         request: URLRequest,
         apiKey: String,
+        mapRegion: GooglePlacesService.MapRegion?,
         onLocation: @escaping (ScoutLocation) -> Void,
+        onStatus: @escaping (String) -> Void,
         messages: [[String: Any]] = [],
         depth: Int = 0
     ) async throws {
@@ -109,7 +126,7 @@ public actor ClaudeService {
                   let toolID = block["id"] as? String else { continue }
 
             dlog("Tool call: \(toolName)(\(toolInput.keys.joined(separator: ",")))", level: .info, tag: "Claude")
-            let result = await executeTool(name: toolName, input: toolInput, onLocation: onLocation)
+            let result = await executeTool(name: toolName, input: toolInput, mapRegion: mapRegion, onLocation: onLocation, onStatus: onStatus)
             dlog("Tool result: \(result.prefix(100))", level: .info, tag: "Claude")
             toolResults.append([
                 "type": "tool_result",
@@ -136,7 +153,9 @@ public actor ClaudeService {
         try await runToolLoop(
             request: nextRequest,
             apiKey: apiKey,
+            mapRegion: mapRegion,
             onLocation: onLocation,
+            onStatus: onStatus,
             messages: nextMessages,
             depth: depth + 1
         )
@@ -147,23 +166,34 @@ public actor ClaudeService {
     private func executeTool(
         name: String,
         input: [String: Any],
-        onLocation: @escaping (ScoutLocation) -> Void
+        mapRegion: GooglePlacesService.MapRegion?,
+        onLocation: @escaping (ScoutLocation) -> Void,
+        onStatus: @escaping (String) -> Void
     ) async -> String {
         switch name {
         case "report_location":
             if let location = parseLocation(from: input) {
+                onStatus("Pinning \(location.name)…")
                 onLocation(location)
                 return "Location reported successfully."
             }
             return "Failed to parse location."
 
         case "search_google_places":
-            // In Phase 2 we'll call the real Places API here
             let query = input["query"] as? String ?? ""
-            return "Google Places search for '\(query)' — integration coming in Phase 2."
+            onStatus("Searching Google Places for \"\(query)\"…")
+            do {
+                let results = try await GooglePlacesService.shared.search(query: query, region: mapRegion)
+                if results.isEmpty { return "No results found for '\(query)'." }
+                let summary = results.map { "- \($0.name) (\($0.coordinate.latitude), \($0.coordinate.longitude)): \($0.description)" }.joined(separator: "\n")
+                return "Found \(results.count) places:\n\(summary)"
+            } catch {
+                return "Google Places error: \(error.localizedDescription)"
+            }
 
         case "search_web":
             let query = input["query"] as? String ?? ""
+            onStatus("Searching the web for \"\(query)\"…")
             return "Web search for '\(query)' — integration coming in Phase 2."
 
         default:

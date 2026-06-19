@@ -23,6 +23,7 @@ struct ContentView: View {
     @AppStorage("map.latDelta")    private var savedLatDelta: Double = .nan
     @AppStorage("map.lngDelta")    private var savedLngDelta: Double = .nan
     @AppStorage("map.scrollToZoom") private var scrollToZoom: Bool = false
+    @AppStorage("aiScout.constrainToMap") private var aiConstrainToMap: Bool = true
 
     @StateObject private var mapController = ScoutMapController()
 
@@ -33,6 +34,7 @@ struct ContentView: View {
     @State private var selectedLocation: ScoutLocation?
     @State private var searchError: String?
     @State private var didInitialCenter = false
+    @State private var chatMessages: [ChatMessage] = []
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -77,48 +79,62 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            searchBar
-            locationList
+            modePicker
+            Divider()
+            if searchMode == .aiScout {
+                AIChatView(
+                    messages: $chatMessages,
+                    isSearching: isSearching,
+                    onSend: { text in Task { await runSearch(query: text) } }
+                )
+            } else {
+                googleSearchBar
+                locationList
+            }
         }
-        .navigationTitle("Locations")
+        .navigationTitle("Scout")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                settingsButton
-            }
+            ToolbarItem(placement: .navigationBarTrailing) { settingsButton }
         }
         #endif
     }
 
-    private var searchBar: some View {
-        VStack(spacing: 8) {
-            HStack {
-                TextField(searchMode.placeholder, text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { Task { await runSearch() } }
-
-                Button {
-                    Task { await runSearch() }
-                } label: {
-                    if isSearching {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "magnifyingglass")
-                    }
-                }
-                .disabled(searchText.isEmpty || isSearching)
+    private var modePicker: some View {
+        Picker("Search Mode", selection: $searchMode) {
+            ForEach(SearchMode.allCases, id: \.self) { mode in
+                Text(mode.rawValue).tag(mode)
             }
-
-            Picker("Search Mode", selection: $searchMode) {
-                ForEach(SearchMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: searchMode) { _, _ in searchText = "" }
         }
-        .padding()
+        .pickerStyle(.segmented)
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .onChange(of: searchMode) { _, _ in
+            searchText = ""
+            locations = []
+        }
+    }
+
+    private var googleSearchBar: some View {
+        HStack {
+            TextField(searchMode.placeholder, text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { Task { await runSearch() } }
+
+            Button {
+                Task { await runSearch() }
+            } label: {
+                if isSearching {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                }
+            }
+            .disabled(searchText.isEmpty || isSearching)
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 8)
     }
 
     private var locationList: some View {
@@ -179,8 +195,9 @@ struct ContentView: View {
     // MARK: - Search
 
     @MainActor
-    private func runSearch() async {
-        guard !searchText.isEmpty else { return }
+    private func runSearch(query: String? = nil) async {
+        let q = query ?? searchText
+        guard !q.isEmpty else { return }
         isSearching = true
         searchError = nil
         locations = []
@@ -188,23 +205,37 @@ struct ContentView: View {
         do {
             switch searchMode {
             case .googleMaps:
-                dlog("Starting Google Maps search: \"\(searchText)\"", level: .info, tag: "Search")
+                dlog("Starting Google Maps search: \"\(q)\"", level: .info, tag: "Search")
                 let region: GooglePlacesService.MapRegion? = hasSavedRegion
                     ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
                     : nil
-                let results = try await GooglePlacesService.shared.search(query: searchText, region: region)
+                let results = try await GooglePlacesService.shared.search(query: q, region: region)
                 locations = results
                 selectedLocation = nil
                 dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
+
             case .aiScout:
-                try await ClaudeService.shared.searchLocations(query: searchText) { location in
-                    Task { @MainActor in
-                        self.locations.append(location)
+                chatMessages.append(.user(text: q))
+                let aiRegion: GooglePlacesService.MapRegion? = (aiConstrainToMap && hasSavedRegion)
+                    ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
+                    : nil
+                try await ClaudeService.shared.searchLocations(
+                    query: q,
+                    mapRegion: aiRegion,
+                    onLocation: { location in
+                        Task { @MainActor in self.locations.append(location) }
+                    },
+                    onStatus: { status in
+                        Task { @MainActor in self.chatMessages.append(.status(text: status)) }
                     }
-                }
+                )
+                chatMessages.append(.result(count: locations.count))
             }
         } catch {
             searchError = error.localizedDescription
+            if searchMode == .aiScout {
+                chatMessages.append(.error(text: error.localizedDescription))
+            }
         }
 
         isSearching = false
