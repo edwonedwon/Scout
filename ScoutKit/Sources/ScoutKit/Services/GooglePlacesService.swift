@@ -11,13 +11,31 @@ public actor GooglePlacesService {
         KeychainService.load(forKey: KeychainService.googleMapsAPIKey)
     }
 
-    public func search(query: String) async throws -> [ScoutLocation] {
+    public struct MapRegion {
+        public let centerLat: Double
+        public let centerLng: Double
+        public let latDelta: Double
+        public let lngDelta: Double
+
+        public init(centerLat: Double, centerLng: Double, latDelta: Double, lngDelta: Double) {
+            self.centerLat = centerLat
+            self.centerLng = centerLng
+            self.latDelta = latDelta
+            self.lngDelta = lngDelta
+        }
+    }
+
+    public func search(query: String, region: MapRegion? = nil) async throws -> [ScoutLocation] {
         guard let apiKey else {
             dlog("No Google Maps API key set", level: .error, tag: "Places")
             throw PlacesError.missingAPIKey
         }
 
-        dlog("Searching Places: \"\(query)\"", level: .network, tag: "Places")
+        if let region {
+            dlog("Searching Places: \"\(query)\" biased to \(String(format: "%.4f", region.centerLat)),\(String(format: "%.4f", region.centerLng)) ±\(String(format: "%.3f", region.latDelta))°", level: .network, tag: "Places")
+        } else {
+            dlog("Searching Places: \"\(query)\" (no location bias)", level: .network, tag: "Places")
+        }
 
         var request = URLRequest(url: baseURL)
         request.httpMethod = "POST"
@@ -25,7 +43,16 @@ public actor GooglePlacesService {
         request.setValue(apiKey, forHTTPHeaderField: "X-Goog-Api-Key")
         request.setValue(fieldMask, forHTTPHeaderField: "X-Goog-FieldMask")
 
-        let body: [String: Any] = ["textQuery": query]
+        var body: [String: Any] = ["textQuery": query]
+        if let region {
+            let half = (region.latDelta / 2, region.lngDelta / 2)
+            body["locationBias"] = [
+                "rectangle": [
+                    "low":  ["latitude": region.centerLat - half.0, "longitude": region.centerLng - half.1],
+                    "high": ["latitude": region.centerLat + half.0, "longitude": region.centerLng + half.1],
+                ]
+            ]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, response) = try await URLSession.shared.data(for: request)

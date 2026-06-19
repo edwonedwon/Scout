@@ -30,6 +30,8 @@
 	<string>Scout uses your location to show nearby areas on the map.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Scout imports geotagged photos from your library.</string>
+	<key>NSQuitAlwaysKeepsWindows</key>
+	<false/>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

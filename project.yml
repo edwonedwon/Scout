@@ -45,6 +45,7 @@ targets:
     info:
       path: Scout/Info.plist
       properties:
+        NSQuitAlwaysKeepsWindows: false
         NSLocationWhenInUseUsageDescription: "Scout uses your location to show nearby areas on the map."
         NSLocationAlwaysAndWhenInUseUsageDescription: "Scout uses your location to record GPS tracks during scouting trips."
         NSLocationUsageDescription: "Scout uses your location to show nearby areas on the map."

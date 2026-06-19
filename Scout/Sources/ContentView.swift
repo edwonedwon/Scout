@@ -36,13 +36,21 @@ struct ContentView: View {
     }
 
     private var initialCameraPosition: MapCameraPosition {
+        // Always open at current location if permitted — you're out scouting
+        if locationManager.isAuthorized {
+            return .userLocation(fallback: hasSavedRegion ? .region(MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
+                span: MKCoordinateSpan(latitudeDelta: savedLatDelta, longitudeDelta: savedLngDelta)
+            )) : .automatic)
+        }
+        // No permission — restore last known region or world view
         if hasSavedRegion {
             return .region(MKCoordinateRegion(
                 center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
                 span: MKCoordinateSpan(latitudeDelta: savedLatDelta, longitudeDelta: savedLngDelta)
             ))
         }
-        return .userLocation(fallback: .automatic)
+        return .automatic
     }
 
     var body: some View {
@@ -54,7 +62,9 @@ struct ContentView: View {
         .navigationTitle("Scout")
         .onAppear {
             cameraPosition = initialCameraPosition
-            locationManager.requestPermission()
+            #if !DEBUG
+            locationManager.requestIfNeeded()
+            #endif
         }
     }
 
@@ -134,6 +144,7 @@ struct ContentView: View {
 
     private var mapView: some View {
         Map(position: $cameraPosition, selection: $selectedLocation) {
+            UserAnnotation()
             ForEach(locations) { location in
                 Marker(location.name, coordinate: location.coordinate)
                     .tag(location)
@@ -188,7 +199,10 @@ struct ContentView: View {
             switch searchMode {
             case .googleMaps:
                 dlog("Starting Google Maps search: \"\(searchText)\"", level: .info, tag: "Search")
-                let results = try await GooglePlacesService.shared.search(query: searchText)
+                let region: GooglePlacesService.MapRegion? = hasSavedRegion
+                    ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
+                    : nil
+                let results = try await GooglePlacesService.shared.search(query: searchText, region: region)
                 locations = results
                 selectedLocation = results.first
                 dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
@@ -207,6 +221,34 @@ struct ContentView: View {
         }
 
         isSearching = false
+        fitMapToResults()
+    }
+
+    private func fitMapToResults() {
+        var coords = locations.map(\.coordinate)
+        if let userCoord = locationManager.currentLocation {
+            coords.append(userCoord)
+        }
+        guard !coords.isEmpty else { return }
+
+        let lats = coords.map(\.latitude)
+        let lngs = coords.map(\.longitude)
+        let minLat = lats.min()!, maxLat = lats.max()!
+        let minLng = lngs.min()!, maxLng = lngs.max()!
+
+        let padding = 0.2
+        let latDelta = max((maxLat - minLat) * (1 + padding), 0.01)
+        let lngDelta = max((maxLng - minLng) * (1 + padding), 0.01)
+
+        withAnimation {
+            cameraPosition = .region(MKCoordinateRegion(
+                center: CLLocationCoordinate2D(
+                    latitude: (minLat + maxLat) / 2,
+                    longitude: (minLng + maxLng) / 2
+                ),
+                span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lngDelta)
+            ))
+        }
     }
 }
 
