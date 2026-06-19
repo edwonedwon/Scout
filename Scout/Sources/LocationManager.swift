@@ -17,6 +17,9 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         if let loc = manager.location {
             currentLocation = loc.coordinate
         }
+        if authorizationStatus == .authorizedAlways {
+            manager.startUpdatingLocation()
+        }
     }
 
     var isAuthorized: Bool {
@@ -38,6 +41,16 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
             if let loc = manager.location {
                 self.currentLocation = loc.coordinate
             }
+            #if os(macOS)
+            if manager.authorizationStatus == .authorizedAlways {
+                manager.startUpdatingLocation()
+            }
+            #else
+            if manager.authorizationStatus == .authorizedAlways ||
+               manager.authorizationStatus == .authorizedWhenInUse {
+                manager.startUpdatingLocation()
+            }
+            #endif
         }
     }
 

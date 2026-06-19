@@ -46,7 +46,7 @@ public actor GooglePlacesService {
         var body: [String: Any] = ["textQuery": query]
         if let region {
             let half = (region.latDelta / 2, region.lngDelta / 2)
-            body["locationBias"] = [
+            body["locationRestriction"] = [
                 "rectangle": [
                     "low":  ["latitude": region.centerLat - half.0, "longitude": region.centerLng - half.1],
                     "high": ["latitude": region.centerLat + half.0, "longitude": region.centerLng + half.1],

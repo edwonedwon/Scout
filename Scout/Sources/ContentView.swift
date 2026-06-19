@@ -204,15 +204,12 @@ struct ContentView: View {
                     : nil
                 let results = try await GooglePlacesService.shared.search(query: searchText, region: region)
                 locations = results
-                selectedLocation = results.first
+                selectedLocation = nil
                 dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
             case .aiScout:
                 try await ClaudeService.shared.searchLocations(query: searchText) { location in
                     Task { @MainActor in
                         self.locations.append(location)
-                        if self.locations.count == 1 {
-                            self.selectedLocation = location
-                        }
                     }
                 }
             }
