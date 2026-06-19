@@ -21,7 +21,11 @@ public actor ClaudeService {
     /// Asks Claude to search for film locations matching the given query.
     /// Claude uses tool calls to fan out to Google Places, web search, etc.
     public func searchLocations(query: String, onLocation: @escaping (ScoutLocation) -> Void) async throws {
-        guard let apiKey else { throw ClaudeError.missingAPIKey }
+        guard let apiKey else {
+            dlog("No Anthropic API key set", level: .error, tag: "Claude")
+            throw ClaudeError.missingAPIKey
+        }
+        dlog("Starting AI Scout search: \"\(query)\"", level: .info, tag: "Claude")
 
         let systemPrompt = """
         You are an expert film location scout assistant. The user will describe locations they're looking for.
@@ -79,10 +83,12 @@ public actor ClaudeService {
     ) async throws {
         guard depth < 10 else { return }
 
+        dlog("Claude request (depth \(depth))", level: .network, tag: "Claude")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ClaudeError.invalidResponse }
         guard http.statusCode == 200 else {
             let body = String(data: data, encoding: .utf8) ?? ""
+            dlog("Claude error \(http.statusCode): \(body.prefix(200))", level: .error, tag: "Claude")
             throw ClaudeError.apiError(http.statusCode, body)
         }
 
@@ -92,6 +98,8 @@ public actor ClaudeService {
             throw ClaudeError.invalidResponse
         }
 
+        dlog("Claude response: stop_reason=\(stopReason), blocks=\(content.count)", level: .network, tag: "Claude")
+
         // Process tool calls
         var toolResults: [[String: Any]] = []
         for block in content {
@@ -100,7 +108,9 @@ public actor ClaudeService {
                   let toolInput = block["input"] as? [String: Any],
                   let toolID = block["id"] as? String else { continue }
 
+            dlog("Tool call: \(toolName)(\(toolInput.keys.joined(separator: ",")))", level: .info, tag: "Claude")
             let result = await executeTool(name: toolName, input: toolInput, onLocation: onLocation)
+            dlog("Tool result: \(result.prefix(100))", level: .info, tag: "Claude")
             toolResults.append([
                 "type": "tool_result",
                 "tool_use_id": toolID,
@@ -108,7 +118,10 @@ public actor ClaudeService {
             ])
         }
 
-        guard stopReason == "tool_use", !toolResults.isEmpty else { return }
+        guard stopReason == "tool_use", !toolResults.isEmpty else {
+            dlog("Claude done (stop_reason=\(stopReason))", level: .success, tag: "Claude")
+            return
+        }
 
         // Build next request with updated messages
         var nextMessages = messages

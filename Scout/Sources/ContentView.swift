@@ -146,12 +146,15 @@ struct ContentView: View {
             MapUserLocationButton()
         }
         .overlay(alignment: .bottomTrailing) {
-            if let error = searchError {
-                Text(error)
-                    .padding(8)
-                    .background(.regularMaterial, in: .rect(cornerRadius: 8))
-                    .padding()
+            VStack(alignment: .trailing, spacing: 8) {
+                if let error = searchError {
+                    Text(error)
+                        .padding(8)
+                        .background(.regularMaterial, in: .rect(cornerRadius: 8))
+                }
+                DebugPanelOverlay()
             }
+            .padding()
         }
         .onMapCameraChange(frequency: .onEnd) { context in
             let region = context.region
@@ -184,8 +187,11 @@ struct ContentView: View {
         do {
             switch searchMode {
             case .googleMaps:
-                // TODO: wire up Google Places API
-                searchError = "Google Maps search coming soon."
+                dlog("Starting Google Maps search: \"\(searchText)\"", level: .info, tag: "Search")
+                let results = try await GooglePlacesService.shared.search(query: searchText)
+                locations = results
+                selectedLocation = results.first
+                dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
             case .aiScout:
                 try await ClaudeService.shared.searchLocations(query: searchText) { location in
                     Task { @MainActor in
