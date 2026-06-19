@@ -18,10 +18,11 @@ struct ContentView: View {
     @StateObject private var locationManager = LocationManager.shared
 
     // Persisted camera region — 4 doubles in UserDefaults (not sensitive)
-    @AppStorage("map.lat")      private var savedLat:      Double = .nan
-    @AppStorage("map.lng")      private var savedLng:      Double = .nan
-    @AppStorage("map.latDelta") private var savedLatDelta: Double = .nan
-    @AppStorage("map.lngDelta") private var savedLngDelta: Double = .nan
+    @AppStorage("map.lat")         private var savedLat:      Double = .nan
+    @AppStorage("map.lng")         private var savedLng:      Double = .nan
+    @AppStorage("map.latDelta")    private var savedLatDelta: Double = .nan
+    @AppStorage("map.lngDelta")    private var savedLngDelta: Double = .nan
+    @AppStorage("map.scrollToZoom") private var scrollToZoom: Bool = false
 
     @State private var searchText = ""
     @State private var searchMode: SearchMode = .googleMaps
@@ -156,6 +157,21 @@ struct ContentView: View {
             MapScaleView()
             MapUserLocationButton()
         }
+        .overlay {
+            #if os(macOS)
+            if scrollToZoom {
+                ScrollZoomOverlay(enabled: true) { multiplier in
+                    guard hasSavedRegion else { return }
+                    let newLatDelta = max(min(savedLatDelta * multiplier, 180), 0.001)
+                    let newLngDelta = max(min(savedLngDelta * multiplier, 360), 0.001)
+                    cameraPosition = .region(MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
+                        span: MKCoordinateSpan(latitudeDelta: newLatDelta, longitudeDelta: newLngDelta)
+                    ))
+                }
+            }
+            #endif
+        }
         .overlay(alignment: .bottomTrailing) {
             VStack(alignment: .trailing, spacing: 8) {
                 if let error = searchError {
@@ -173,16 +189,6 @@ struct ContentView: View {
             savedLng      = region.center.longitude
             savedLatDelta = region.span.latitudeDelta
             savedLngDelta = region.span.longitudeDelta
-        }
-        .onChange(of: selectedLocation) { _, location in
-            if let location {
-                withAnimation {
-                    cameraPosition = .region(MKCoordinateRegion(
-                        center: location.coordinate,
-                        span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-                    ))
-                }
-            }
         }
     }
 
@@ -218,7 +224,9 @@ struct ContentView: View {
         }
 
         isSearching = false
-        fitMapToResults()
+        if !locations.isEmpty {
+            fitMapToResults()
+        }
     }
 
     private func fitMapToResults() {
@@ -255,15 +263,51 @@ struct LocationRow: View {
     let location: ScoutLocation
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            // Photo filmstrip
+            if !location.images.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(location.images) { image in
+                            if let url = image.url {
+                                AsyncImage(url: url) { phase in
+                                    switch phase {
+                                    case .success(let img):
+                                        img.resizable()
+                                            .scaledToFill()
+                                    case .failure:
+                                        Color.secondary.opacity(0.2)
+                                    default:
+                                        Color.secondary.opacity(0.1)
+                                            .overlay(ProgressView().controlSize(.mini))
+                                    }
+                                }
+                                .frame(width: 100, height: 70)
+                                .clipped()
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(height: 74)
+                // Allow horizontal scroll without stealing list swipes
+                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            }
+
+            // Name + address
             Text(location.name)
                 .font(.headline)
+                .lineLimit(1)
+
             if !location.description.isEmpty {
                 Text(location.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
             }
+
+            // Status + Maps link
             HStack {
                 Label(location.status.rawValue, systemImage: statusIcon)
                     .font(.caption2)
@@ -277,7 +321,7 @@ struct LocationRow: View {
                 }
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
     }
 
     private var statusIcon: String {

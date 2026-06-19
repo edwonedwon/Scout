@@ -5,7 +5,7 @@ public actor GooglePlacesService {
     public static let shared = GooglePlacesService()
 
     private let baseURL = URL(string: "https://places.googleapis.com/v1/places:searchText")!
-    private let fieldMask = "places.id,places.displayName,places.location,places.formattedAddress,places.googleMapsUri,places.rating,places.userRatingCount"
+    private let fieldMask = "places.id,places.displayName,places.location,places.formattedAddress,places.googleMapsUri,places.rating,places.userRatingCount,places.photos"
 
     private var apiKey: String? {
         KeychainService.load(forKey: KeychainService.googleMapsAPIKey)
@@ -32,9 +32,9 @@ public actor GooglePlacesService {
         }
 
         if let region {
-            dlog("Searching Places: \"\(query)\" biased to \(String(format: "%.4f", region.centerLat)),\(String(format: "%.4f", region.centerLng)) ±\(String(format: "%.3f", region.latDelta))°", level: .network, tag: "Places")
+            dlog("Searching Places: \"\(query)\" restricted to \(String(format: "%.4f", region.centerLat)),\(String(format: "%.4f", region.centerLng)) ±\(String(format: "%.3f", region.latDelta))°", level: .network, tag: "Places")
         } else {
-            dlog("Searching Places: \"\(query)\" (no location bias)", level: .network, tag: "Places")
+            dlog("Searching Places: \"\(query)\" (no location restriction)", level: .network, tag: "Places")
         }
 
         var request = URLRequest(url: baseURL)
@@ -57,9 +57,7 @@ public actor GooglePlacesService {
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
-        guard let http = response as? HTTPURLResponse else {
-            throw PlacesError.invalidResponse
-        }
+        guard let http = response as? HTTPURLResponse else { throw PlacesError.invalidResponse }
 
         let responseBody = String(data: data, encoding: .utf8) ?? ""
         dlog("Places response \(http.statusCode): \(responseBody.prefix(300))", level: http.statusCode == 200 ? .network : .error, tag: "Places")
@@ -74,12 +72,12 @@ public actor GooglePlacesService {
             return []
         }
 
-        let locations = places.compactMap { parsePlace($0) }
+        let locations = places.compactMap { parsePlace($0, apiKey: apiKey) }
         dlog("Found \(locations.count) locations", level: .success, tag: "Places")
         return locations
     }
 
-    private func parsePlace(_ place: [String: Any]) -> ScoutLocation? {
+    private func parsePlace(_ place: [String: Any], apiKey: String) -> ScoutLocation? {
         guard let displayName = (place["displayName"] as? [String: Any])?["text"] as? String,
               let location = place["location"] as? [String: Any],
               let lat = location["latitude"] as? Double,
@@ -91,12 +89,21 @@ public actor GooglePlacesService {
         let address = place["formattedAddress"] as? String ?? ""
         let mapsURI = (place["googleMapsUri"] as? String).flatMap(URL.init)
 
-        dlog("Parsed: \(displayName) @ \(lat),\(lng)", level: .info, tag: "Places")
+        // Build photo URLs from photo references (up to 5)
+        let photoRefs = place["photos"] as? [[String: Any]] ?? []
+        let images: [ScoutImage] = photoRefs.prefix(5).compactMap { photo in
+            guard let name = photo["name"] as? String else { return nil }
+            let urlStr = "https://places.googleapis.com/v1/\(name)/media?maxWidthPx=800&key=\(apiKey)"
+            return URL(string: urlStr).map { ScoutImage(url: $0, source: .googleMaps) }
+        }
+
+        dlog("Parsed: \(displayName) @ \(lat),\(lng) — \(images.count) photos", level: .info, tag: "Places")
 
         return ScoutLocation(
             name: displayName,
             description: address,
             coordinate: .init(latitude: lat, longitude: lng),
+            images: images,
             googleMapsURL: mapsURI
         )
     }
@@ -108,12 +115,9 @@ public actor GooglePlacesService {
 
         public var errorDescription: String? {
             switch self {
-            case .missingAPIKey:
-                return "No Google Maps API key set. Add one in Settings."
-            case .invalidResponse:
-                return "Invalid response from Google Places."
-            case .apiError(let code, let body):
-                return "Google Places error \(code): \(body)"
+            case .missingAPIKey: return "No Google Maps API key set. Add one in Settings."
+            case .invalidResponse: return "Invalid response from Google Places."
+            case .apiError(let code, let body): return "Google Places error \(code): \(body)"
             }
         }
     }

@@ -3,6 +3,7 @@ import ScoutKit
 
 struct SettingsView: View {
     @EnvironmentObject private var apiKeyState: APIKeyState
+    @AppStorage("map.scrollToZoom") private var scrollToZoom = false
     @State private var showClearConfirm = false
 
     var body: some View {
@@ -30,6 +31,16 @@ struct SettingsView: View {
             } footer: {
                 Text("Required for Google Maps search mode.")
             }
+
+            #if os(macOS)
+            Section {
+                Toggle("Two-finger scroll to zoom", isOn: $scrollToZoom)
+            } header: {
+                Text("Map")
+            } footer: {
+                Text("Swipe up/down with two fingers to zoom instead of pinch.")
+            }
+            #endif
 
             Section {
                 Button("Clear All Keys", role: .destructive) {
