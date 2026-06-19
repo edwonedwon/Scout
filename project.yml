@@ -36,11 +36,18 @@ targets:
       configs:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+    entitlements:
+      path: Scout/Scout.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.personal-information.location: true
+        com.apple.security.network.client: true
     info:
       path: Scout/Info.plist
       properties:
         NSLocationWhenInUseUsageDescription: "Scout uses your location to show nearby areas on the map."
         NSLocationAlwaysAndWhenInUseUsageDescription: "Scout uses your location to record GPS tracks during scouting trips."
+        NSLocationUsageDescription: "Scout uses your location to show nearby areas on the map."
         NSCameraUsageDescription: "Scout uses the camera to capture location photos."
         NSPhotoLibraryUsageDescription: "Scout imports geotagged photos from your library."
         UILaunchScreen:

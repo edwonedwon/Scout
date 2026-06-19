@@ -2,13 +2,48 @@ import SwiftUI
 import MapKit
 import ScoutKit
 
+enum SearchMode: String, CaseIterable {
+    case googleMaps = "Google Maps"
+    case aiScout = "AI Scout"
+
+    var placeholder: String {
+        switch self {
+        case .googleMaps: "Search Google Maps..."
+        case .aiScout: "Describe what you're looking for..."
+        }
+    }
+}
+
 struct ContentView: View {
+    @StateObject private var locationManager = LocationManager.shared
+
+    // Persisted camera region — 4 doubles in UserDefaults (not sensitive)
+    @AppStorage("map.lat")      private var savedLat:      Double = .nan
+    @AppStorage("map.lng")      private var savedLng:      Double = .nan
+    @AppStorage("map.latDelta") private var savedLatDelta: Double = .nan
+    @AppStorage("map.lngDelta") private var savedLngDelta: Double = .nan
+
     @State private var searchText = ""
+    @State private var searchMode: SearchMode = .googleMaps
     @State private var isSearching = false
     @State private var locations: [ScoutLocation] = []
     @State private var selectedLocation: ScoutLocation?
     @State private var searchError: String?
-    @State private var cameraPosition = MapCameraPosition.automatic
+    @State private var cameraPosition: MapCameraPosition = .automatic
+
+    private var hasSavedRegion: Bool {
+        !savedLat.isNaN && !savedLng.isNaN
+    }
+
+    private var initialCameraPosition: MapCameraPosition {
+        if hasSavedRegion {
+            return .region(MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
+                span: MKCoordinateSpan(latitudeDelta: savedLatDelta, longitudeDelta: savedLngDelta)
+            ))
+        }
+        return .userLocation(fallback: .automatic)
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -17,6 +52,10 @@ struct ContentView: View {
             mapView
         }
         .navigationTitle("Scout")
+        .onAppear {
+            cameraPosition = initialCameraPosition
+            locationManager.requestPermission()
+        }
     }
 
     // MARK: - Sidebar
@@ -38,21 +77,31 @@ struct ContentView: View {
     }
 
     private var searchBar: some View {
-        HStack {
-            TextField("Describe a location...", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { Task { await runSearch() } }
+        VStack(spacing: 8) {
+            HStack {
+                TextField(searchMode.placeholder, text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { Task { await runSearch() } }
 
-            Button {
-                Task { await runSearch() }
-            } label: {
-                if isSearching {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "magnifyingglass")
+                Button {
+                    Task { await runSearch() }
+                } label: {
+                    if isSearching {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "magnifyingglass")
+                    }
+                }
+                .disabled(searchText.isEmpty || isSearching)
+            }
+
+            Picker("Search Mode", selection: $searchMode) {
+                ForEach(SearchMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
             }
-            .disabled(searchText.isEmpty || isSearching)
+            .pickerStyle(.segmented)
+            .onChange(of: searchMode) { _, _ in searchText = "" }
         }
         .padding()
     }
@@ -104,6 +153,13 @@ struct ContentView: View {
                     .padding()
             }
         }
+        .onMapCameraChange(frequency: .onEnd) { context in
+            let region = context.region
+            savedLat      = region.center.latitude
+            savedLng      = region.center.longitude
+            savedLatDelta = region.span.latitudeDelta
+            savedLngDelta = region.span.longitudeDelta
+        }
         .onChange(of: selectedLocation) { _, location in
             if let location {
                 withAnimation {
@@ -126,11 +182,17 @@ struct ContentView: View {
         locations = []
 
         do {
-            try await ClaudeService.shared.searchLocations(query: searchText) { location in
-                Task { @MainActor in
-                    locations.append(location)
-                    if locations.count == 1 {
-                        selectedLocation = location
+            switch searchMode {
+            case .googleMaps:
+                // TODO: wire up Google Places API
+                searchError = "Google Maps search coming soon."
+            case .aiScout:
+                try await ClaudeService.shared.searchLocations(query: searchText) { location in
+                    Task { @MainActor in
+                        self.locations.append(location)
+                        if self.locations.count == 1 {
+                            self.selectedLocation = location
+                        }
                     }
                 }
             }

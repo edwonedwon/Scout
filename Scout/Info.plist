@@ -24,6 +24,8 @@
 	<string>Scout uses the camera to capture location photos.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Scout uses your location to record GPS tracks during scouting trips.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Scout uses your location to show nearby areas on the map.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Scout uses your location to show nearby areas on the map.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

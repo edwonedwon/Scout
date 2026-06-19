@@ -3,51 +3,35 @@ import ScoutKit
 
 struct SettingsView: View {
     @EnvironmentObject private var apiKeyState: APIKeyState
-    @State private var anthropicKeyInput = ""
-    @State private var googleMapsKeyInput = ""
-    @State private var saveError: String?
     @State private var showClearConfirm = false
 
     var body: some View {
         Form {
             Section {
-                apiKeyRow(
-                    label: "Anthropic API Key",
+                APIKeyField(
                     placeholder: "sk-ant-...",
                     isSet: apiKeyState.anthropicKeyIsSet,
-                    input: $anthropicKeyInput
+                    onSave: { try apiKeyState.saveAnthropicKey($0) }
                 )
             } header: {
                 Text("AI Search")
             } footer: {
-                Text("Required. Powers location search. Get a key at console.anthropic.com")
+                Text("Required. Powers AI Scout search. Get a key at console.anthropic.com")
             }
 
             Section {
-                apiKeyRow(
-                    label: "Google Maps API Key",
+                APIKeyField(
                     placeholder: "AIza...",
                     isSet: apiKeyState.googleMapsKeyIsSet,
-                    input: $googleMapsKeyInput
+                    onSave: { try apiKeyState.saveGoogleMapsKey($0) }
                 )
             } header: {
                 Text("Google Maps")
             } footer: {
-                Text("Optional. Enables Street View and richer place data.")
-            }
-
-            if saveError != nil {
-                Section {
-                    Text(saveError!)
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                }
+                Text("Required for Google Maps search mode.")
             }
 
             Section {
-                Button("Save Keys") { save() }
-                    .disabled(anthropicKeyInput.isEmpty && googleMapsKeyInput.isEmpty)
-
                 Button("Clear All Keys", role: .destructive) {
                     showClearConfirm = true
                 }
@@ -57,50 +41,84 @@ struct SettingsView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .formStyle(.grouped)
         .confirmationDialog("Clear all saved API keys?", isPresented: $showClearConfirm, titleVisibility: .visible) {
             Button("Clear All Keys", role: .destructive) {
                 apiKeyState.clearAll()
-                anthropicKeyInput = ""
-                googleMapsKeyInput = ""
             }
         }
-        .formStyle(.grouped)
     }
+}
 
-    private func apiKeyRow(label: String, placeholder: String, isSet: Bool, input: Binding<String>) -> some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label)
-                if isSet && input.wrappedValue.isEmpty {
-                    Text("Key saved")
-                        .font(.caption)
-                        .foregroundStyle(.green)
+struct APIKeyField: View {
+    let placeholder: String
+    let isSet: Bool
+    let onSave: (String) throws -> Void
+
+    @State private var input = ""
+    @State private var isRevealed = false
+    @State private var errorMessage: String?
+    @State private var justSaved = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Group {
+                    if isRevealed {
+                        TextField(isSet ? "Update key..." : placeholder, text: $input)
+                    } else {
+                        SecureField(isSet ? "Update key..." : placeholder, text: $input)
+                    }
                 }
-            }
-            Spacer()
-            SecureField(isSet ? "Update key..." : placeholder, text: input)
-                .multilineTextAlignment(.trailing)
+                .multilineTextAlignment(.leading)
                 #if os(iOS)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 #endif
-                .frame(maxWidth: 220)
+
+                Button {
+                    isRevealed.toggle()
+                } label: {
+                    Image(systemName: isRevealed ? "eye.slash" : "eye")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            HStack {
+                if justSaved {
+                    Label("Saved", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else if isSet && input.isEmpty {
+                    Label("Key saved", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let error = errorMessage {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+                Spacer()
+                Button("Save") { save() }
+                    .disabled(input.isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
         }
+        .padding(.vertical, 4)
     }
 
     private func save() {
-        saveError = nil
+        errorMessage = nil
         do {
-            if !anthropicKeyInput.isEmpty {
-                try apiKeyState.saveAnthropicKey(anthropicKeyInput)
-                anthropicKeyInput = ""
-            }
-            if !googleMapsKeyInput.isEmpty {
-                try apiKeyState.saveGoogleMapsKey(googleMapsKeyInput)
-                googleMapsKeyInput = ""
+            try onSave(input)
+            input = ""
+            justSaved = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                justSaved = false
             }
         } catch {
-            saveError = error.localizedDescription
+            errorMessage = error.localizedDescription
         }
     }
 }
