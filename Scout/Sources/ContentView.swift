@@ -31,6 +31,8 @@ struct ContentView: View {
     @State private var selectedLocation: ScoutLocation?
     @State private var searchError: String?
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var liveCenter: CLLocationCoordinate2D = .init(latitude: 0, longitude: 0)
+    @State private var liveSpan: MKCoordinateSpan = .init(latitudeDelta: 0.1, longitudeDelta: 0.1)
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -152,25 +154,30 @@ struct ContentView: View {
             }
         }
         .mapStyle(.standard(elevation: .realistic))
+        #if os(macOS)
+        .scrollZoom(enabled: scrollToZoom) { multiplier, cursor in
+            let newLatDelta = max(min(liveSpan.latitudeDelta  * multiplier, 180), 0.001)
+            let newLngDelta = max(min(liveSpan.longitudeDelta * multiplier, 360), 0.001)
+
+            // Shift center so the point under the cursor stays fixed
+            // NSView y is bottom-up so fy > 0 = north, fx > 0 = east
+            let newLat = liveCenter.latitude  + cursor.y * liveSpan.latitudeDelta  * (1 - multiplier)
+            let newLng = liveCenter.longitude + cursor.x * liveSpan.longitudeDelta * (1 - multiplier)
+
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                cameraPosition = .region(MKCoordinateRegion(
+                    center: CLLocationCoordinate2D(latitude: newLat, longitude: newLng),
+                    span: MKCoordinateSpan(latitudeDelta: newLatDelta, longitudeDelta: newLngDelta)
+                ))
+            }
+        }
+        #endif
         .mapControls {
             MapCompass()
             MapScaleView()
             MapUserLocationButton()
-        }
-        .overlay {
-            #if os(macOS)
-            if scrollToZoom {
-                ScrollZoomOverlay(enabled: true) { multiplier in
-                    guard hasSavedRegion else { return }
-                    let newLatDelta = max(min(savedLatDelta * multiplier, 180), 0.001)
-                    let newLngDelta = max(min(savedLngDelta * multiplier, 360), 0.001)
-                    cameraPosition = .region(MKCoordinateRegion(
-                        center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
-                        span: MKCoordinateSpan(latitudeDelta: newLatDelta, longitudeDelta: newLngDelta)
-                    ))
-                }
-            }
-            #endif
         }
         .overlay(alignment: .bottomTrailing) {
             VStack(alignment: .trailing, spacing: 8) {
@@ -182,6 +189,10 @@ struct ContentView: View {
                 DebugPanelOverlay()
             }
             .padding()
+        }
+        .onMapCameraChange(frequency: .continuous) { context in
+            liveCenter = context.region.center
+            liveSpan   = context.region.span
         }
         .onMapCameraChange(frequency: .onEnd) { context in
             let region = context.region

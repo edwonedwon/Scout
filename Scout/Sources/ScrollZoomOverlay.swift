@@ -2,44 +2,68 @@
 import SwiftUI
 import AppKit
 
-/// Transparent overlay that intercepts trackpad scroll events and converts
-/// vertical delta to map zoom when the "scroll to zoom" setting is enabled.
-struct ScrollZoomOverlay: NSViewRepresentable {
+struct ScrollZoomModifier: ViewModifier {
     let enabled: Bool
-    /// Called with a span multiplier: <1 zooms in, >1 zooms out
-    let onZoom: (Double) -> Void
+    /// Called with zoom multiplier and cursor fraction offset from window center (x,y in -0.5...0.5)
+    let onZoom: (Double, CGPoint) -> Void
 
-    func makeNSView(context: Context) -> ScrollInterceptView {
-        ScrollInterceptView(enabled: enabled, onZoom: onZoom)
-    }
-
-    func updateNSView(_ nsView: ScrollInterceptView, context: Context) {
-        nsView.enabled = enabled
-        nsView.onZoom = onZoom
+    func body(content: Content) -> some View {
+        content.background(
+            ScrollZoomMonitorView(enabled: enabled, onZoom: onZoom)
+                .allowsHitTesting(false)
+        )
     }
 }
 
-class ScrollInterceptView: NSView {
-    var enabled: Bool
-    var onZoom: (Double) -> Void
+extension View {
+    func scrollZoom(enabled: Bool, onZoom: @escaping (Double, CGPoint) -> Void) -> some View {
+        modifier(ScrollZoomModifier(enabled: enabled, onZoom: onZoom))
+    }
+}
 
-    init(enabled: Bool, onZoom: @escaping (Double) -> Void) {
-        self.enabled = enabled
-        self.onZoom = onZoom
-        super.init(frame: .zero)
+private struct ScrollZoomMonitorView: NSViewRepresentable {
+    let enabled: Bool
+    let onZoom: (Double, CGPoint) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.update(enabled: enabled, view: nsView, onZoom: onZoom)
     }
 
-    required init?(coder: NSCoder) { fatalError() }
+    class Coordinator {
+        private var monitor: Any?
+        private var onZoom: ((Double, CGPoint) -> Void)?
 
-    override func scrollWheel(with event: NSEvent) {
-        guard enabled, event.scrollingDeltaY != 0 else {
-            super.scrollWheel(with: event)
-            return
+        func update(enabled: Bool, view: NSView, onZoom: @escaping (Double, CGPoint) -> Void) {
+            self.onZoom = onZoom
+            if enabled, monitor == nil {
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                    guard let self, event.scrollingDeltaY != 0 else { return event }
+
+                    let loc = event.locationInWindow
+                    guard let window = event.window,
+                          let cv = window.contentView else { return event }
+
+                    let bounds = cv.bounds
+                    let fx = (loc.x - bounds.width  / 2) / bounds.width
+                    let fy = (loc.y - bounds.height / 2) / bounds.height
+
+                    let sensitivity = 0.006
+                    let multiplier = pow(2.0, -event.scrollingDeltaY * sensitivity)
+                    self.onZoom?(multiplier, CGPoint(x: fx, y: fy))
+                    return nil
+                }
+            } else if !enabled, let m = monitor {
+                NSEvent.removeMonitor(m)
+                monitor = nil
+            }
         }
-        // Trackpad two-finger swipe: positive deltaY = fingers moved up = zoom in
-        let sensitivity = 0.008
-        let multiplier = pow(2.0, -event.scrollingDeltaY * sensitivity)
-        onZoom(multiplier)
+
+        deinit {
+            if let m = monitor { NSEvent.removeMonitor(m) }
+        }
     }
 }
 #endif
