@@ -24,36 +24,26 @@ struct ContentView: View {
     @AppStorage("map.lngDelta")    private var savedLngDelta: Double = .nan
     @AppStorage("map.scrollToZoom") private var scrollToZoom: Bool = false
 
+    @StateObject private var mapController = ScoutMapController()
+
     @State private var searchText = ""
     @State private var searchMode: SearchMode = .googleMaps
     @State private var isSearching = false
     @State private var locations: [ScoutLocation] = []
     @State private var selectedLocation: ScoutLocation?
     @State private var searchError: String?
-    @State private var cameraPosition: MapCameraPosition = .automatic
-    @State private var liveCenter: CLLocationCoordinate2D = .init(latitude: 0, longitude: 0)
-    @State private var liveSpan: MKCoordinateSpan = .init(latitudeDelta: 0.1, longitudeDelta: 0.1)
+    @State private var didInitialCenter = false
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
     }
 
-    private var initialCameraPosition: MapCameraPosition {
-        // Always open at current location if permitted — you're out scouting
-        if locationManager.isAuthorized {
-            return .userLocation(fallback: hasSavedRegion ? .region(MKCoordinateRegion(
-                center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
-                span: MKCoordinateSpan(latitudeDelta: savedLatDelta, longitudeDelta: savedLngDelta)
-            )) : .automatic)
-        }
-        // No permission — restore last known region or world view
-        if hasSavedRegion {
-            return .region(MKCoordinateRegion(
-                center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
-                span: MKCoordinateSpan(latitudeDelta: savedLatDelta, longitudeDelta: savedLngDelta)
-            ))
-        }
-        return .automatic
+    private var initialRegion: MKCoordinateRegion? {
+        guard hasSavedRegion else { return nil }
+        return MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: savedLat, longitude: savedLng),
+            span: MKCoordinateSpan(latitudeDelta: savedLatDelta, longitudeDelta: savedLngDelta)
+        )
     }
 
     var body: some View {
@@ -64,11 +54,23 @@ struct ContentView: View {
         }
         .navigationTitle("Scout")
         .onAppear {
-            cameraPosition = initialCameraPosition
             #if !DEBUG
             locationManager.requestIfNeeded()
             #endif
+            centerOnUserIfNeeded()
         }
+        .onChange(of: locationManager.currentLocation?.latitude) { _, _ in
+            centerOnUserIfNeeded()
+        }
+    }
+
+    /// Always open at the user's current location when permitted (you're out scouting).
+    private func centerOnUserIfNeeded() {
+        guard !didInitialCenter,
+              locationManager.isAuthorized,
+              let loc = locationManager.currentLocation else { return }
+        didInitialCenter = true
+        mapController.center(on: loc, animated: false)
     }
 
     // MARK: - Sidebar
@@ -146,60 +148,31 @@ struct ContentView: View {
     // MARK: - Map
 
     private var mapView: some View {
-        Map(position: $cameraPosition, selection: $selectedLocation) {
-            UserAnnotation()
-            ForEach(locations) { location in
-                Marker(location.name, coordinate: location.coordinate)
-                    .tag(location)
+        ScoutMapView(
+            selection: $selectedLocation,
+            locations: locations,
+            scrollToZoom: scrollToZoom,
+            initialRegion: initialRegion,
+            controller: mapController,
+            onRegionEnd: { region in
+                savedLat      = region.center.latitude
+                savedLng      = region.center.longitude
+                savedLatDelta = region.span.latitudeDelta
+                savedLngDelta = region.span.longitudeDelta
+            }
+        )
+        .ignoresSafeArea()
+        .overlay(alignment: .topTrailing) {
+            if let error = searchError {
+                Text(error)
+                    .padding(8)
+                    .background(.regularMaterial, in: .rect(cornerRadius: 8))
+                    .padding()
             }
         }
-        .mapStyle(.standard(elevation: .realistic))
-        #if os(macOS)
-        .scrollZoom(enabled: scrollToZoom) { multiplier, cursor in
-            let newLatDelta = max(min(liveSpan.latitudeDelta  * multiplier, 180), 0.001)
-            let newLngDelta = max(min(liveSpan.longitudeDelta * multiplier, 360), 0.001)
-
-            // Shift center so the point under the cursor stays fixed
-            // NSView y is bottom-up so fy > 0 = north, fx > 0 = east
-            let newLat = liveCenter.latitude  + cursor.y * liveSpan.latitudeDelta  * (1 - multiplier)
-            let newLng = liveCenter.longitude + cursor.x * liveSpan.longitudeDelta * (1 - multiplier)
-
-            var t = Transaction()
-            t.disablesAnimations = true
-            withTransaction(t) {
-                cameraPosition = .region(MKCoordinateRegion(
-                    center: CLLocationCoordinate2D(latitude: newLat, longitude: newLng),
-                    span: MKCoordinateSpan(latitudeDelta: newLatDelta, longitudeDelta: newLngDelta)
-                ))
-            }
-        }
-        #endif
-        .mapControls {
-            MapCompass()
-            MapScaleView()
-            MapUserLocationButton()
-        }
-        .overlay(alignment: .bottomTrailing) {
-            VStack(alignment: .trailing, spacing: 8) {
-                if let error = searchError {
-                    Text(error)
-                        .padding(8)
-                        .background(.regularMaterial, in: .rect(cornerRadius: 8))
-                }
-                DebugPanelOverlay()
-            }
-            .padding()
-        }
-        .onMapCameraChange(frequency: .continuous) { context in
-            liveCenter = context.region.center
-            liveSpan   = context.region.span
-        }
-        .onMapCameraChange(frequency: .onEnd) { context in
-            let region = context.region
-            savedLat      = region.center.latitude
-            savedLng      = region.center.longitude
-            savedLatDelta = region.span.latitudeDelta
-            savedLngDelta = region.span.longitudeDelta
+        .overlay(alignment: .bottomLeading) {
+            DebugPanelOverlay()
+                .padding()
         }
     }
 
@@ -245,26 +218,7 @@ struct ContentView: View {
         if let userCoord = locationManager.currentLocation {
             coords.append(userCoord)
         }
-        guard !coords.isEmpty else { return }
-
-        let lats = coords.map(\.latitude)
-        let lngs = coords.map(\.longitude)
-        let minLat = lats.min()!, maxLat = lats.max()!
-        let minLng = lngs.min()!, maxLng = lngs.max()!
-
-        let padding = 0.2
-        let latDelta = max((maxLat - minLat) * (1 + padding), 0.01)
-        let lngDelta = max((maxLng - minLng) * (1 + padding), 0.01)
-
-        withAnimation {
-            cameraPosition = .region(MKCoordinateRegion(
-                center: CLLocationCoordinate2D(
-                    latitude: (minLat + maxLat) / 2,
-                    longitude: (minLng + maxLng) / 2
-                ),
-                span: MKCoordinateSpan(latitudeDelta: latDelta, longitudeDelta: lngDelta)
-            ))
-        }
+        mapController.fit(coords, animated: true)
     }
 }
 
