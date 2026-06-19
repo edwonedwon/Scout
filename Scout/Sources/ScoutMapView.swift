@@ -275,25 +275,59 @@ struct ScoutMapView {
             parent.onRegionEnd(mapView.region)
         }
 
+        #if os(macOS)
+        private var activePopover: NSPopover?
+        #endif
+
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
-            if let annotation = view.annotation as? LocationAnnotation {
-                parent.selection = annotation.location
-            }
+            guard let ann = view.annotation as? LocationAnnotation else { return }
+            parent.selection = ann.location
+            #if os(macOS)
+            showPopover(for: ann.location, from: view)
+            #endif
         }
 
-        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
-            guard annotation is LocationAnnotation else { return nil } // keep default user-location dot
-            let id = "scoutMarker"
-            let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKMarkerAnnotationView)
-                ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: id)
-            view.annotation = annotation
-            view.canShowCallout = true
+        func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            parent.selection = nil
             #if os(macOS)
-            view.markerTintColor = .systemOrange
-            view.glyphImage = NSImage(systemSymbolName: "film.fill", accessibilityDescription: nil)
+            activePopover?.close()
+            activePopover = nil
+            #endif
+        }
+
+        #if os(macOS)
+        private func showPopover(for location: ScoutLocation, from view: MKAnnotationView) {
+            activePopover?.close()
+            let vc = NSHostingController(rootView: LocationCalloutView(location: location))
+            vc.view.frame.size = NSSize(width: 420, height: LocationCalloutView.height(for: location))
+            let pop = NSPopover()
+            pop.contentViewController = vc
+            pop.contentSize = vc.view.frame.size
+            pop.behavior = .transient
+            // .maxY = top edge of the annotation view → popover floats above the pin
+            pop.show(relativeTo: view.bounds, of: view, preferredEdge: .maxY)
+            activePopover = pop
+        }
+        #endif
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            guard let ann = annotation as? LocationAnnotation else { return nil }
+            let id = "scoutPin"
+            let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKPinAnnotationView)
+                ?? MKPinAnnotationView(annotation: annotation, reuseIdentifier: id)
+            view.annotation = annotation
+            view.pinTintColor = .systemRed
+            view.animatesDrop = false
+            #if os(macOS)
+            view.canShowCallout = false  // we use NSPopover instead
             #else
-            view.markerTintColor = .systemOrange
-            view.glyphImage = UIImage(systemName: "film.fill")
+            view.canShowCallout = true
+            let callout = LocationCalloutView(location: ann.location)
+            let size = CGSize(width: 420, height: LocationCalloutView.height(for: ann.location))
+            let host = UIHostingController(rootView: callout)
+            host.view.frame = CGRect(origin: .zero, size: size)
+            host.view.backgroundColor = .clear
+            view.detailCalloutAccessoryView = host.view
             #endif
             return view
         }

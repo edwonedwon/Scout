@@ -2,17 +2,6 @@ import SwiftUI
 import MapKit
 import ScoutKit
 
-enum SearchMode: String, CaseIterable {
-    case googleMaps = "Google Maps"
-    case aiScout = "AI Scout"
-
-    var placeholder: String {
-        switch self {
-        case .googleMaps: "Search Google Maps..."
-        case .aiScout: "Describe what you're looking for..."
-        }
-    }
-}
 
 struct ContentView: View {
     @StateObject private var locationManager = LocationManager.shared
@@ -28,8 +17,8 @@ struct ContentView: View {
     @StateObject private var mapController = ScoutMapController()
 
     @State private var searchText = ""
-    @State private var searchMode: SearchMode = .googleMaps
     @State private var isSearching = false
+    @State private var isAISearching = false
     @State private var locations: [ScoutLocation] = []
     @State private var selectedLocation: ScoutLocation?
     @State private var searchError: String?
@@ -49,12 +38,16 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } detail: {
+        HStack(spacing: 0) {
+            googlePanel
+                .frame(width: 280)
+            Divider()
             mapView
+            Divider()
+            aiPanel
+                .frame(width: 300)
         }
-        .navigationTitle("Scout")
+        .ignoresSafeArea()
         .onAppear {
             #if !DEBUG
             locationManager.requestIfNeeded()
@@ -75,90 +68,70 @@ struct ContentView: View {
         mapController.center(on: loc, animated: false)
     }
 
-    // MARK: - Sidebar
+    // MARK: - Google Maps panel (left)
 
-    private var sidebar: some View {
+    private var googlePanel: some View {
         VStack(spacing: 0) {
-            modePicker
-            Divider()
-            if searchMode == .aiScout {
-                AIChatView(
-                    messages: $chatMessages,
-                    isSearching: isSearching,
-                    onSend: { text in Task { await runSearch(query: text) } }
-                )
-            } else {
-                googleSearchBar
-                locationList
-            }
-        }
-        .navigationTitle("Scout")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) { settingsButton }
-        }
-        #endif
-    }
-
-    private var modePicker: some View {
-        Picker("Search Mode", selection: $searchMode) {
-            ForEach(SearchMode.allCases, id: \.self) { mode in
-                Text(mode.rawValue).tag(mode)
-            }
-        }
-        .pickerStyle(.segmented)
-        .padding(.horizontal)
-        .padding(.vertical, 10)
-        .onChange(of: searchMode) { _, _ in
-            searchText = ""
-            locations = []
-        }
-    }
-
-    private var googleSearchBar: some View {
-        HStack {
-            TextField(searchMode.placeholder, text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { Task { await runSearch() } }
-
-            Button {
-                Task { await runSearch() }
-            } label: {
-                if isSearching {
+            panelHeader("Locations") {
+                if isSearching && !isAISearching {
                     ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "magnifyingglass")
                 }
             }
-            .disabled(searchText.isEmpty || isSearching)
-        }
-        .padding(.horizontal)
-        .padding(.bottom, 8)
-    }
+            HStack {
+                TextField("Search Google Maps…", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { Task { await runSearch() } }
+                Button { Task { await runSearch() } } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .disabled(searchText.isEmpty || isSearching)
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
 
-    private var locationList: some View {
-        List(locations, selection: $selectedLocation) { location in
-            LocationRow(location: location)
-                .tag(location)
-        }
-        .overlay {
-            if locations.isEmpty && !isSearching {
-                ContentUnavailableView(
-                    "No Locations",
-                    systemImage: "mappin.slash",
-                    description: Text("Search for locations above to get started.")
-                )
+            Divider()
+
+            List(locations, selection: $selectedLocation) { location in
+                LocationRow(location: location)
+                    .tag(location)
+            }
+            .overlay {
+                if locations.isEmpty {
+                    ContentUnavailableView(
+                        "No Locations",
+                        systemImage: "mappin.slash",
+                        description: Text("Search above or use AI Scout")
+                    )
+                }
             }
         }
     }
 
-    private var settingsButton: some View {
-        NavigationLink {
-            SettingsView()
-        } label: {
-            Image(systemName: "gear")
+    // MARK: - AI Scout panel (right)
+
+    private var aiPanel: some View {
+        VStack(spacing: 0) {
+            panelHeader("AI Scout") {
+                EmptyView()
+            }
+            Divider()
+            AIChatView(
+                messages: $chatMessages,
+                isSearching: isAISearching,
+                onSend: { text in Task { await runAISearch(query: text) } }
+            )
         }
+    }
+
+    private func panelHeader<T: View>(_ title: String, @ViewBuilder trailing: () -> T) -> some View {
+        HStack {
+            Text(title)
+                .font(.headline)
+            Spacer()
+            trailing()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Map
@@ -195,53 +168,54 @@ struct ContentView: View {
     // MARK: - Search
 
     @MainActor
-    private func runSearch(query: String? = nil) async {
-        let q = query ?? searchText
-        guard !q.isEmpty else { return }
+    private func runSearch() async {
+        guard !searchText.isEmpty else { return }
         isSearching = true
         searchError = nil
         locations = []
-
         do {
-            switch searchMode {
-            case .googleMaps:
-                dlog("Starting Google Maps search: \"\(q)\"", level: .info, tag: "Search")
-                let region: GooglePlacesService.MapRegion? = hasSavedRegion
-                    ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
-                    : nil
-                let results = try await GooglePlacesService.shared.search(query: q, region: region)
-                locations = results
-                selectedLocation = nil
-                dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
-
-            case .aiScout:
-                chatMessages.append(.user(text: q))
-                let aiRegion: GooglePlacesService.MapRegion? = (aiConstrainToMap && hasSavedRegion)
-                    ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
-                    : nil
-                try await ClaudeService.shared.searchLocations(
-                    query: q,
-                    mapRegion: aiRegion,
-                    onLocation: { location in
-                        Task { @MainActor in self.locations.append(location) }
-                    },
-                    onStatus: { status in
-                        Task { @MainActor in self.chatMessages.append(.status(text: status)) }
-                    }
-                )
-                chatMessages.append(.result(count: locations.count))
-            }
+            dlog("Google Maps search: \"\(searchText)\"", level: .info, tag: "Search")
+            let region: GooglePlacesService.MapRegion? = hasSavedRegion
+                ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
+                : nil
+            let results = try await GooglePlacesService.shared.search(query: searchText, region: region)
+            locations = results
+            selectedLocation = nil
+            dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
         } catch {
             searchError = error.localizedDescription
-            if searchMode == .aiScout {
-                chatMessages.append(.error(text: error.localizedDescription))
-            }
         }
-
         isSearching = false
-        if !locations.isEmpty {
-            fitMapToResults()
+        if !locations.isEmpty { fitMapToResults() }
+    }
+
+    @MainActor
+    private func runAISearch(query: String) async {
+        guard !query.isEmpty else { return }
+        isAISearching = true
+        searchError = nil
+        locations = []
+        chatMessages.append(.user(text: query))
+        do {
+            let aiRegion: GooglePlacesService.MapRegion? = (aiConstrainToMap && hasSavedRegion)
+                ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
+                : nil
+            try await ClaudeService.shared.searchLocations(
+                query: query,
+                mapRegion: aiRegion,
+                onLocation: { location in
+                    Task { @MainActor in self.locations.append(location) }
+                },
+                onStatus: { status in
+                    Task { @MainActor in self.chatMessages.append(.status(text: status)) }
+                }
+            )
+            chatMessages.append(.result(count: locations.count))
+        } catch {
+            chatMessages.append(.error(text: error.localizedDescription))
         }
+        isAISearching = false
+        if !locations.isEmpty { fitMapToResults() }
     }
 
     private func fitMapToResults() {
