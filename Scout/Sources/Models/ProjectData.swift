@@ -26,8 +26,14 @@ final class LocationListData {
     var name: String
     var colorHex: String
     var createdAt: Date
+    var sortOrder: Int = 0
     @Relationship(deleteRule: .cascade) var pins: [PinnedLocationData] = []
     var project: ProjectData?
+
+    // Self-referential nesting: a list may contain child lists, to any depth.
+    var parentList: LocationListData?
+    @Relationship(deleteRule: .cascade, inverse: \LocationListData.parentList)
+    var childLists: [LocationListData] = []
 
     init(name: String, colorHex: String = LocationListData.palette[0]) {
         self.name = name

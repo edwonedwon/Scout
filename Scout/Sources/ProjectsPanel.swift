@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 
 final class PinDragState: ObservableObject {
     var draggedPin: PinnedLocationData?
+    var draggedList: LocationListData?
 }
 
 // MARK: - Projects panel
@@ -75,9 +76,10 @@ struct ProjectsPanel: View {
             ) { name in
                 let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
                 let list = LocationListData(name: name, colorHex: colorHex)
-                list.project = project
-                project.lists.append(list)
+                let topCount = project.lists.filter { $0.parentList == nil }.count
+                list.sortOrder = topCount
                 modelContext.insert(list)
+                list.project = project   // inverse adds it to project.lists
                 addingListTo = nil
             }
         }
@@ -89,12 +91,27 @@ struct ProjectsPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             projectHeader(project)
 
-            let sorted = project.lists.sorted(by: { $0.createdAt < $1.createdAt })
-            ForEach(sorted) { list in
+            let topLevel = project.lists
+                .filter { $0.parentList == nil }
+                .sorted {
+                    $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder
+                                                 : $0.createdAt < $1.createdAt
+                }
+            ForEach(topLevel) { list in
                 ListCard(list: list, activeList: $activeList, modelContext: modelContext,
                          showPinPhotos: showPinPhotos, dragState: dragState,
                          onFitToList: onFitToList, onPanToPin: onPanToPin)
             }
+
+            // Drop a list here to move it to the end of the top level
+            Color.clear
+                .frame(height: 8)
+                .onDrop(of: [.text], isTargeted: nil) { _ in
+                    guard let dragged = dragState.draggedList else { return false }
+                    moveListToTopLevelEnd(dragged, in: project)
+                    dragState.draggedList = nil
+                    return true
+                }
 
             Button {
                 newListName = ""
@@ -109,6 +126,19 @@ struct ProjectsPanel: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    /// Detach a list from any parent and place it at the end of the project's top level.
+    private func moveListToTopLevelEnd(_ dragged: LocationListData, in project: ProjectData) {
+        // Guard against making a list top-level inside its own subtree (no-op concern only)
+        dragged.parentList = nil
+        dragged.project = project
+        let siblings = project.lists
+            .filter { $0.parentList == nil && $0.persistentModelID != dragged.persistentModelID }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        var arr = siblings
+        arr.append(dragged)
+        for (i, l) in arr.enumerated() { l.sortOrder = i }
     }
 
     private func projectHeader(_ project: ProjectData) -> some View {
@@ -171,7 +201,8 @@ private struct ListCard: View {
     var onPanToPin: ((CLLocationCoordinate2D) -> Void)? = nil
 
     @State private var isTargeted = false         // ScoutLocation drop highlight
-    @State private var isPinDropTarget = false    // PinnedPin drop highlight (move to list)
+    @State private var isPinDropTarget = false    // PinnedPin / nest drop highlight
+    @State private var isReorderTarget = false    // list-reorder gap highlight
     @State private var insertBeforeID: PersistentIdentifier? = nil
     @State private var isExpanded = true
     @State private var isEditingName = false
@@ -182,7 +213,62 @@ private struct ListCard: View {
     private var listColor: Color { Color(hexString: list.colorHex) }
     private var isHighlighted: Bool { isTargeted || isPinDropTarget }
 
+    private var sortedChildren: [LocationListData] {
+        list.childLists.sorted {
+            $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder
+                                         : $0.createdAt < $1.createdAt
+        }
+    }
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            reorderZone   // drop a list here to place it before this one
+            card
+            if !sortedChildren.isEmpty {
+                childListsView
+            }
+        }
+    }
+
+    /// Thin gap above the card that accepts a dragged list to reorder it before this one.
+    private var reorderZone: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(isReorderTarget ? listColor : Color.clear)
+            .frame(height: isReorderTarget ? 4 : 6)
+            .onDrop(of: [.text], isTargeted: $isReorderTarget) { _ in
+                guard let dragged = dragState.draggedList else { return false }
+                reorderListBefore(dragged, target: list)
+                dragState.draggedList = nil
+                return true
+            }
+    }
+
+    @ViewBuilder
+    private var childListsView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(sortedChildren) { child in
+                ListCard(list: child, activeList: $activeList, modelContext: modelContext,
+                         showPinPhotos: showPinPhotos, dragState: dragState,
+                         onFitToList: onFitToList, onPanToPin: onPanToPin)
+            }
+            // Drop a list here to append it at the end of this sub-level
+            Color.clear
+                .frame(height: 8)
+                .onDrop(of: [.text], isTargeted: nil) { _ in
+                    guard let dragged = dragState.draggedList else { return false }
+                    nestList(dragged, into: list, atEnd: true)
+                    dragState.draggedList = nil
+                    return true
+                }
+        }
+        .padding(.leading, 16)
+        .overlay(alignment: .leading) {
+            // Hierarchy guide line
+            listColor.opacity(0.25).frame(width: 1.5).padding(.vertical, 2)
+        }
+    }
+
+    private var card: some View {
         VStack(spacing: 0) {
             cardHeader
             if isExpanded, !list.pins.isEmpty {
@@ -213,6 +299,13 @@ private struct ListCard: View {
             Button { beginEditing() } label: {
                 Label("Rename", systemImage: "pencil")
             }
+            if list.parentList != nil {
+                Button {
+                    if let project = list.project { unnest(list, in: project) }
+                } label: {
+                    Label("Move to Top Level", systemImage: "arrow.up.left")
+                }
+            }
             Button(role: .destructive) {
                 if isActive { activeList = nil }
                 modelContext.delete(list)
@@ -224,6 +317,15 @@ private struct ListCard: View {
 
     private var cardHeader: some View {
         HStack(spacing: 8) {
+            // Drag handle for reordering / nesting the list itself
+            Image(systemName: "line.3.horizontal")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .onDrag {
+                    dragState.draggedList = list
+                    return NSItemProvider(object: "list:\(list.name)" as NSString)
+                }
+
             Button {
                 withAnimation(.spring(duration: 0.2)) {
                     activeList = isActive ? nil : list
@@ -291,16 +393,23 @@ private struct ListCard: View {
             guard !isEditingName else { return }
             withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
         }
-        // Drop a pin onto the list title to move it here (works for empty lists too)
+        // Drop onto the list title: a pin moves into this list; a list nests inside it.
         .onDrop(of: [.text], isTargeted: $isPinDropTarget) { _ in
-            guard let dragged = dragState.draggedPin else { return false }
-            if dragged.list?.persistentModelID != list.persistentModelID {
-                movePin(dragged, toList: list)
-            } else {
-                appendPin(dragged, in: sortedPins())
+            if let dragged = dragState.draggedPin {
+                if dragged.list?.persistentModelID != list.persistentModelID {
+                    movePin(dragged, toList: list)
+                } else {
+                    appendPin(dragged, in: sortedPins())
+                }
+                dragState.draggedPin = nil
+                return true
             }
-            dragState.draggedPin = nil
-            return true
+            if let draggedList = dragState.draggedList {
+                let ok = nestList(draggedList, into: list, atEnd: true)
+                dragState.draggedList = nil
+                return ok
+            }
+            return false
         }
     }
 
@@ -471,6 +580,74 @@ private struct ListCard: View {
             pins.append(pin)
         }
         for (i, p) in pins.enumerated() { p.sortOrder = i }
+    }
+
+    // MARK: - List move / nest helpers
+
+    /// True if `maybeAncestor` is `node` or any of its ancestors — used to block cycles.
+    private func isAncestor(_ maybeAncestor: LocationListData, of node: LocationListData) -> Bool {
+        var cursor: LocationListData? = node
+        while let c = cursor {
+            if c.persistentModelID == maybeAncestor.persistentModelID { return true }
+            cursor = c.parentList
+        }
+        return false
+    }
+
+    /// Nest `dragged` inside `target` (target becomes its parent).
+    @discardableResult
+    private func nestList(_ dragged: LocationListData, into target: LocationListData, atEnd: Bool) -> Bool {
+        guard dragged.persistentModelID != target.persistentModelID else { return false }
+        // Can't nest a list into its own descendant.
+        guard !isAncestor(dragged, of: target) else { return false }
+
+        dragged.parentList = target           // inverse maintains childLists arrays
+        dragged.project = target.project
+        let siblings = target.childLists
+            .filter { $0.persistentModelID != dragged.persistentModelID }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        var arr = siblings
+        arr.append(dragged)
+        for (i, l) in arr.enumerated() { l.sortOrder = i }
+        return true
+    }
+
+    /// Place `dragged` immediately before `target`, as a sibling at target's level.
+    private func reorderListBefore(_ dragged: LocationListData, target: LocationListData) {
+        guard dragged.persistentModelID != target.persistentModelID else { return }
+        // Can't move a list to sit beside something inside its own subtree.
+        guard !isAncestor(dragged, of: target) else { return }
+
+        dragged.parentList = target.parentList
+        dragged.project = target.project
+
+        let level: [LocationListData]
+        if let parent = target.parentList {
+            level = parent.childLists
+        } else {
+            level = target.project?.lists.filter { $0.parentList == nil } ?? []
+        }
+        var arr = level
+            .filter { $0.persistentModelID != dragged.persistentModelID }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        if let idx = arr.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) {
+            arr.insert(dragged, at: idx)
+        } else {
+            arr.append(dragged)
+        }
+        for (i, l) in arr.enumerated() { l.sortOrder = i }
+    }
+
+    /// Promote a nested list back to the project's top level (end).
+    private func unnest(_ dragged: LocationListData, in project: ProjectData) {
+        dragged.parentList = nil
+        dragged.project = project
+        let siblings = project.lists
+            .filter { $0.parentList == nil && $0.persistentModelID != dragged.persistentModelID }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        var arr = siblings
+        arr.append(dragged)
+        for (i, l) in arr.enumerated() { l.sortOrder = i }
     }
 }
 

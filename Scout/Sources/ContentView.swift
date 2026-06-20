@@ -391,6 +391,8 @@ struct ContentView: View {
             HStack(alignment: .bottom, spacing: 8) {
                 layersButton
                 boundaryButton
+                lassoControls
+                regionSearchOverlay
                 if cyclingProvider == .cyclOSM {
                     cyclOSMLegend
                         .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
@@ -398,12 +400,6 @@ struct ContentView: View {
             }
             .padding(16)
             .animation(.easeInOut(duration: 0.2), value: cyclingProvider == .cyclOSM)
-        }
-        .overlay(alignment: .leading) {
-            VStack(spacing: 8) {
-                regionSearchOverlay
-                lassoControls
-            }
         }
     }
 
