@@ -15,6 +15,10 @@ struct ContentView: View {
     @AppStorage("aiScout.constrainToMap") private var aiConstrainToMap: Bool = true
 
     @StateObject private var mapController = ScoutMapController()
+    @StateObject private var searchArea = SearchAreaManager.shared
+    @StateObject private var photoViewer = PhotoViewerState.shared
+
+    @AppStorage("search.mode") private var searchMode: SearchMode = .google
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -68,7 +72,7 @@ struct ContentView: View {
         mapController.center(on: loc, animated: false)
     }
 
-    // MARK: - Google Maps panel (left)
+    // MARK: - Left search panel
 
     private var googlePanel: some View {
         VStack(spacing: 0) {
@@ -77,8 +81,22 @@ struct ContentView: View {
                     ProgressView().controlSize(.small)
                 }
             }
+
+            // Source toggle
+            Picker("Search source", selection: $searchMode) {
+                ForEach(SearchMode.allCases) { mode in
+                    Label(mode.label, systemImage: mode.icon).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
+            .onChange(of: searchMode) { _, _ in locations = []; selectedLocation = nil }
+
+            // Search bar
             HStack {
-                TextField("Search Google Maps…", text: $searchText)
+                TextField(searchMode.placeholder, text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { Task { await runSearch() } }
                 Button { Task { await runSearch() } } label: {
@@ -98,9 +116,9 @@ struct ContentView: View {
             .overlay {
                 if locations.isEmpty {
                     ContentUnavailableView(
-                        "No Locations",
-                        systemImage: "mappin.slash",
-                        description: Text("Search above or use AI Scout")
+                        "No Results",
+                        systemImage: searchMode.emptyIcon,
+                        description: Text(searchMode.emptyHint)
                     )
                 }
             }
@@ -118,7 +136,9 @@ struct ContentView: View {
             AIChatView(
                 messages: $chatMessages,
                 isSearching: isAISearching,
-                onSend: { text in Task { await runAISearch(query: text) } }
+                onSend: { text, model, thinking in
+                    Task { await runAISearch(query: text, model: model, extendedThinking: thinking) }
+                }
             )
         }
     }
@@ -148,7 +168,10 @@ struct ContentView: View {
                 savedLng      = region.center.longitude
                 savedLatDelta = region.span.latitudeDelta
                 savedLngDelta = region.span.longitudeDelta
-            }
+            },
+            isDrawingMode: searchArea.isDrawing,
+            searchPolygon: searchArea.polygon,
+            onPolygonComplete: { coords in searchArea.setPolygon(coords) }
         )
         .ignoresSafeArea()
         .overlay(alignment: .topTrailing) {
@@ -163,22 +186,74 @@ struct ContentView: View {
             DebugPanelOverlay()
                 .padding()
         }
+        .overlay(alignment: .bottomTrailing) {
+            lassoControls
+        }
+        .overlay {
+            if photoViewer.isVisible {
+                PhotoViewerOverlay()
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
+            }
+        }
+    }
+
+    private var lassoControls: some View {
+        VStack(spacing: 8) {
+            if searchArea.isActive {
+                Button(action: searchArea.clear) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .symbolRenderingMode(.multicolor)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search area")
+                .transition(.scale.combined(with: .opacity))
+            }
+            Button {
+                if searchArea.isDrawing {
+                    searchArea.isDrawing = false
+                } else {
+                    searchArea.isDrawing = true
+                }
+            } label: {
+                Image(systemName: searchArea.isDrawing ? "xmark.circle.fill" : "lasso")
+                    .font(.title2)
+                    .foregroundStyle(searchArea.isDrawing ? .red : searchArea.isActive ? .blue : .primary)
+                    .frame(width: 36, height: 36)
+                    .background(.regularMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help(searchArea.isDrawing ? "Cancel" : searchArea.isActive ? "Redraw search area" : "Draw search area")
+        }
+        .padding(16)
+        .animation(.spring(duration: 0.2), value: searchArea.isActive)
     }
 
     // MARK: - Search
 
     @MainActor
     private func runSearch() async {
+        switch searchMode {
+        case .google:    await runGoogleSearch()
+        case .flickr:    await runFlickrSearch()
+        case .wikimedia: await runWikimediaSearch()
+        }
+    }
+
+    @MainActor
+    private func runGoogleSearch() async {
         guard !searchText.isEmpty else { return }
         isSearching = true
         searchError = nil
         locations = []
         do {
             dlog("Google Maps search: \"\(searchText)\"", level: .info, tag: "Search")
-            let region: GooglePlacesService.MapRegion? = hasSavedRegion
-                ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
-                : nil
-            let results = try await GooglePlacesService.shared.search(query: searchText, region: region)
+            let region: GooglePlacesService.MapRegion? =
+                searchArea.mapRegion ??
+                (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
+            var results = try await GooglePlacesService.shared.search(query: searchText, region: region)
+            if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
             locations = results
             selectedLocation = nil
             dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
@@ -190,21 +265,77 @@ struct ContentView: View {
     }
 
     @MainActor
-    private func runAISearch(query: String) async {
+    private func runFlickrSearch() async {
+        guard !searchText.isEmpty else { return }
+        isSearching = true
+        searchError = nil
+        locations = []
+        do {
+            dlog("Flickr search: \"\(searchText)\"", level: .info, tag: "Search")
+            let region: GooglePlacesService.MapRegion? =
+                searchArea.mapRegion ??
+                (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
+            var results = try await FlickrService.shared.search(query: searchText, region: region)
+            if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
+            locations = results
+            selectedLocation = nil
+            dlog("Flickr returned \(results.count) results", level: .success, tag: "Search")
+        } catch {
+            searchError = error.localizedDescription
+        }
+        isSearching = false
+        if !locations.isEmpty { fitMapToResults() }
+    }
+
+    @MainActor
+    private func runWikimediaSearch() async {
+        guard !searchText.isEmpty else { return }
+        isSearching = true
+        searchError = nil
+        locations = []
+        do {
+            dlog("Wikimedia search: \"\(searchText)\"", level: .info, tag: "Search")
+            let region: GooglePlacesService.MapRegion? =
+                searchArea.mapRegion ??
+                (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
+            var results = try await WikimediaService.shared.search(query: searchText, region: region)
+            if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
+            locations = results
+            selectedLocation = nil
+            dlog("Wikimedia returned \(results.count) results", level: .success, tag: "Search")
+        } catch {
+            searchError = error.localizedDescription
+        }
+        isSearching = false
+        if !locations.isEmpty { fitMapToResults() }
+    }
+
+    @MainActor
+    private func runAISearch(query: String, model: ClaudeModel = .opus, extendedThinking: Bool = false) async {
         guard !query.isEmpty else { return }
         isAISearching = true
         searchError = nil
         locations = []
         chatMessages.append(.user(text: query))
         do {
-            let aiRegion: GooglePlacesService.MapRegion? = (aiConstrainToMap && hasSavedRegion)
-                ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
-                : nil
+            let aiRegion: GooglePlacesService.MapRegion?
+            if searchArea.isActive {
+                aiRegion = searchArea.mapRegion
+            } else if aiConstrainToMap && hasSavedRegion {
+                aiRegion = .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta)
+            } else {
+                aiRegion = nil
+            }
             try await ClaudeService.shared.searchLocations(
                 query: query,
+                model: model.rawValue,
+                extendedThinking: extendedThinking,
                 mapRegion: aiRegion,
                 onLocation: { location in
-                    Task { @MainActor in self.locations.append(location) }
+                    Task { @MainActor in
+                        if self.searchArea.isActive && !self.searchArea.contains(location.coordinate) { return }
+                        self.locations.append(location)
+                    }
                 },
                 onStatus: { status in
                     Task { @MainActor in self.chatMessages.append(.status(text: status)) }
@@ -216,6 +347,11 @@ struct ContentView: View {
         }
         isAISearching = false
         if !locations.isEmpty { fitMapToResults() }
+        // Refresh cost display now that we've consumed tokens
+        let adminKey = APIKeyState.shared.anthropicAdminKey
+        if !adminKey.isEmpty {
+            await UsageCostService.shared.refresh(adminKey: adminKey)
+        }
     }
 
     private func fitMapToResults() {
@@ -309,6 +445,56 @@ struct LocationRow: View {
         case .shortlisted: .orange
         case .approved: .green
         case .rejected: .red
+        }
+    }
+}
+
+// MARK: - Search mode
+
+enum SearchMode: String, CaseIterable, Identifiable {
+    case google
+    case flickr
+    case wikimedia
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .google:    "Google"
+        case .flickr:    "Flickr"
+        case .wikimedia: "Wiki"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .google:    "map"
+        case .flickr:    "camera"
+        case .wikimedia: "globe"
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .google:    "Search Google Maps…"
+        case .flickr:    "Search Flickr photos…"
+        case .wikimedia: "Search Wikimedia Commons…"
+        }
+    }
+
+    var emptyHint: String {
+        switch self {
+        case .google:    "Search above or use AI Scout"
+        case .flickr:    "Search for geotagged Flickr photos"
+        case .wikimedia: "Search for geotagged Commons photos"
+        }
+    }
+
+    var emptyIcon: String {
+        switch self {
+        case .google:    "mappin.slash"
+        case .flickr:    "camera"
+        case .wikimedia: "globe"
         }
     }
 }

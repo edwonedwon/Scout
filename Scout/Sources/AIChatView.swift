@@ -1,6 +1,40 @@
 import SwiftUI
 import ScoutKit
 
+// MARK: - Model options
+
+enum ClaudeModel: String, CaseIterable, Identifiable {
+    case opus    = "claude-opus-4-8"
+    case sonnet  = "claude-sonnet-4-6"
+    case haiku   = "claude-haiku-4-5-20251001"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .opus:   "Opus 4.8"
+        case .sonnet: "Sonnet 4.6"
+        case .haiku:  "Haiku 4.5"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .opus:   "Most capable"
+        case .sonnet: "Balanced"
+        case .haiku:  "Fastest"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .opus:   "sparkles"
+        case .sonnet: "bolt"
+        case .haiku:  "hare"
+        }
+    }
+}
+
 // MARK: - Message model
 
 enum ChatMessage: Identifiable {
@@ -24,17 +58,31 @@ enum ChatMessage: Identifiable {
 struct AIChatView: View {
     @Binding var messages: [ChatMessage]
     var isSearching: Bool
-    var onSend: (String) -> Void
+    var onSend: (String, ClaudeModel, Bool) -> Void
 
     @AppStorage("aiScout.constrainToMap") var constrainToMap = true
+    @AppStorage("aiScout.model") private var modelRaw = ClaudeModel.opus.rawValue
+    @AppStorage("aiScout.extendedThinking") private var extendedThinking = false
     @State private var inputText = ""
     @FocusState private var focused: Bool
+    @EnvironmentObject private var apiKeyState: APIKeyState
+    @ObservedObject private var costService = UsageCostService.shared
+
+    private var selectedModel: ClaudeModel {
+        ClaudeModel(rawValue: modelRaw) ?? .opus
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             messageList
             Divider()
             inputBar
+            if apiKeyState.anthropicAdminKeyIsSet {
+                costFooter
+            }
+        }
+        .task {
+            await costService.refresh(adminKey: apiKeyState.anthropicAdminKey)
         }
     }
 
@@ -156,54 +204,142 @@ struct AIChatView: View {
     // MARK: Input bar
 
     private var inputBar: some View {
-        VStack(spacing: 6) {
-            Toggle(isOn: $constrainToMap) {
-                Label("Limit to map area", systemImage: "map")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .toggleStyle(.checkbox)
-            .padding(.horizontal, 12)
-
+        VStack(spacing: 0) {
+            // Text input + send button
             HStack(alignment: .bottom, spacing: 8) {
-            ZStack(alignment: .topLeading) {
-                if inputText.isEmpty {
-                    Text("Describe what you're looking for…")
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 8)
-                        .padding(.leading, 4)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $inputText)
-                    .focused($focused)
-                    .frame(minHeight: 60, maxHeight: 140)
-                    .scrollContentBackground(.hidden)
-                    .onKeyPress(.return) {
-                        guard canSend else { return .ignored }
-                        send()
-                        return .handled
+                ZStack(alignment: .topLeading) {
+                    if inputText.isEmpty {
+                        Text("Describe what you're looking for…")
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 8)
+                            .padding(.leading, 4)
+                            .allowsHitTesting(false)
                     }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(.background.secondary, in: .rect(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(.separator, lineWidth: 1)
-            )
+                    TextEditor(text: $inputText)
+                        .focused($focused)
+                        .frame(minHeight: 60, maxHeight: 140)
+                        .scrollContentBackground(.hidden)
+                        .onKeyPress(.return) {
+                            guard canSend else { return .ignored }
+                            send()
+                            return .handled
+                        }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(.background.secondary, in: .rect(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(.separator, lineWidth: 1))
 
-            Button(action: send) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.title)
-                    .foregroundStyle(canSend ? Color.blue : Color.secondary.opacity(0.4))
+                Button(action: send) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title)
+                        .foregroundStyle(canSend ? Color.blue : Color.secondary.opacity(0.4))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .padding(.bottom, 6)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+
+            // Options row
+            HStack(spacing: 0) {
+                // Model picker
+                Menu {
+                    ForEach(ClaudeModel.allCases) { model in
+                        Button {
+                            modelRaw = model.rawValue
+                        } label: {
+                            HStack {
+                                Image(systemName: model.symbolName)
+                                VStack(alignment: .leading) {
+                                    Text(model.displayName)
+                                    Text(model.description).foregroundStyle(.secondary)
+                                }
+                                if model == selectedModel {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: selectedModel.symbolName)
+                            .font(.caption)
+                        Text(selectedModel.displayName)
+                            .font(.caption.weight(.medium))
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8, weight: .medium))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.quaternary, in: .capsule)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                // Extended thinking toggle
+                if selectedModel == .opus {
+                    Toggle(isOn: $extendedThinking) {
+                        Label("Think", systemImage: "brain")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(extendedThinking ? .blue : .secondary)
+                    }
+                    .toggleStyle(.button)
+                    .controlSize(.mini)
+                    .tint(.blue)
+                }
+
+                // Constrain to map toggle
+                Toggle(isOn: $constrainToMap) {
+                    Label("Map area", systemImage: "map")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(constrainToMap ? .blue : .secondary)
+                }
+                .toggleStyle(.button)
+                .controlSize(.mini)
+                .tint(.blue)
+                .padding(.leading, 4)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+    }
+
+    // MARK: Cost footer
+
+    private var costFooter: some View {
+        HStack(spacing: 6) {
+            if costService.isLoading {
+                ProgressView().controlSize(.mini)
+                Text("Updating…")
+            } else if let cost = costService.monthlyCost {
+                Image(systemName: "dollarsign.circle")
+                Text(cost, format: .currency(code: "USD"))
+                    .fontWeight(.medium)
+                Text("this month")
+            } else if costService.error != nil {
+                Image(systemName: "exclamationmark.circle")
+                    .foregroundStyle(.orange)
+                Text("Couldn't load cost")
+            }
+            Spacer()
+            Button {
+                Task { await costService.refresh(adminKey: apiKeyState.anthropicAdminKey) }
+            } label: {
+                Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .disabled(!canSend)
-            .padding(.bottom, 6)
+            .disabled(costService.isLoading)
         }
-            .padding(.horizontal, 12)
-        }
-        .padding(.vertical, 10)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.background.secondary)
     }
 
     private var canSend: Bool {
@@ -215,6 +351,6 @@ struct AIChatView: View {
         guard !text.isEmpty, !isSearching else { return }
         inputText = ""
         focused = false
-        onSend(text)
+        onSend(text, selectedModel, extendedThinking)
     }
 }

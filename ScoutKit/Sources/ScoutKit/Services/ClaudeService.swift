@@ -5,7 +5,8 @@ public actor ClaudeService {
     public static let shared = ClaudeService()
 
     private let baseURL = URL(string: "https://api.anthropic.com/v1/messages")!
-    private let model = "claude-opus-4-8"
+    // Model is passed per-request; this is the fallback default
+    private let defaultModel = "claude-opus-4-8"
     private let anthropicVersion = "2023-06-01"
 
     private var apiKey: String? {
@@ -22,6 +23,8 @@ public actor ClaudeService {
     /// Claude uses tool calls to fan out to Google Places, web search, etc.
     public func searchLocations(
         query: String,
+        model: String? = nil,
+        extendedThinking: Bool = false,
         mapRegion: GooglePlacesService.MapRegion? = nil,
         onLocation: @escaping (ScoutLocation) -> Void,
         onStatus: @escaping (String) -> Void = { _ in }
@@ -30,21 +33,21 @@ public actor ClaudeService {
             dlog("No Anthropic API key set", level: .error, tag: "Claude")
             throw ClaudeError.missingAPIKey
         }
-        dlog("Starting AI Scout search: \"\(query)\"", level: .info, tag: "Claude")
+        let resolvedModel = model ?? defaultModel
+        dlog("Starting AI Scout search: \"\(query)\" model=\(resolvedModel) thinking=\(extendedThinking)", level: .info, tag: "Claude")
 
         var systemPrompt = """
         You are an expert film location scout assistant. The user will describe locations they're looking for.
         Your job is to search for real, specific locations that match their description using the available tools.
 
-        For each promising location you find:
-        - Use search_google_places to get coordinates, photos, and details
-        - Use search_web to find articles, images, and videos about the location
-        - Return each location as a call to report_location with all available details
+        Tool usage rules:
+        - Use search_google_places to find locations — results are automatically added to the map WITH photos.
+          Do NOT call report_location for anything returned by search_google_places.
+        - Use search_web to find articles, context, or locations not in Google Places.
+        - Only call report_location for locations you found via search_web or your own knowledge
+          that were NOT already returned by search_google_places.
 
-        Always include a Google Maps link in the format:
-        https://www.google.com/maps/search/?api=1&query=LAT,LNG
-
-        Search thoroughly and return as many relevant locations as possible.
+        Search thoroughly and make multiple search_google_places calls with different queries if needed.
         """
 
         if let r = mapRegion {
@@ -73,13 +76,16 @@ public actor ClaudeService {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue(anthropicVersion, forHTTPHeaderField: "anthropic-version")
 
-        let body: [String: Any] = [
-            "model": model,
-            "max_tokens": 16000,
+        var body: [String: Any] = [
+            "model": resolvedModel,
+            "max_tokens": extendedThinking ? 20000 : 16000,
             "system": systemPrompt,
             "tools": tools,
             "messages": messages,
         ]
+        if extendedThinking {
+            body["thinking"] = ["type": "adaptive"]
+        }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -185,8 +191,14 @@ public actor ClaudeService {
             do {
                 let results = try await GooglePlacesService.shared.search(query: query, region: mapRegion)
                 if results.isEmpty { return "No results found for '\(query)'." }
-                let summary = results.map { "- \($0.name) (\($0.coordinate.latitude), \($0.coordinate.longitude)): \($0.description)" }.joined(separator: "\n")
-                return "Found \(results.count) places:\n\(summary)"
+                // Report each result directly so photos are preserved — don't rely on
+                // Claude re-reporting them via report_location (which loses image data).
+                for loc in results {
+                    onStatus("Found \(loc.name)")
+                    onLocation(loc)
+                }
+                let summary = results.map { "- \($0.name) at (\(String(format: "%.5f", $0.coordinate.latitude)), \(String(format: "%.5f", $0.coordinate.longitude))): \($0.description)" }.joined(separator: "\n")
+                return "Found and automatically reported \(results.count) places to the map (with photos):\n\(summary)\n\nDo NOT call report_location for these — they are already on the map."
             } catch {
                 return "Google Places error: \(error.localizedDescription)"
             }

@@ -52,6 +52,84 @@ final class LocationAnnotation: NSObject, MKAnnotation {
 final class ZoomableMapView: MKMapView {
     var scrollZoomEnabled = false
 
+    // MARK: - Lasso drawing
+
+    var isDrawingMode = false {
+        didSet {
+            if isDrawingMode {
+                NSCursor.crosshair.push()
+                // MKMapView pans via gesture recognizers that run alongside the
+                // responder chain — disabling them prevents panning while drawing.
+                gestureRecognizers.forEach { $0.isEnabled = false }
+            } else {
+                NSCursor.pop()
+                gestureRecognizers.forEach { $0.isEnabled = true }
+                clearDrawingLayer()
+                drawPoints = []
+            }
+        }
+    }
+    var onPolygonComplete: (([CLLocationCoordinate2D]) -> Void)?
+
+    private var drawPoints: [CGPoint] = []
+    private var drawingLayer: CAShapeLayer?
+    private var lastAddedPoint: CGPoint = .zero
+    private let pointSpacing: CGFloat = 6
+
+    override func mouseDown(with event: NSEvent) {
+        guard isDrawingMode else { super.mouseDown(with: event); return }
+        wantsLayer = true
+        let pt = convert(event.locationInWindow, from: nil)
+        drawPoints = [pt]
+        lastAddedPoint = pt
+        setupDrawingLayer()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDrawingMode else { super.mouseDragged(with: event); return }
+        let pt = convert(event.locationInWindow, from: nil)
+        let dx = pt.x - lastAddedPoint.x, dy = pt.y - lastAddedPoint.y
+        guard sqrt(dx*dx + dy*dy) >= pointSpacing else { return }
+        lastAddedPoint = pt
+        drawPoints.append(pt)
+        updateDrawingLayer()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isDrawingMode else { super.mouseUp(with: event); return }
+        let coords = drawPoints.map { convert($0, toCoordinateFrom: self) }
+        isDrawingMode = false   // pops cursor + clears layer
+        if coords.count >= 3 { onPolygonComplete?(coords) }
+    }
+
+    private func setupDrawingLayer() {
+        clearDrawingLayer()
+        let sl = CAShapeLayer()
+        sl.fillColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+        sl.strokeColor = NSColor.systemBlue.cgColor
+        sl.lineWidth = 2
+        sl.lineDashPattern = [6, 4]
+        sl.frame = bounds
+        layer?.addSublayer(sl)
+        drawingLayer = sl
+    }
+
+    private func updateDrawingLayer() {
+        guard let sl = drawingLayer, drawPoints.count >= 2 else { return }
+        let path = CGMutablePath()
+        path.move(to: drawPoints[0])
+        drawPoints.dropFirst().forEach { path.addLine(to: $0) }
+        path.closeSubpath()
+        sl.path = path
+    }
+
+    private func clearDrawingLayer() {
+        drawingLayer?.removeFromSuperlayer()
+        drawingLayer = nil
+    }
+
+    // MARK: - CVDisplayLink scroll-zoom
+
     // CVDisplayLink fires vsync-aligned at the display's native refresh rate
     // (60 or 120 Hz). A flag prevents queuing multiple main-thread dispatches
     // if main falls behind.
@@ -198,6 +276,9 @@ struct ScoutMapView {
     var initialRegion: MKCoordinateRegion?
     var controller: ScoutMapController
     var onRegionEnd: (MKCoordinateRegion) -> Void
+    var isDrawingMode: Bool = false
+    var searchPolygon: [CLLocationCoordinate2D]? = nil
+    var onPolygonComplete: ([CLLocationCoordinate2D]) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -238,10 +319,23 @@ struct ScoutMapView {
     private func updateMap(_ map: MKMapView, context: Context) {
         context.coordinator.parent = self
         #if os(macOS)
-        (map as? ZoomableMapView)?.scrollZoomEnabled = scrollToZoom
+        if let zoomable = map as? ZoomableMapView {
+            zoomable.scrollZoomEnabled = scrollToZoom
+            zoomable.isDrawingMode = isDrawingMode
+            zoomable.onPolygonComplete = onPolygonComplete
+        }
         #endif
         context.coordinator.syncAnnotations(map, locations: locations)
         context.coordinator.syncSelection(map, selection: selection)
+        syncPolygonOverlay(map)
+    }
+
+    private func syncPolygonOverlay(_ map: MKMapView) {
+        let existing = map.overlays.compactMap { $0 as? MKPolygon }
+        map.removeOverlays(existing)
+        if var coords = searchPolygon, coords.count >= 3 {
+            map.addOverlay(MKPolygon(coordinates: &coords, count: coords.count), level: .aboveRoads)
+        }
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
@@ -304,11 +398,24 @@ struct ScoutMapView {
             pop.contentViewController = vc
             pop.contentSize = vc.view.frame.size
             pop.behavior = .transient
-            // .maxY = top edge of the annotation view → popover floats above the pin
-            pop.show(relativeTo: view.bounds, of: view, preferredEdge: .maxY)
+            // MKAnnotationView uses flipped coordinates (Y increases down, like iOS/screen space),
+            // so .minY is the top edge → popover floats above the pin.
+            pop.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
             activePopover = pop
         }
         #endif
+
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let polygon = overlay as? MKPolygon {
+                let r = MKPolygonRenderer(polygon: polygon)
+                r.fillColor   = .init(red: 0.2, green: 0.5, blue: 1, alpha: 0.12)
+                r.strokeColor = .init(red: 0.2, green: 0.5, blue: 1, alpha: 0.85)
+                r.lineWidth   = 2
+                r.lineDashPattern = [8, 5]
+                return r
+            }
+            return MKOverlayRenderer(overlay: overlay)
+        }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             guard let ann = annotation as? LocationAnnotation else { return nil }

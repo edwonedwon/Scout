@@ -7,14 +7,20 @@ public final class APIKeyState: ObservableObject {
     public static let shared = APIKeyState()
 
     @Published public var anthropicKey: String = ""
+    @Published public var anthropicAdminKey: String = ""
     @Published public var googleMapsKey: String = ""
+    @Published public var flickrKey: String = ""
 
     public var anthropicKeyIsSet: Bool { !anthropicKey.isEmpty }
+    public var anthropicAdminKeyIsSet: Bool { !anthropicAdminKey.isEmpty }
     public var googleMapsKeyIsSet: Bool { !googleMapsKey.isEmpty }
+    public var flickrKeyIsSet: Bool { !flickrKey.isEmpty }
 
     private init() {
         anthropicKey = KeychainService.load(forKey: KeychainService.anthropicAPIKey) ?? ""
+        anthropicAdminKey = KeychainService.load(forKey: KeychainService.anthropicAdminKey) ?? ""
         googleMapsKey = KeychainService.load(forKey: KeychainService.googleMapsAPIKey) ?? ""
+        flickrKey = KeychainService.load(forKey: KeychainService.flickrAPIKey) ?? ""
     }
 
     public func saveAnthropicKey(_ key: String) throws {
@@ -25,6 +31,17 @@ public final class APIKeyState: ObservableObject {
         } else {
             try KeychainService.save(trimmed, forKey: KeychainService.anthropicAPIKey)
             anthropicKey = trimmed
+        }
+    }
+
+    public func saveAnthropicAdminKey(_ key: String) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            KeychainService.delete(forKey: KeychainService.anthropicAdminKey)
+            anthropicAdminKey = ""
+        } else {
+            try KeychainService.save(trimmed, forKey: KeychainService.anthropicAdminKey)
+            anthropicAdminKey = trimmed
         }
     }
 
@@ -39,10 +56,25 @@ public final class APIKeyState: ObservableObject {
         }
     }
 
+    public func saveFlickrKey(_ key: String) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            KeychainService.delete(forKey: KeychainService.flickrAPIKey)
+            flickrKey = ""
+        } else {
+            try KeychainService.save(trimmed, forKey: KeychainService.flickrAPIKey)
+            flickrKey = trimmed
+        }
+    }
+
     public func clearAll() {
         KeychainService.delete(forKey: KeychainService.anthropicAPIKey)
+        KeychainService.delete(forKey: KeychainService.anthropicAdminKey)
         KeychainService.delete(forKey: KeychainService.googleMapsAPIKey)
+        KeychainService.delete(forKey: KeychainService.flickrAPIKey)
         anthropicKey = ""
+        anthropicAdminKey = ""
         googleMapsKey = ""
+        flickrKey = ""
     }
 }

@@ -8,9 +8,10 @@ struct LocationCalloutView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Photos
             if !location.images.isEmpty {
+                let images = Array(location.images.prefix(8))
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 3) {
-                        ForEach(location.images.prefix(8)) { img in
+                        ForEach(Array(images.enumerated()), id: \.offset) { idx, img in
                             AsyncImage(url: img.url) { image in
                                 image.resizable().aspectRatio(contentMode: .fill)
                             } placeholder: {
@@ -19,6 +20,11 @@ struct LocationCalloutView: View {
                             }
                             .frame(width: 160, height: 120)
                             .clipped()
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                PhotoViewerState.shared.show(images: images, startingAt: idx)
+                            }
+                            .cursor(.pointingHand)
                         }
                     }
                 }
@@ -71,4 +77,48 @@ struct LocationCalloutView: View {
         if hasLinks { h += 28 }
         return h
     }
+}
+
+// MARK: - Cursor helper (macOS)
+
+private extension View {
+    func cursor(_ cursor: NSCursor) -> some View {
+        #if os(macOS)
+        return self.onHover { inside in inside ? cursor.push() : NSCursor.pop() }
+        #else
+        return self
+        #endif
+    }
+}
+
+// MARK: - Preview
+
+#Preview("With photos") {
+    LocationCalloutView(location: .preview)
+}
+
+#Preview("No photos") {
+    LocationCalloutView(location: .previewNoPhotos)
+}
+
+extension ScoutLocation {
+    static let preview = ScoutLocation(
+        name: "Vasquez Rocks Natural Area",
+        description: "Agua Dulce, CA 93510 — iconic tilted sandstone formations used in countless films and TV shows",
+        coordinate: .init(latitude: 34.4883, longitude: -118.3214),
+        sourceURL: URL(string: "https://en.wikipedia.org/wiki/Vasquez_Rocks"),
+        images: [
+            ScoutImage(url: URL(string: "https://upload.wikimedia.org/wikipedia/commons/thumb/3/30/Vasquez_Rocks_2013.jpg/1280px-Vasquez_Rocks_2013.jpg"), source: .googleMaps),
+            ScoutImage(url: URL(string: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Vasquez_Rocks_County_Park_2.jpg/1280px-Vasquez_Rocks_County_Park_2.jpg"), source: .googleMaps),
+            ScoutImage(url: URL(string: "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Vasquez_Rocks.jpg/1280px-Vasquez_Rocks.jpg"), source: .googleMaps),
+        ],
+        googleMapsURL: URL(string: "https://www.google.com/maps/search/?api=1&query=34.4883,-118.3214")
+    )
+
+    static let previewNoPhotos = ScoutLocation(
+        name: "Bronson Canyon",
+        description: "Griffin Park, Los Angeles, CA — cave entrance used in Batman (1966) and many westerns",
+        coordinate: .init(latitude: 34.1241, longitude: -118.3206),
+        googleMapsURL: URL(string: "https://www.google.com/maps/search/?api=1&query=34.1241,-118.3206")
+    )
 }
