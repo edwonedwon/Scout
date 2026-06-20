@@ -14,6 +14,9 @@ struct ScoutApp: App {
             }
         }
         .environmentObject(apiKeyState)
+        #if os(macOS)
+        .windowStyle(.hiddenTitleBar)
+        #endif
 
         #if os(macOS)
         Settings {

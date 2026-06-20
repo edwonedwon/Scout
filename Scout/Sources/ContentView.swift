@@ -34,6 +34,8 @@ struct ContentView: View {
     @State private var searchError: String?
     @State private var didInitialCenter = false
     @State private var chatMessages: [ChatMessage] = []
+    @State private var viewMode: ViewMode = .map
+    @Namespace private var toggleNS
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -52,7 +54,7 @@ struct ContentView: View {
             googlePanel
                 .frame(width: 280)
             Divider()
-            mapView
+            centerPanel
             Divider()
             aiPanel
                 .frame(width: 300)
@@ -63,6 +65,13 @@ struct ContentView: View {
             locationManager.requestIfNeeded()
             #endif
             centerOnUserIfNeeded()
+            photoViewer.onViewOnMap = { loc in
+                withAnimation(.spring(duration: 0.3)) { viewMode = .map }
+                selectedLocation = loc
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    mapController.center(on: loc.coordinate, animated: true)
+                }
+            }
         }
         .onChange(of: locationManager.currentLocation?.latitude) { _, _ in
             centerOnUserIfNeeded()
@@ -180,9 +189,30 @@ struct ContentView: View {
         .padding(.vertical, 10)
     }
 
-    // MARK: - Map
+    // MARK: - Center panel (map or photo grid)
 
-    private var mapView: some View {
+    private var centerPanel: some View {
+        ZStack {
+            if viewMode == .photos {
+                PhotoGridView(locations: locations)
+                    .ignoresSafeArea()
+            } else {
+                scoutMap
+            }
+        }
+        .overlay(alignment: .top) {
+            viewModeToggle
+        }
+        .overlay {
+            if photoViewer.isVisible {
+                PhotoViewerOverlay()
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
+            }
+        }
+    }
+
+    private var scoutMap: some View {
         ScoutMapView(
             selection: $selectedLocation,
             locations: locations,
@@ -216,16 +246,42 @@ struct ContentView: View {
         .overlay(alignment: .topLeading) {
             cyclingControls
         }
-        .overlay(alignment: .bottomTrailing) {
+        .overlay(alignment: .leading) {
             lassoControls
         }
-        .overlay {
-            if photoViewer.isVisible {
-                PhotoViewerOverlay()
-                    .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
+    }
+
+    private var viewModeToggle: some View {
+        let photoCount = locations.reduce(0) { $0 + $1.images.count }
+        return HStack(spacing: 2) {
+            ForEach([ViewMode.map, .photos], id: \.self) { mode in
+                Button {
+                    withAnimation(.spring(duration: 0.3)) { viewMode = mode }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: mode == .map ? "map" : "photo.stack")
+                            .font(.subheadline.weight(.medium))
+                        Text(mode == .map ? "Map" : (photoCount > 0 ? "Photos (\(photoCount))" : "Photos"))
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .foregroundStyle(viewMode == mode ? .white : .white.opacity(0.4))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background {
+                        if viewMode == mode {
+                            Capsule()
+                                .fill(.white.opacity(0.18))
+                                .matchedGeometryEffect(id: "pill", in: toggleNS)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
             }
         }
+        .padding(3)
+        .background(.black.opacity(0.82), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.08), lineWidth: 0.5))
+        .padding(.top, 14)
     }
 
     private var cyclingControls: some View {
@@ -566,6 +622,12 @@ enum SearchMode: String, CaseIterable, Identifiable {
         case .wikimedia: "globe"
         }
     }
+}
+
+// MARK: - View mode
+
+enum ViewMode: CaseIterable {
+    case map, photos
 }
 
 // MARK: - Preview

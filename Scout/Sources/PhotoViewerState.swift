@@ -7,11 +7,16 @@ final class PhotoViewerState: ObservableObject {
     private init() {}
 
     @Published var images: [ScoutImage] = []
+    @Published var location: ScoutLocation? = nil
     @Published var selectedIndex: Int = 0
     @Published var isVisible = false
 
-    func show(images: [ScoutImage], startingAt index: Int) {
+    // Set by ContentView to handle "Show on map" taps from the overlay
+    var onViewOnMap: ((ScoutLocation) -> Void)?
+
+    func show(images: [ScoutImage], startingAt index: Int, location: ScoutLocation? = nil) {
         self.images = images
+        self.location = location
         self.selectedIndex = index
         self.isVisible = true
     }

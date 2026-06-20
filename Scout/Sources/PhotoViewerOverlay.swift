@@ -79,7 +79,7 @@ struct PhotoViewerOverlay: View {
                     }
                 }
 
-                // Bottom: prev/next arrows + dots
+                // Bottom: dots + arrows + location info
                 VStack(spacing: 10) {
                     // Dot indicators (up to 10)
                     if viewer.images.count > 1 {
@@ -120,9 +120,14 @@ struct PhotoViewerOverlay: View {
                         .opacity(viewer.selectedIndex < viewer.images.count - 1 ? 1 : 0.2)
                         .disabled(viewer.selectedIndex >= viewer.images.count - 1)
                     }
-                    .padding(.bottom, 20)
+
+                    // Location info bar
+                    if let loc = viewer.location {
+                        locationInfoBar(loc)
+                    }
                 }
                 .padding(.top, 12)
+                .padding(.bottom, 20)
             }
         }
         .focusable()
@@ -130,5 +135,60 @@ struct PhotoViewerOverlay: View {
         .onKeyPress(.leftArrow)  { viewer.previous(); return .handled }
         .onKeyPress(.rightArrow) { viewer.next();     return .handled }
         .onKeyPress(.escape)     { viewer.dismiss();  return .handled }
+    }
+
+    @ViewBuilder
+    private func locationInfoBar(_ loc: ScoutLocation) -> some View {
+        VStack(spacing: 6) {
+            Text(loc.name)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+
+            if !loc.description.isEmpty {
+                Text(loc.description)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.65))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 12) {
+                if viewer.onViewOnMap != nil {
+                    Button {
+                        viewer.dismiss()
+                        viewer.onViewOnMap?(loc)
+                    } label: {
+                        Label("Show on Map", systemImage: "map")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
+                    .controlSize(.small)
+                }
+
+                if let mapsURL = loc.googleMapsURL {
+                    Link(destination: mapsURL) {
+                        Label("Google Maps", systemImage: "arrow.up.right.square")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
+                    .controlSize(.small)
+                }
+
+                if let sourceURL = loc.sourceURL {
+                    Link(destination: sourceURL) {
+                        Label("Source", systemImage: "link")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
+                    .controlSize(.small)
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
     }
 }

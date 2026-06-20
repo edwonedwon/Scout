@@ -22,7 +22,7 @@ struct LocationCalloutView: View {
                             .clipped()
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                PhotoViewerState.shared.show(images: images, startingAt: idx)
+                                PhotoViewerState.shared.show(images: images, startingAt: idx, location: location)
                             }
                             .cursor(.pointingHand)
                         }
