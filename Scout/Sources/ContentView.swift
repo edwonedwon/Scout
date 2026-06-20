@@ -238,10 +238,13 @@ struct ContentView: View {
                 Spacer()
                 viewModeToggle
                 Spacer()
-                panelToggleButton(
-                    icon: showRightPanel ? "sidebar.right" : "rectangle.rightthird.inset.filled",
-                    action: { showRightPanel.toggle() }
-                )
+                HStack(spacing: 4) {
+                    locationTrackingButton
+                    panelToggleButton(
+                        icon: showRightPanel ? "sidebar.right" : "rectangle.rightthird.inset.filled",
+                        action: { showRightPanel.toggle() }
+                    )
+                }
             }
             .padding(.top, 14)
             .padding(.horizontal, 8)
@@ -253,6 +256,19 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
             }
         }
+    }
+
+    private var locationTrackingButton: some View {
+        let tracking = mapController.userTrackingMode == .follow
+        return Button { mapController.toggleTracking() } label: {
+            Image(systemName: tracking ? "location.fill" : "location")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(tracking ? .blue : .primary)
+                .frame(width: 32, height: 32)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
     }
 
     private func panelToggleButton(icon: String, action: @escaping () -> Void) -> some View {
@@ -439,7 +455,6 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .padding(16)
         .help(cyclingProvider.map { "Cycling: \($0.displayName)" } ?? "Show cycling map")
     }
 

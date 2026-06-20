@@ -11,7 +11,24 @@ import Combine
 /// the region (which would create feedback loops on every camera change).
 @MainActor
 final class ScoutMapController: ObservableObject {
-    weak var mapView: MKMapView?
+    @Published var userTrackingMode: MKUserTrackingMode = .none
+
+    private var trackingKVO: NSKeyValueObservation?
+
+    weak var mapView: MKMapView? {
+        didSet {
+            trackingKVO?.invalidate()
+            trackingKVO = mapView?.observe(\.userTrackingMode, options: [.initial, .new]) { [weak self] map, _ in
+                DispatchQueue.main.async { self?.userTrackingMode = map.userTrackingMode }
+            }
+        }
+    }
+
+    func toggleTracking() {
+        guard let map = mapView else { return }
+        let next: MKUserTrackingMode = map.userTrackingMode == .follow ? .none : .follow
+        map.setUserTrackingMode(next, animated: true)
+    }
 
     func setRegion(_ region: MKCoordinateRegion, animated: Bool) {
         mapView?.setRegion(region, animated: animated)
@@ -349,71 +366,6 @@ final class MenuAction: NSObject {
 }
 #endif
 
-// MARK: - macOS location tracking button
-
-#if os(macOS)
-final class LocationTrackingButton: NSView {
-    private weak var mapView: MKMapView?
-    private let button = NSButton()
-    private var trackingObservation: NSKeyValueObservation?
-
-    init(mapView: MKMapView) {
-        self.mapView = mapView
-        super.init(frame: CGRect(origin: .zero, size: CGSize(width: 44, height: 44)))
-
-        // Frosted-glass background matching the built-in map controls
-        let fx = NSVisualEffectView(frame: bounds)
-        fx.material = .hudWindow
-        fx.blendingMode = .behindWindow
-        fx.state = .active
-        fx.wantsLayer = true
-        fx.layer?.cornerRadius = 8
-        fx.autoresizingMask = [.width, .height]
-        addSubview(fx)
-
-        button.bezelStyle = .regularSquare
-        button.isBordered = false
-        button.target = self
-        button.action = #selector(tapped)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(button)
-        NSLayoutConstraint.activate([
-            button.leadingAnchor.constraint(equalTo: leadingAnchor),
-            button.trailingAnchor.constraint(equalTo: trailingAnchor),
-            button.topAnchor.constraint(equalTo: topAnchor),
-            button.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
-
-        // Keep icon in sync when MapKit disables tracking after a user pan
-        trackingObservation = mapView.observe(\.userTrackingMode, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.refreshIcon() }
-        }
-
-        refreshIcon()
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    deinit {
-        trackingObservation?.invalidate()
-    }
-
-    @objc private func tapped() {
-        guard let map = mapView else { return }
-        let next: MKUserTrackingMode = map.userTrackingMode == .follow ? .none : .follow
-        map.setUserTrackingMode(next, animated: true)
-    }
-
-    private func refreshIcon() {
-        let tracking = mapView?.userTrackingMode == .follow
-        let cfg = NSImage.SymbolConfiguration(pointSize: 17, weight: .medium)
-        button.image = NSImage(systemSymbolName: tracking ? "location.fill" : "location",
-                               accessibilityDescription: "My location")?
-            .withSymbolConfiguration(cfg)
-        button.contentTintColor = tracking ? .controlAccentColor : .secondaryLabelColor
-    }
-}
-#endif
-
 // MARK: - Representable
 
 struct ScoutMapView {
@@ -451,17 +403,6 @@ struct ScoutMapView {
         if let initialRegion {
             map.setRegion(initialRegion, animated: false)
         }
-
-        #if os(macOS)
-        let trackingButton = LocationTrackingButton(mapView: map)
-        trackingButton.translatesAutoresizingMaskIntoConstraints = false
-        map.addSubview(trackingButton)
-        #else
-        let trackingButton = MKUserTrackingButton(mapView: map)
-        trackingButton.translatesAutoresizingMaskIntoConstraints = false
-        map.addSubview(trackingButton)
-        #endif
-        NSLayoutConstraintCompat.pin(trackingButton, toTopTrailingOf: map)
 
         Task { @MainActor in controller.mapView = map }
         return map
@@ -686,29 +627,3 @@ extension ScoutMapView: UIViewRepresentable {
 }
 #endif
 
-// MARK: - Cross-platform constraint helper
-
-enum NSLayoutConstraintCompat {
-    static func pin(_ subview: PlatformView, toTopTrailingOf parent: PlatformView) {
-        subview.translatesAutoresizingMaskIntoConstraints = false
-        // Top offset is 60 on macOS to clear the SwiftUI top bar (panel + mode toggles).
-        // iOS keeps 16 because there's no equivalent bar.
-        #if os(macOS)
-        let topOffset: CGFloat = 60
-        #else
-        let topOffset: CGFloat = 16
-        #endif
-        NSLayoutConstraint.activate([
-            subview.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -16),
-            subview.topAnchor.constraint(equalTo: parent.topAnchor, constant: topOffset),
-            subview.widthAnchor.constraint(equalToConstant: 44),
-            subview.heightAnchor.constraint(equalToConstant: 44),
-        ])
-    }
-}
-
-#if os(macOS)
-typealias PlatformView = NSView
-#else
-typealias PlatformView = UIView
-#endif

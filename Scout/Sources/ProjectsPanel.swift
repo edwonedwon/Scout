@@ -124,6 +124,10 @@ struct ProjectsPanel: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        #if os(macOS)
+        // Push content below the traffic-light buttons (hidden title bar = no automatic safe area)
+        .padding(.top, 28)
+        #endif
     }
 }
 
@@ -136,6 +140,8 @@ private struct ListCard: View {
 
     @State private var isTargeted = false
     @State private var isExpanded = true
+    @State private var isEditingName = false
+    @State private var editingName = ""
 
     private var isActive: Bool { activeList?.persistentModelID == list.persistentModelID }
     private var listColor: Color { Color(hexString: list.colorHex) }
@@ -168,6 +174,9 @@ private struct ListCard: View {
             return true
         } isTargeted: { isTargeted = $0 }
         .contextMenu {
+            Button { beginEditing() } label: {
+                Label("Rename", systemImage: "pencil")
+            }
             Button(role: .destructive) {
                 if isActive { activeList = nil }
                 modelContext.delete(list)
@@ -181,9 +190,20 @@ private struct ListCard: View {
         HStack(spacing: 8) {
             Circle().fill(listColor).frame(width: 10, height: 10)
 
-            Text(list.name)
-                .font(.subheadline)
-                .lineLimit(1)
+            if isEditingName {
+                TextField("List name", text: $editingName)
+                    .font(.subheadline)
+                    .textFieldStyle(.plain)
+                    .onSubmit { commitName() }
+                    .onExitCommand { isEditingName = false }
+                    // Focus loss = commit
+                    .onDisappear { commitName() }
+            } else {
+                Text(list.name)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                    .onTapGesture(count: 2) { beginEditing() }
+            }
 
             Spacer()
 
@@ -213,10 +233,22 @@ private struct ListCard: View {
         .background(isTargeted ? listColor.opacity(0.08) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture {
+            guard !isEditingName else { return }
             withAnimation(.spring(duration: 0.2)) {
                 activeList = isActive ? nil : list
             }
         }
+    }
+
+    private func beginEditing() {
+        editingName = list.name
+        isEditingName = true
+    }
+
+    private func commitName() {
+        let trimmed = editingName.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { list.name = trimmed }
+        isEditingName = false
     }
 
     private var pinnedLocations: some View {
