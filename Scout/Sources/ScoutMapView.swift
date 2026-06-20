@@ -114,6 +114,10 @@ final class LocationAnnotation: NSObject, MKAnnotation {
 
 #if os(macOS)
 final class ZoomableMapView: MKMapView {
+    // With .hiddenTitleBar, macOS treats the window background as draggable.
+    // Returning false here tells AppKit that clicks on the map are real interactions,
+    // not window-drag attempts — otherwise the location/zoom buttons stop responding.
+    override var mouseDownCanMoveWindow: Bool { false }
     var scrollZoomEnabled = false
 
     // MARK: - Lasso drawing
@@ -281,6 +285,7 @@ final class ZoomableMapView: MKMapView {
 final class LocationTrackingButton: NSView {
     private weak var mapView: MKMapView?
     private let button = NSButton()
+    private var trackingObservation: NSKeyValueObservation?
 
     init(mapView: MKMapView) {
         self.mapView = mapView
@@ -309,15 +314,23 @@ final class LocationTrackingButton: NSView {
             button.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
+        // Keep icon in sync when MapKit disables tracking after a user pan
+        trackingObservation = mapView.observe(\.userTrackingMode, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshIcon() }
+        }
+
         refreshIcon()
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        trackingObservation?.invalidate()
+    }
 
     @objc private func tapped() {
         guard let map = mapView else { return }
         let next: MKUserTrackingMode = map.userTrackingMode == .none ? .follow : .none
         map.setUserTrackingMode(next, animated: true)
-        refreshIcon()
     }
 
     private func refreshIcon() {
@@ -552,9 +565,16 @@ extension ScoutMapView: UIViewRepresentable {
 enum NSLayoutConstraintCompat {
     static func pin(_ subview: PlatformView, toTopTrailingOf parent: PlatformView) {
         subview.translatesAutoresizingMaskIntoConstraints = false
+        // Top offset is 60 on macOS to clear the SwiftUI top bar (panel + mode toggles).
+        // iOS keeps 16 because there's no equivalent bar.
+        #if os(macOS)
+        let topOffset: CGFloat = 60
+        #else
+        let topOffset: CGFloat = 16
+        #endif
         NSLayoutConstraint.activate([
             subview.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -16),
-            subview.topAnchor.constraint(equalTo: parent.topAnchor, constant: 16),
+            subview.topAnchor.constraint(equalTo: parent.topAnchor, constant: topOffset),
             subview.widthAnchor.constraint(equalToConstant: 44),
             subview.heightAnchor.constraint(equalToConstant: 44),
         ])

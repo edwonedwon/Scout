@@ -20,6 +20,7 @@ struct ContentView: View {
 
     @AppStorage("search.mode") private var searchMode: SearchMode = .google
     @AppStorage("map.cyclingProvider") private var cyclingProviderRaw: String = ""
+    @AppStorage("wikimedia.limit") private var wikiLimit: Double = 50
 
     private var cyclingProvider: CyclingTileProvider? {
         get { CyclingTileProvider(rawValue: cyclingProviderRaw) }
@@ -35,7 +36,8 @@ struct ContentView: View {
     @State private var didInitialCenter = false
     @State private var chatMessages: [ChatMessage] = []
     @State private var viewMode: ViewMode = .map
-    @Namespace private var toggleNS
+    @State private var showLeftPanel = true
+    @State private var showRightPanel = true
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -51,14 +53,22 @@ struct ContentView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            googlePanel
-                .frame(width: 280)
-            Divider()
+            if showLeftPanel {
+                googlePanel
+                    .frame(width: 280)
+                    .transition(.move(edge: .leading))
+                Divider()
+            }
             centerPanel
-            Divider()
-            aiPanel
-                .frame(width: 300)
+            if showRightPanel {
+                Divider()
+                aiPanel
+                    .frame(width: 300)
+                    .transition(.move(edge: .trailing))
+            }
         }
+        .animation(.spring(duration: 0.3), value: showLeftPanel)
+        .animation(.spring(duration: 0.3), value: showRightPanel)
         .ignoresSafeArea()
         .onAppear {
             #if !DEBUG
@@ -75,6 +85,12 @@ struct ContentView: View {
         }
         .onChange(of: locationManager.currentLocation?.latitude) { _, _ in
             centerOnUserIfNeeded()
+        }
+        .onChange(of: viewMode) { _, newMode in
+            if newMode == .photos && photoViewer.restoreOnPhotoMode {
+                photoViewer.restoreOnPhotoMode = false
+                photoViewer.isVisible = true
+            }
         }
     }
 
@@ -139,6 +155,19 @@ struct ContentView: View {
                 .controlSize(.small)
                 .disabled(isSearching)
                 .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+
+                HStack(spacing: 6) {
+                    Text("Max results:")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $wikiLimit, in: 10...500, step: 10)
+                    Text("\(Int(wikiLimit))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, alignment: .trailing)
+                }
+                .padding(.horizontal, 10)
                 .padding(.bottom, 8)
             }
 
@@ -192,16 +221,33 @@ struct ContentView: View {
     // MARK: - Center panel (map or photo grid)
 
     private var centerPanel: some View {
+        // Both views stay in the hierarchy at all times:
+        // - Map: never torn down so MapKit/CVDisplayLink stay alive
+        // - PhotoGrid: never torn down so scroll position survives "Show on Map" round-trips
         ZStack {
-            if viewMode == .photos {
-                PhotoGridView(locations: locations)
-                    .ignoresSafeArea()
-            } else {
-                scoutMap
-            }
+            scoutMap
+            PhotoGridView(locations: locations)
+                .ignoresSafeArea()
+                .opacity(viewMode == .photos ? 1 : 0)
+                .allowsHitTesting(viewMode == .photos)
         }
         .overlay(alignment: .top) {
-            viewModeToggle
+            // Single top bar: left panel toggle | mode toggle | right panel toggle
+            HStack {
+                panelToggleButton(
+                    icon: showLeftPanel ? "sidebar.left" : "magnifyingglass",
+                    action: { showLeftPanel.toggle() }
+                )
+                Spacer()
+                viewModeToggle
+                Spacer()
+                panelToggleButton(
+                    icon: showRightPanel ? "sidebar.right" : "sparkles",
+                    action: { showRightPanel.toggle() }
+                )
+            }
+            .padding(.top, 14)
+            .padding(.horizontal, 8)
         }
         .overlay {
             if photoViewer.isVisible {
@@ -210,6 +256,18 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
             }
         }
+    }
+
+    private func panelToggleButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.primary)
+                .frame(width: 32, height: 32)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
     }
 
     private var scoutMap: some View {
@@ -245,11 +303,59 @@ struct ContentView: View {
         }
         .overlay(alignment: .topLeading) {
             cyclingControls
+                .padding(.top, 58)
+        }
+        .overlay(alignment: .topLeading) {
+            if cyclingProvider == .cyclOSM {
+                cyclOSMLegend
+                    .padding(.top, 102)
+                    .padding(.leading, 8)
+            }
         }
         .overlay(alignment: .leading) {
             lassoControls
         }
     }
+
+    private var cyclOSMLegend: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("CyclOSM Key")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 5)
+
+            ForEach(Self.cyclOSMLegendItems, id: \.label) { item in
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(item.color)
+                        .frame(width: 22, height: 9)
+                        .overlay(RoundedRectangle(cornerRadius: 2).stroke(Color.black.opacity(0.12), lineWidth: 0.5))
+                    Text(item.label)
+                        .font(.caption2)
+                        .foregroundStyle(.primary)
+                }
+                .padding(.bottom, 3)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+    }
+
+    private struct LegendItem {
+        let color: Color
+        let label: String
+    }
+
+    private static let cyclOSMLegendItems: [LegendItem] = [
+        LegendItem(color: Color(red: 0.38, green: 1.00, blue: 0.59), label: "Dedicated path"),
+        LegendItem(color: Color(red: 0.73, green: 1.00, blue: 0.73), label: "Bike-friendly road"),
+        LegendItem(color: Color(red: 0.69, green: 0.95, blue: 0.95), label: "Shared (foot + bike)"),
+        LegendItem(color: Color(red: 0.00, green: 0.38, blue: 1.00), label: "Cycle street"),
+        LegendItem(color: Color(red: 0.96, green: 0.77, blue: 0.77), label: "Road, bikes allowed"),
+        LegendItem(color: Color(red: 0.83, green: 0.83, blue: 0.83), label: "No cycling"),
+    ]
 
     private var viewModeToggle: some View {
         let photoCount = locations.reduce(0) { $0 + $1.images.count }
@@ -267,13 +373,10 @@ struct ContentView: View {
                     .foregroundStyle(viewMode == mode ? .white : .white.opacity(0.4))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background {
-                        if viewMode == mode {
-                            Capsule()
-                                .fill(.white.opacity(0.18))
-                                .matchedGeometryEffect(id: "pill", in: toggleNS)
-                        }
-                    }
+                    .background(
+                        Capsule().fill(.white.opacity(viewMode == mode ? 0.18 : 0))
+                    )
+                    .animation(.spring(duration: 0.25), value: viewMode)
                 }
                 .buttonStyle(.plain)
             }
@@ -426,7 +529,7 @@ struct ContentView: View {
             let region: GooglePlacesService.MapRegion? =
                 searchArea.mapRegion ??
                 (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
-            var results = try await WikimediaService.shared.search(query: searchText, region: region)
+            var results = try await WikimediaService.shared.search(query: searchText, region: region, limit: Int(wikiLimit))
             if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
             locations = results
             selectedLocation = nil
@@ -636,5 +739,12 @@ enum ViewMode: CaseIterable {
 #Preview("Main layout", traits: .fixedLayout(width: 1200, height: 800)) {
     ContentView()
         .environmentObject(APIKeyState.shared)
+        .onAppear {
+            NSApp.windows.forEach { window in
+                window.titleVisibility = .hidden
+                window.titlebarAppearsTransparent = true
+                window.styleMask.insert(.fullSizeContentView)
+            }
+        }
 }
 #endif

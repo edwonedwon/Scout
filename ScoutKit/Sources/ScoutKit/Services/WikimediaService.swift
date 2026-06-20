@@ -9,17 +9,17 @@ public final class WikimediaService {
 
     private let base = "https://commons.wikimedia.org/w/api.php"
 
-    public func search(query: String, region: GooglePlacesService.MapRegion? = nil) async throws -> [ScoutLocation] {
+    public func search(query: String, region: GooglePlacesService.MapRegion? = nil, limit: Int = 50) async throws -> [ScoutLocation] {
         if let r = region {
-            return try await geoSearch(query: query, region: r)
+            return try await geoSearch(query: query, region: r, limit: limit)
         } else {
-            return try await textSearch(query: query)
+            return try await textSearch(query: query, limit: limit)
         }
     }
 
     // MARK: - Geosearch (has map region → guaranteed coordinates)
 
-    private func geoSearch(query: String, region: GooglePlacesService.MapRegion) async throws -> [ScoutLocation] {
+    private func geoSearch(query: String, region: GooglePlacesService.MapRegion, limit: Int) async throws -> [ScoutLocation] {
         // Derive radius from region size; Wikimedia max is 10 000 m
         let latM = region.latDelta * 111_000
         let lngM = region.lngDelta * 111_000 * cos(region.centerLat * .pi / 180)
@@ -30,7 +30,7 @@ public final class WikimediaService {
             .init(name: "generator",    value: "geosearch"),
             .init(name: "ggscoord",     value: "\(region.centerLat)|\(region.centerLng)"),
             .init(name: "ggsradius",    value: "\(Int(radius))"),
-            .init(name: "ggslimit",     value: "50"),
+            .init(name: "ggslimit",     value: "\(min(limit, 500))"),
             .init(name: "ggsnamespace", value: "6"),
             .init(name: "prop",         value: "imageinfo|coordinates"),
             .init(name: "iiprop",       value: "url|extmetadata"),
@@ -57,13 +57,13 @@ public final class WikimediaService {
 
     // MARK: - Text search (no region → no coordinate guarantee, show what we can)
 
-    private func textSearch(query: String) async throws -> [ScoutLocation] {
+    private func textSearch(query: String, limit: Int) async throws -> [ScoutLocation] {
         let params: [URLQueryItem] = [
             .init(name: "action",       value: "query"),
             .init(name: "generator",    value: "search"),
             .init(name: "gsrsearch",    value: query),
             .init(name: "gsrnamespace", value: "6"),
-            .init(name: "gsrlimit",     value: "30"),
+            .init(name: "gsrlimit",     value: "\(min(limit, 500))"),
             .init(name: "prop",         value: "imageinfo|coordinates"),
             .init(name: "iiprop",       value: "url|extmetadata"),
             .init(name: "iiurlwidth",   value: "1200"),

@@ -23,7 +23,8 @@ struct PhotoGridView: View {
         return result
     }
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 4)
+    private let columns = 3
+    private let gap: CGFloat = 2
 
     var body: some View {
         if items.isEmpty {
@@ -35,13 +36,20 @@ struct PhotoGridView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.black)
         } else {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 2) {
-                    ForEach(items) { item in
-                        PhotoCell(item: item)
+            GeometryReader { geo in
+                let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
+                ScrollView {
+                    HStack(alignment: .top, spacing: gap) {
+                        ForEach(0..<columns, id: \.self) { col in
+                            LazyVStack(spacing: gap) {
+                                ForEach(items.indices.filter { $0 % columns == col }, id: \.self) { idx in
+                                    MasonryCell(item: items[idx], width: colWidth)
+                                }
+                            }
+                        }
                     }
+                    .padding(.bottom, 8)
                 }
-                .padding(2)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.black)
@@ -49,8 +57,9 @@ struct PhotoGridView: View {
     }
 }
 
-private struct PhotoCell: View {
+private struct MasonryCell: View {
     let item: PhotoGridView.PhotoItem
+    let width: CGFloat
     @State private var isHovered = false
 
     var body: some View {
@@ -59,32 +68,36 @@ private struct PhotoCell: View {
             case .success(let img):
                 img
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: width)
             case .failure:
                 Color.gray.opacity(0.2)
+                    .frame(width: width, height: width * 0.65)
                     .overlay(
                         Image(systemName: "photo")
                             .foregroundStyle(.white.opacity(0.3))
                     )
             default:
-                Color.gray.opacity(0.15)
+                Color.gray.opacity(0.12)
+                    .frame(width: width, height: width * 0.65)
                     .overlay(ProgressView().tint(.white).controlSize(.small))
             }
         }
-        .aspectRatio(1, contentMode: .fill)
-        .clipped()
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: .bottomLeading) {
             if isHovered {
-                LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 48)
-                    .overlay(alignment: .bottomLeading) {
-                        Text(item.location.name)
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                            .padding(.horizontal, 6)
-                            .padding(.bottom, 5)
-                    }
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.72)],
+                    startPoint: .top, endPoint: .bottom
+                )
+                .frame(height: 44)
+                .overlay(alignment: .bottomLeading) {
+                    Text(item.location.name)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.bottom, 5)
+                }
             }
         }
         .contentShape(Rectangle())
@@ -99,7 +112,6 @@ private struct PhotoCell: View {
                 location: item.location
             )
         }
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        .animation(.easeInOut(duration: 0.12), value: isHovered)
     }
 }
-

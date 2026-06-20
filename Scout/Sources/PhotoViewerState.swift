@@ -23,6 +23,10 @@ final class PhotoViewerState: ObservableObject {
 
     func dismiss() { isVisible = false }
 
+    // Set before dismiss() when "Show on Map" triggers a mode switch, so the
+    // viewer re-opens at the same photo if the user returns to Photos mode.
+    var restoreOnPhotoMode = false
+
     func next() {
         if selectedIndex < images.count - 1 { selectedIndex += 1 }
     }

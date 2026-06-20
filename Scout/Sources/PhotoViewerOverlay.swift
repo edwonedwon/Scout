@@ -156,6 +156,7 @@ struct PhotoViewerOverlay: View {
             HStack(spacing: 12) {
                 if viewer.onViewOnMap != nil {
                     Button {
+                        viewer.restoreOnPhotoMode = true
                         viewer.dismiss()
                         viewer.onViewOnMap?(loc)
                     } label: {
