@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import SwiftData
 import ScoutKit
 
 
@@ -27,6 +28,9 @@ struct ContentView: View {
         set { cyclingProviderRaw = newValue?.rawValue ?? "" }
     }
 
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \LocationListData.createdAt) private var allLists: [LocationListData]
+
     @State private var searchText = ""
     @State private var isSearching = false
     @State private var isAISearching = false
@@ -36,8 +40,10 @@ struct ContentView: View {
     @State private var didInitialCenter = false
     @State private var chatMessages: [ChatMessage] = []
     @State private var viewMode: ViewMode = .map
+    @State private var showProjectsPanel = false
     @State private var showLeftPanel = true
     @State private var showRightPanel = true
+    @State private var activeList: LocationListData?
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -53,6 +59,12 @@ struct ContentView: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            if showProjectsPanel {
+                ProjectsPanel(activeList: $activeList)
+                    .frame(width: 240)
+                    .transition(.move(edge: .leading))
+                Divider()
+            }
             if showLeftPanel {
                 googlePanel
                     .frame(width: 280)
@@ -67,6 +79,7 @@ struct ContentView: View {
                     .transition(.move(edge: .trailing))
             }
         }
+        .animation(.spring(duration: 0.3), value: showProjectsPanel)
         .animation(.spring(duration: 0.3), value: showLeftPanel)
         .animation(.spring(duration: 0.3), value: showRightPanel)
         .ignoresSafeArea()
@@ -174,8 +187,11 @@ struct ContentView: View {
             Divider()
 
             List(locations, selection: $selectedLocation) { location in
-                LocationRow(location: location)
-                    .tag(location)
+                LocationRow(location: location, availableLists: allLists) { list in
+                    saveToList(location, list)
+                }
+                .draggable(location)
+                .tag(location)
             }
             .overlay {
                 if locations.isEmpty {
@@ -232,12 +248,18 @@ struct ContentView: View {
                 .allowsHitTesting(viewMode == .photos)
         }
         .overlay(alignment: .top) {
-            // Single top bar: left panel toggle | mode toggle | right panel toggle
+            // Single top bar: projects | search | mode toggle | AI
             HStack {
-                panelToggleButton(
-                    icon: showLeftPanel ? "sidebar.left" : "magnifyingglass",
-                    action: { showLeftPanel.toggle() }
-                )
+                HStack(spacing: 4) {
+                    panelToggleButton(
+                        icon: showProjectsPanel ? "folder.fill" : "folder",
+                        action: { showProjectsPanel.toggle() }
+                    )
+                    panelToggleButton(
+                        icon: showLeftPanel ? "sidebar.left" : "magnifyingglass",
+                        action: { showLeftPanel.toggle() }
+                    )
+                }
                 Spacer()
                 viewModeToggle
                 Spacer()
@@ -270,10 +292,23 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    private var projectPins: [(ScoutLocation, String)] {
+        guard let list = activeList else { return [] }
+        return list.pins.map { ($0.asScoutLocation(), list.colorHex) }
+    }
+
+    private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
+        let pin = PinnedLocationData(from: location)
+        pin.list = list
+        list.pins.append(pin)
+        modelContext.insert(pin)
+    }
+
     private var scoutMap: some View {
         ScoutMapView(
             selection: $selectedLocation,
             locations: locations,
+            projectPins: projectPins,
             scrollToZoom: scrollToZoom,
             initialRegion: initialRegion,
             controller: mapController,
@@ -286,7 +321,9 @@ struct ContentView: View {
             isDrawingMode: searchArea.isDrawing,
             searchPolygon: searchArea.polygon,
             onPolygonComplete: { coords in searchArea.setPolygon(coords) },
-            cyclingProvider: cyclingProvider
+            cyclingProvider: cyclingProvider,
+            availableLists: allLists,
+            onSaveToList: saveToList
         )
         .ignoresSafeArea()
         .overlay(alignment: .topTrailing) {
@@ -595,6 +632,8 @@ struct ContentView: View {
 
 struct LocationRow: View {
     let location: ScoutLocation
+    var availableLists: [LocationListData] = []
+    var onSaveToList: ((LocationListData) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -656,6 +695,21 @@ struct LocationRow: View {
             }
         }
         .padding(.vertical, 4)
+        .contextMenu {
+            if let onSaveToList, !availableLists.isEmpty {
+                Menu {
+                    ForEach(availableLists) { list in
+                        Button {
+                            onSaveToList(list)
+                        } label: {
+                            Label(list.name, systemImage: "mappin.circle")
+                        }
+                    }
+                } label: {
+                    Label("Save to List", systemImage: "folder.badge.plus")
+                }
+            }
+        }
     }
 
     private var statusIcon: String {

@@ -1,8 +1,11 @@
 import SwiftUI
+import SwiftData
 import ScoutKit
 
 struct LocationCalloutView: View {
     let location: ScoutLocation
+    var availableLists: [LocationListData] = []
+    var onSaveToList: ((LocationListData) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -60,6 +63,25 @@ struct LocationCalloutView: View {
                         }
                     }
                 }
+
+                // Save to list
+                if !availableLists.isEmpty, let onSave = onSaveToList {
+                    Divider()
+                    Menu {
+                        ForEach(availableLists) { list in
+                            Button {
+                                onSave(list)
+                            } label: {
+                                Label(list.name, systemImage: "mappin.circle")
+                            }
+                        }
+                    } label: {
+                        Label("Save to List", systemImage: "folder.badge.plus")
+                            .font(.caption.weight(.medium))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -68,13 +90,14 @@ struct LocationCalloutView: View {
         .background(.background)
     }
 
-    static func height(for location: ScoutLocation) -> CGFloat {
+    static func height(for location: ScoutLocation, hasLists: Bool = false) -> CGFloat {
         var h: CGFloat = 24  // vertical padding
         if !location.images.isEmpty { h += 120 }
         h += 28  // name
         if !location.description.isEmpty { h += 52 }
         let hasLinks = location.googleMapsURL != nil || location.sourceURL != nil
         if hasLinks { h += 28 }
+        if hasLists { h += 40 }  // save to list row
         return h
     }
 }

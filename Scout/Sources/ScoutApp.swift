@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import ScoutKit
 
 @main
@@ -14,6 +15,7 @@ struct ScoutApp: App {
             }
         }
         .environmentObject(apiKeyState)
+        .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self])
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         #endif

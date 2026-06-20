@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import SwiftData
 import ScoutKit
 import CoreVideo
 import Combine
@@ -110,6 +111,48 @@ final class LocationAnnotation: NSObject, MKAnnotation {
     init(_ location: ScoutLocation) { self.location = location }
 }
 
+final class ProjectAnnotation: NSObject, MKAnnotation {
+    let location: ScoutLocation
+    let colorHex: String
+    var coordinate: CLLocationCoordinate2D { location.coordinate }
+    var title: String? { location.name }
+    var subtitle: String? { location.description.isEmpty ? nil : location.description }
+    init(_ location: ScoutLocation, colorHex: String) {
+        self.location = location
+        self.colorHex = colorHex
+    }
+
+    #if os(macOS)
+    var pinColor: NSColor { NSColor(hexString: colorHex) ?? .systemOrange }
+    #else
+    var pinColor: UIColor { UIColor(hexString: colorHex) ?? .systemOrange }
+    #endif
+}
+
+#if os(macOS)
+private extension NSColor {
+    convenience init?(hexString: String) {
+        let hex = hexString.trimmingCharacters(in: .init(charactersIn: "#"))
+        guard let value = UInt64(hex, radix: 16) else { return nil }
+        let r = CGFloat((value >> 16) & 0xFF) / 255
+        let g = CGFloat((value >> 8) & 0xFF) / 255
+        let b = CGFloat(value & 0xFF) / 255
+        self.init(red: r, green: g, blue: b, alpha: 1)
+    }
+}
+#else
+private extension UIColor {
+    convenience init?(hexString: String) {
+        let hex = hexString.trimmingCharacters(in: .init(charactersIn: "#"))
+        guard let value = UInt64(hex, radix: 16) else { return nil }
+        let r = CGFloat((value >> 16) & 0xFF) / 255
+        let g = CGFloat((value >> 8) & 0xFF) / 255
+        let b = CGFloat(value & 0xFF) / 255
+        self.init(red: r, green: g, blue: b, alpha: 1)
+    }
+}
+#endif
+
 // MARK: - Scroll-to-zoom map subclass (macOS)
 
 #if os(macOS)
@@ -138,6 +181,7 @@ final class ZoomableMapView: MKMapView {
         }
     }
     var onPolygonComplete: (([CLLocationCoordinate2D]) -> Void)?
+    var onBuildAnnotationMenu: ((ScoutLocation) -> NSMenu?)?
 
     private var drawPoints: [CGPoint] = []
     private var drawingLayer: CAShapeLayer?
@@ -194,6 +238,22 @@ final class ZoomableMapView: MKMapView {
     private func clearDrawingLayer() {
         drawingLayer?.removeFromSuperlayer()
         drawingLayer = nil
+    }
+
+    // MARK: - Right-click context menu
+
+    override func rightMouseDown(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        // Walk up the view hierarchy from the hit view to find an annotation view
+        var candidate: NSView? = hitTest(pt)
+        while let v = candidate, !(v is MKAnnotationView) { candidate = v.superview }
+        if let annView = candidate as? MKAnnotationView,
+           let ann = annView.annotation as? LocationAnnotation,
+           let menu = onBuildAnnotationMenu?(ann.location) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
+        super.rightMouseDown(with: event)
     }
 
     // MARK: - CVDisplayLink scroll-zoom
@@ -279,6 +339,16 @@ final class ZoomableMapView: MKMapView {
 }
 #endif
 
+// MARK: - Menu action helper (macOS)
+
+#if os(macOS)
+final class MenuAction: NSObject {
+    let closure: () -> Void
+    init(_ closure: @escaping () -> Void) { self.closure = closure }
+    @objc func invoke() { closure() }
+}
+#endif
+
 // MARK: - macOS location tracking button
 
 #if os(macOS)
@@ -329,12 +399,12 @@ final class LocationTrackingButton: NSView {
 
     @objc private func tapped() {
         guard let map = mapView else { return }
-        let next: MKUserTrackingMode = map.userTrackingMode == .none ? .follow : .none
+        let next: MKUserTrackingMode = map.userTrackingMode == .follow ? .none : .follow
         map.setUserTrackingMode(next, animated: true)
     }
 
     private func refreshIcon() {
-        let tracking = mapView?.userTrackingMode != .none
+        let tracking = mapView?.userTrackingMode == .follow
         let cfg = NSImage.SymbolConfiguration(pointSize: 17, weight: .medium)
         button.image = NSImage(systemSymbolName: tracking ? "location.fill" : "location",
                                accessibilityDescription: "My location")?
@@ -349,6 +419,7 @@ final class LocationTrackingButton: NSView {
 struct ScoutMapView {
     @Binding var selection: ScoutLocation?
     var locations: [ScoutLocation]
+    var projectPins: [(ScoutLocation, String)] = []  // (location, colorHex)
     var scrollToZoom: Bool
     var initialRegion: MKCoordinateRegion?
     var controller: ScoutMapController
@@ -357,6 +428,8 @@ struct ScoutMapView {
     var searchPolygon: [CLLocationCoordinate2D]? = nil
     var onPolygonComplete: ([CLLocationCoordinate2D]) -> Void = { _ in }
     var cyclingProvider: CyclingTileProvider? = nil
+    var availableLists: [LocationListData] = []
+    var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -401,9 +474,13 @@ struct ScoutMapView {
             zoomable.scrollZoomEnabled = scrollToZoom
             zoomable.isDrawingMode = isDrawingMode
             zoomable.onPolygonComplete = onPolygonComplete
+            zoomable.onBuildAnnotationMenu = { [weak coordinator = context.coordinator] location in
+                coordinator?.buildAnnotationMenu(for: location)
+            }
         }
         #endif
         context.coordinator.syncAnnotations(map, locations: locations)
+        context.coordinator.syncProjectPins(map, pins: projectPins)
         context.coordinator.syncSelection(map, selection: selection)
         syncTileOverlay(map)
         syncPolygonOverlay(map)
@@ -454,6 +531,15 @@ struct ScoutMapView {
             map.addAnnotations(locations.map(LocationAnnotation.init))
         }
 
+        func syncProjectPins(_ map: MKMapView, pins: [(ScoutLocation, String)]) {
+            let current = map.annotations.compactMap { $0 as? ProjectAnnotation }
+            let currentIDs = Set(current.map { $0.location.id })
+            let newIDs = Set(pins.map { $0.0.id })
+            guard currentIDs != newIDs else { return }
+            map.removeAnnotations(current)
+            map.addAnnotations(pins.map { ProjectAnnotation($0.0, colorHex: $0.1) })
+        }
+
         func syncSelection(_ map: MKMapView, selection: ScoutLocation?) {
             let selected = map.selectedAnnotations.compactMap { $0 as? LocationAnnotation }.first
             guard selected?.location.id != selection?.id else { return }
@@ -496,17 +582,43 @@ struct ScoutMapView {
         #if os(macOS)
         private func showPopover(for location: ScoutLocation, from view: MKAnnotationView) {
             activePopover?.close()
-            let vc = NSHostingController(rootView: LocationCalloutView(location: location))
-            vc.view.frame.size = NSSize(width: 420, height: LocationCalloutView.height(for: location))
+            let lists = parent.availableLists
+            let saveHandler = parent.onSaveToList
+            let callout = LocationCalloutView(
+                location: location,
+                availableLists: lists,
+                onSaveToList: saveHandler.map { handler in { list in handler(location, list) } }
+            )
+            let vc = NSHostingController(rootView: callout)
+            let height = LocationCalloutView.height(for: location, hasLists: !lists.isEmpty)
+            vc.view.frame.size = NSSize(width: 420, height: height)
             let pop = NSPopover()
             pop.contentViewController = vc
             pop.contentSize = vc.view.frame.size
             pop.behavior = .transient
-            // MKAnnotationView uses flipped coordinates (Y increases down, like iOS/screen space),
-            // so .minY is the top edge → popover floats above the pin.
             pop.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
             activePopover = pop
         }
+
+        // Builds an NSMenu for right-click on an annotation, with "Save to List" submenu.
+        func buildAnnotationMenu(for location: ScoutLocation) -> NSMenu? {
+            guard !parent.availableLists.isEmpty, let handler = parent.onSaveToList else { return nil }
+            let menu = NSMenu()
+            let saveItem = NSMenuItem(title: "Save to List", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for list in parent.availableLists {
+                let act = MenuAction { handler(location, list) }
+                menuActions.append(act)
+                let item = NSMenuItem(title: list.name, action: #selector(MenuAction.invoke), keyEquivalent: "")
+                item.target = act
+                submenu.addItem(item)
+            }
+            saveItem.submenu = submenu
+            menu.addItem(saveItem)
+            return menu
+        }
+
+        private var menuActions: [MenuAction] = []
         #endif
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -525,25 +637,39 @@ struct ScoutMapView {
         }
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
-            guard let ann = annotation as? LocationAnnotation else { return nil }
-            let id = "scoutPin"
-            let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKPinAnnotationView)
-                ?? MKPinAnnotationView(annotation: annotation, reuseIdentifier: id)
-            view.annotation = annotation
-            view.pinTintColor = .systemRed
-            view.animatesDrop = false
-            #if os(macOS)
-            view.canShowCallout = false  // we use NSPopover instead
-            #else
-            view.canShowCallout = true
-            let callout = LocationCalloutView(location: ann.location)
-            let size = CGSize(width: 420, height: LocationCalloutView.height(for: ann.location))
-            let host = UIHostingController(rootView: callout)
-            host.view.frame = CGRect(origin: .zero, size: size)
-            host.view.backgroundColor = .clear
-            view.detailCalloutAccessoryView = host.view
-            #endif
-            return view
+            if let ann = annotation as? LocationAnnotation {
+                let id = "scoutPin"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKPinAnnotationView)
+                    ?? MKPinAnnotationView(annotation: annotation, reuseIdentifier: id)
+                view.annotation = annotation
+                view.pinTintColor = .systemRed
+                view.animatesDrop = false
+                #if os(macOS)
+                view.canShowCallout = false
+                #else
+                view.canShowCallout = true
+                let callout = LocationCalloutView(location: ann.location)
+                let size = CGSize(width: 420, height: LocationCalloutView.height(for: ann.location))
+                let host = UIHostingController(rootView: callout)
+                host.view.frame = CGRect(origin: .zero, size: size)
+                host.view.backgroundColor = .clear
+                view.detailCalloutAccessoryView = host.view
+                #endif
+                return view
+            }
+
+            if let ann = annotation as? ProjectAnnotation {
+                let id = "projectPin"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKPinAnnotationView)
+                    ?? MKPinAnnotationView(annotation: annotation, reuseIdentifier: id)
+                view.annotation = annotation
+                view.pinTintColor = ann.pinColor
+                view.animatesDrop = false
+                view.canShowCallout = true
+                return view
+            }
+
+            return nil
         }
     }
 }
