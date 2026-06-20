@@ -21,7 +21,7 @@ struct ProjectsPanel: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ProjectData.createdAt) private var projects: [ProjectData]
 
-    @Binding var activeList: LocationListData?
+    @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
     var onPanToPin: ((CLLocationCoordinate2D) -> Void)? = nil
 
@@ -98,7 +98,7 @@ struct ProjectsPanel: View {
                                                  : $0.createdAt < $1.createdAt
                 }
             ForEach(topLevel) { list in
-                ListCard(list: list, activeList: $activeList, modelContext: modelContext,
+                ListCard(list: list, activeListIDs: $activeListIDs, modelContext: modelContext,
                          showPinPhotos: showPinPhotos, dragState: dragState,
                          onFitToList: onFitToList, onPanToPin: onPanToPin)
             }
@@ -147,8 +147,8 @@ struct ProjectsPanel: View {
                 .font(.subheadline.weight(.semibold))
             Spacer()
             Button {
-                if let active = activeList, active.project?.persistentModelID == project.persistentModelID {
-                    activeList = nil
+                for l in project.lists where activeListIDs.contains(l.persistentModelID) {
+                    activeListIDs.remove(l.persistentModelID)
                 }
                 modelContext.delete(project)
             } label: {
@@ -193,7 +193,7 @@ struct ProjectsPanel: View {
 
 private struct ListCard: View {
     let list: LocationListData
-    @Binding var activeList: LocationListData?
+    @Binding var activeListIDs: Set<PersistentIdentifier>
     let modelContext: ModelContext
     var showPinPhotos: Bool = false
     let dragState: PinDragState
@@ -209,7 +209,7 @@ private struct ListCard: View {
     @State private var editingName = ""
     @FocusState private var nameFocused: Bool
 
-    private var isActive: Bool { activeList?.persistentModelID == list.persistentModelID }
+    private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
     private var listColor: Color { Color(hexString: list.colorHex) }
     private var isHighlighted: Bool { isTargeted || isPinDropTarget }
 
@@ -224,7 +224,7 @@ private struct ListCard: View {
         VStack(alignment: .leading, spacing: 6) {
             reorderZone   // drop a list here to place it before this one
             card
-            if !sortedChildren.isEmpty {
+            if isExpanded, !sortedChildren.isEmpty {
                 childListsView
             }
         }
@@ -234,7 +234,7 @@ private struct ListCard: View {
     private var reorderZone: some View {
         RoundedRectangle(cornerRadius: 2)
             .fill(isReorderTarget ? listColor : Color.clear)
-            .frame(height: isReorderTarget ? 4 : 6)
+            .frame(height: isReorderTarget ? 6 : 14)
             .onDrop(of: [.text], isTargeted: $isReorderTarget) { _ in
                 guard let dragged = dragState.draggedList else { return false }
                 reorderListBefore(dragged, target: list)
@@ -247,7 +247,7 @@ private struct ListCard: View {
     private var childListsView: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(sortedChildren) { child in
-                ListCard(list: child, activeList: $activeList, modelContext: modelContext,
+                ListCard(list: child, activeListIDs: $activeListIDs, modelContext: modelContext,
                          showPinPhotos: showPinPhotos, dragState: dragState,
                          onFitToList: onFitToList, onPanToPin: onPanToPin)
             }
@@ -307,7 +307,7 @@ private struct ListCard: View {
                 }
             }
             Button(role: .destructive) {
-                if isActive { activeList = nil }
+                activeListIDs.remove(list.persistentModelID)
                 modelContext.delete(list)
             } label: {
                 Label("Delete List", systemImage: "trash")
@@ -328,7 +328,8 @@ private struct ListCard: View {
 
             Button {
                 withAnimation(.spring(duration: 0.2)) {
-                    activeList = isActive ? nil : list
+                    if isActive { activeListIDs.remove(list.persistentModelID) }
+                    else { activeListIDs.insert(list.persistentModelID) }
                 }
             } label: {
                 ZStack {
@@ -376,7 +377,7 @@ private struct ListCard: View {
             Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .opacity(list.pins.isEmpty ? 0 : 1)
+                .opacity(list.pins.isEmpty && sortedChildren.isEmpty ? 0 : 1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

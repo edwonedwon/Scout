@@ -63,7 +63,7 @@ struct ContentView: View {
     @State private var viewMode: ViewMode = .map
     @State private var showProjectsPanel = false
     @State private var showRightPanel = true
-    @State private var activeList: LocationListData?
+    @State private var activeListIDs: Set<PersistentIdentifier> = []
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -81,7 +81,7 @@ struct ContentView: View {
         HStack(spacing: 0) {
             if showProjectsPanel {
                 ProjectsPanel(
-                    activeList: $activeList,
+                    activeListIDs: $activeListIDs,
                     onFitToList: { pins in
                         let coords = pins.map(\.coordinate)
                         guard !coords.isEmpty else { return }
@@ -336,8 +336,10 @@ struct ContentView: View {
     }
 
     private var projectPins: [(ScoutLocation, String)] {
-        guard let list = activeList else { return [] }
-        return list.pins.map { ($0.asScoutLocation(), list.colorHex) }
+        let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
+        return active.flatMap { list in
+            list.pins.map { ($0.asScoutLocation(), list.colorHex) }
+        }
     }
 
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
@@ -404,59 +406,62 @@ struct ContentView: View {
     }
 
     private var regionSearchOverlay: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                Image(systemName: "globe.europe.africa")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(regionName != nil ? .blue : .primary)
+        HStack(spacing: 4) {
+            Image(systemName: "globe.europe.africa")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(regionName != nil ? .blue : .primary)
 
-                TextField("Country, state, city…", text: $regionQuery)
-                    .textFieldStyle(.plain)
-                    .font(.caption)
-                    .frame(width: 140)
-                    .onSubmit { Task { await runRegionSearch() } }
+            TextField("Country, state, city…", text: $regionQuery)
+                .textFieldStyle(.plain)
+                .font(.caption)
+                .frame(width: 140)
+                .onSubmit { Task { await runRegionSearch() } }
 
-                if isRegionSearching {
-                    ProgressView().controlSize(.mini)
-                } else if !regionQuery.isEmpty || regionName != nil {
-                    Button {
-                        regionQuery = ""
-                        regionName = nil
-                        searchArea.clear()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Button { Task { await runRegionSearch() } } label: {
-                        Image(systemName: "return")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(regionQuery.isEmpty)
+            if isRegionSearching {
+                ProgressView().controlSize(.mini)
+            } else if !regionQuery.isEmpty || regionName != nil {
+                Button {
+                    regionQuery = ""
+                    regionName = nil
+                    searchArea.clear()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.plain)
+            } else {
+                Button { Task { await runRegionSearch() } } label: {
+                    Image(systemName: "return")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(regionQuery.isEmpty)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-            .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(regionName != nil ? Color.blue.opacity(0.5) : Color.clear, lineWidth: 1.5)
-            )
-
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(regionName != nil ? Color.blue.opacity(0.5) : Color.clear, lineWidth: 1.5)
+        )
+        // Found-region label floats above the pill without changing the row height
+        .overlay(alignment: .topLeading) {
             if let name = regionName {
                 Text(name)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.blue)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.regularMaterial, in: Capsule())
+                    .fixedSize()
+                    .offset(y: -22)
                     .transition(.opacity)
             }
         }
-        .padding(16)
         .animation(.easeInOut(duration: 0.2), value: regionName)
     }
 
@@ -665,34 +670,33 @@ struct ContentView: View {
     }
 
     private var lassoControls: some View {
-        VStack(spacing: 8) {
+        Button {
+            searchArea.isDrawing.toggle()
+        } label: {
+            Image(systemName: searchArea.isDrawing ? "xmark.circle.fill" : "lasso")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(searchArea.isDrawing ? .red : searchArea.isActive ? .blue : .primary)
+                .frame(width: 36, height: 36)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
+        .help(searchArea.isDrawing ? "Cancel" : searchArea.isActive ? "Redraw search area" : "Draw search area")
+        // Clear button floats above without changing the row height
+        .overlay(alignment: .top) {
             if searchArea.isActive {
                 Button(action: searchArea.clear) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
+                        .font(.title3)
                         .symbolRenderingMode(.multicolor)
+                        .background(.regularMaterial, in: Circle())
                 }
                 .buttonStyle(.plain)
                 .help("Clear search area")
+                .offset(y: -28)
                 .transition(.scale.combined(with: .opacity))
             }
-            Button {
-                if searchArea.isDrawing {
-                    searchArea.isDrawing = false
-                } else {
-                    searchArea.isDrawing = true
-                }
-            } label: {
-                Image(systemName: searchArea.isDrawing ? "xmark.circle.fill" : "lasso")
-                    .font(.title2)
-                    .foregroundStyle(searchArea.isDrawing ? .red : searchArea.isActive ? .blue : .primary)
-                    .frame(width: 36, height: 36)
-                    .background(.regularMaterial, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .help(searchArea.isDrawing ? "Cancel" : searchArea.isActive ? "Redraw search area" : "Draw search area")
         }
-        .padding(16)
         .animation(.spring(duration: 0.2), value: searchArea.isActive)
     }
 
