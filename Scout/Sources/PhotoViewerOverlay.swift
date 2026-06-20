@@ -94,7 +94,8 @@ struct PhotoViewerOverlay: View {
                         }
                     }
 
-                    // Arrow buttons
+                    // Arrow buttons — keep always-active so they absorb taps
+                    // even at the boundary (prevents accidental backdrop dismiss).
                     HStack(spacing: 32) {
                         Button {
                             viewer.previous()
@@ -103,10 +104,11 @@ struct PhotoViewerOverlay: View {
                                 .font(.system(size: 36))
                                 .symbolRenderingMode(.hierarchical)
                                 .foregroundStyle(.white)
+                                .opacity(viewer.selectedIndex > 0 ? 1 : 0.2)
+                                .frame(width: 60, height: 60)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .opacity(viewer.selectedIndex > 0 ? 1 : 0.2)
-                        .disabled(viewer.selectedIndex == 0)
 
                         Button {
                             viewer.next()
@@ -115,10 +117,11 @@ struct PhotoViewerOverlay: View {
                                 .font(.system(size: 36))
                                 .symbolRenderingMode(.hierarchical)
                                 .foregroundStyle(.white)
+                                .opacity(viewer.selectedIndex < viewer.images.count - 1 ? 1 : 0.2)
+                                .frame(width: 60, height: 60)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .opacity(viewer.selectedIndex < viewer.images.count - 1 ? 1 : 0.2)
-                        .disabled(viewer.selectedIndex >= viewer.images.count - 1)
                     }
 
                     // Location info bar
