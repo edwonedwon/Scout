@@ -21,7 +21,13 @@ struct ContentView: View {
 
     @AppStorage("rightPanel.tab") private var rightPanelTab: RightPanelTab = .ai
     @AppStorage("map.cyclingProvider") private var cyclingProviderRaw: String = ""
+    @AppStorage("map.style") private var mapStyle: MapStyle = .explore
     @AppStorage("wikimedia.limit") private var wikiLimit: Double = 50
+    @AppStorage("flickr.limit") private var flickrLimit: Double = 50
+    @State private var showLayersPopover = false
+    @State private var regionQuery = ""
+    @State private var regionName: String? = nil
+    @State private var isRegionSearching = false
 
     private var cyclingProvider: CyclingTileProvider? {
         get { CyclingTileProvider(rawValue: cyclingProviderRaw) }
@@ -154,20 +160,19 @@ struct ContentView: View {
                 TextField(rightPanelTab.placeholder, text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit {
-                        if rightPanelTab == .wikimedia || !searchText.isEmpty {
-                            Task { await runSearch() }
-                        }
+                        let canBrowse = rightPanelTab == .wikimedia || rightPanelTab == .flickr
+                        if canBrowse || !searchText.isEmpty { Task { await runSearch() } }
                     }
                 Button { Task { await runSearch() } } label: {
                     Image(systemName: "magnifyingglass")
                 }
-                .disabled((searchText.isEmpty && rightPanelTab != .wikimedia) || isSearching)
+                .disabled((searchText.isEmpty && rightPanelTab != .wikimedia && rightPanelTab != .flickr) || isSearching)
             }
             .padding(.horizontal, 10)
             .padding(.top, 8)
-            .padding(.bottom, rightPanelTab == .wikimedia ? 4 : 8)
+            .padding(.bottom, (rightPanelTab == .wikimedia || rightPanelTab == .flickr) ? 4 : 8)
 
-            if rightPanelTab == .wikimedia {
+            if rightPanelTab == .wikimedia || rightPanelTab == .flickr {
                 Button {
                     Task { await runSearch() }
                 } label: {
@@ -185,8 +190,11 @@ struct ContentView: View {
                     Text("Max results:")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Slider(value: $wikiLimit, in: 10...500, step: 10)
-                    Text("\(Int(wikiLimit))")
+                    Slider(
+                        value: rightPanelTab == .flickr ? $flickrLimit : $wikiLimit,
+                        in: 10...500, step: 10
+                    )
+                    Text("\(Int(rightPanelTab == .flickr ? flickrLimit : wikiLimit))")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .frame(width: 30, alignment: .trailing)
@@ -312,6 +320,7 @@ struct ContentView: View {
             isDrawingMode: searchArea.isDrawing,
             searchPolygon: searchArea.polygon,
             onPolygonComplete: { coords in searchArea.setPolygon(coords) },
+            mapType: mapStyle.mapType,
             cyclingProvider: cyclingProvider,
             availableLists: allLists,
             onSaveToList: saveToList
@@ -332,7 +341,7 @@ struct ContentView: View {
         }
         .overlay(alignment: .bottomLeading) {
             HStack(alignment: .bottom, spacing: 8) {
-                cyclingControls
+                layersButton
                 if cyclingProvider == .cyclOSM {
                     cyclOSMLegend
                         .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
@@ -342,8 +351,95 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.2), value: cyclingProvider == .cyclOSM)
         }
         .overlay(alignment: .leading) {
-            lassoControls
+            VStack(spacing: 8) {
+                regionSearchOverlay
+                lassoControls
+            }
         }
+    }
+
+    private var regionSearchOverlay: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: "globe.europe.africa")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(regionName != nil ? .blue : .primary)
+
+                TextField("Country, state, city…", text: $regionQuery)
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+                    .frame(width: 140)
+                    .onSubmit { Task { await runRegionSearch() } }
+
+                if isRegionSearching {
+                    ProgressView().controlSize(.mini)
+                } else if !regionQuery.isEmpty || regionName != nil {
+                    Button {
+                        regionQuery = ""
+                        regionName = nil
+                        searchArea.clear()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button { Task { await runRegionSearch() } } label: {
+                        Image(systemName: "return")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(regionQuery.isEmpty)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(regionName != nil ? Color.blue.opacity(0.5) : Color.clear, lineWidth: 1.5)
+            )
+
+            if let name = regionName {
+                Text(name)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.blue)
+                    .padding(.horizontal, 10)
+                    .transition(.opacity)
+            }
+        }
+        .padding(16)
+        .animation(.easeInOut(duration: 0.2), value: regionName)
+    }
+
+    @MainActor
+    private func runRegionSearch() async {
+        let q = regionQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return }
+        isRegionSearching = true
+        do {
+            let result = try await NominatimService.shared.search(q)
+            searchArea.setPolygon(result.polygon)
+            regionName = result.name
+            regionQuery = ""
+            // Fit map to the boundary bounding box
+            let b = result.bbox
+            let center = CLLocationCoordinate2D(
+                latitude:  (b.minLat + b.maxLat) / 2,
+                longitude: (b.minLng + b.maxLng) / 2
+            )
+            let span = MKCoordinateSpan(
+                latitudeDelta:  (b.maxLat - b.minLat) * 1.15,
+                longitudeDelta: (b.maxLng - b.minLng) * 1.15
+            )
+            mapController.setRegion(MKCoordinateRegion(center: center, span: span), animated: true)
+        } catch {
+            searchError = error.localizedDescription
+        }
+        isRegionSearching = false
     }
 
     private var cyclOSMLegend: some View {
@@ -416,46 +512,21 @@ struct ContentView: View {
         .padding(.top, 14)
     }
 
-    private var cyclingControls: some View {
-        Menu {
-            ForEach(CyclingTileProvider.allCases) { provider in
-                Button {
-                    if cyclingProvider == provider {
-                        cyclingProviderRaw = ""
-                    } else {
-                        cyclingProviderRaw = provider.rawValue
-                    }
-                } label: {
-                    Label {
-                        VStack(alignment: .leading) {
-                            Text(provider.displayName)
-                            Text(provider.description)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    } icon: {
-                        if cyclingProvider == provider {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-            }
-            if cyclingProvider != nil {
-                Divider()
-                Button("Turn Off", role: .destructive) {
-                    cyclingProviderRaw = ""
-                }
-            }
-        } label: {
-            Image(systemName: "bicycle")
-                .font(.title2)
-                .foregroundStyle(cyclingProvider != nil ? .blue : .primary)
+    private var layersButton: some View {
+        let active = mapStyle != .explore || cyclingProvider != nil
+        return Button { showLayersPopover.toggle() } label: {
+            Image(systemName: "square.3.layers.3d")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(active ? .blue : .primary)
                 .frame(width: 36, height: 36)
                 .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
         }
         .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .help(cyclingProvider.map { "Cycling: \($0.displayName)" } ?? "Show cycling map")
+        .help("Map Layers")
+        .popover(isPresented: $showLayersPopover, arrowEdge: .top) {
+            LayersPopover(mapStyle: $mapStyle, cyclingProviderRaw: $cyclingProviderRaw)
+        }
     }
 
     private var lassoControls: some View {
@@ -527,16 +598,16 @@ struct ContentView: View {
 
     @MainActor
     private func runFlickrSearch() async {
-        guard !searchText.isEmpty else { return }
         isSearching = true
         searchError = nil
         locations = []
         do {
+            let query = searchText.isEmpty ? nil : searchText
             dlog("Flickr search: \"\(searchText)\"", level: .info, tag: "Search")
             let region: GooglePlacesService.MapRegion? =
                 searchArea.mapRegion ??
                 (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
-            var results = try await FlickrService.shared.search(query: searchText, region: region)
+            var results = try await FlickrService.shared.search(query: query, region: region, limit: Int(flickrLimit))
             if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
             locations = results
             selectedLocation = nil
@@ -780,6 +851,186 @@ enum RightPanelTab: String, CaseIterable, Identifiable {
 
 enum ViewMode: CaseIterable {
     case map, photos
+}
+
+// MARK: - Map style
+
+enum MapStyle: String, CaseIterable, Identifiable {
+    case explore, satellite, hybrid, muted
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .explore:   "Explore"
+        case .satellite: "Satellite"
+        case .hybrid:    "Hybrid"
+        case .muted:     "Muted"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .explore:   "map"
+        case .satellite: "globe.americas"
+        case .hybrid:    "globe.americas.fill"
+        case .muted:     "square.dashed"
+        }
+    }
+
+    // Thumbnail card background
+    var cardBackground: Color {
+        switch self {
+        case .explore:   Color(.sRGB, red: 0.87, green: 0.93, blue: 0.82)
+        case .satellite: Color(.sRGB, red: 0.12, green: 0.22, blue: 0.16)
+        case .hybrid:    Color(.sRGB, red: 0.18, green: 0.28, blue: 0.22)
+        case .muted:     Color(.sRGB, red: 0.88, green: 0.87, blue: 0.85)
+        }
+    }
+
+    var iconColor: Color {
+        switch self {
+        case .explore:   .green
+        case .satellite: .white
+        case .hybrid:    .white
+        case .muted:     .secondary
+        }
+    }
+
+    var mapType: MKMapType {
+        switch self {
+        case .explore:   .standard
+        case .satellite: .satellite
+        case .hybrid:    .hybrid
+        case .muted:     .mutedStandard
+        }
+    }
+}
+
+// MARK: - Layers popover
+
+struct LayersPopover: View {
+    @Binding var mapStyle: MapStyle
+    @Binding var cyclingProviderRaw: String
+
+    private var cyclingProvider: CyclingTileProvider? {
+        CyclingTileProvider(rawValue: cyclingProviderRaw)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // ── Map type ──────────────────────────────────
+            Text("Map Type")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 10)
+
+            HStack(spacing: 8) {
+                ForEach(MapStyle.allCases) { style in
+                    styleCard(style)
+                }
+            }
+            .padding(.horizontal, 12)
+
+            Divider().padding(.vertical, 12)
+
+            // ── Overlays ──────────────────────────────────
+            Text("Overlays")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+
+            VStack(spacing: 0) {
+                // Cycling toggle header
+                HStack {
+                    Label("Cycling", systemImage: "bicycle")
+                        .font(.subheadline)
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { cyclingProvider != nil },
+                        set: { on in
+                            cyclingProviderRaw = on ? CyclingTileProvider.cyclOSM.rawValue : ""
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+
+                // Sub-options when cycling is on
+                if cyclingProvider != nil {
+                    Divider().padding(.leading, 12)
+                    ForEach(CyclingTileProvider.allCases) { provider in
+                        Button {
+                            cyclingProviderRaw = provider.rawValue
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(provider.displayName)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.primary)
+                                    Text(provider.description)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if cyclingProvider == provider {
+                                    Image(systemName: "checkmark")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.blue)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                        if provider != CyclingTileProvider.allCases.last {
+                            Divider().padding(.leading, 12)
+                        }
+                    }
+                }
+            }
+            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 14)
+        }
+        .frame(width: 268)
+    }
+
+    private func styleCard(_ style: MapStyle) -> some View {
+        let isSelected = mapStyle == style
+        return Button { mapStyle = style } label: {
+            VStack(spacing: 5) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(style.cardBackground)
+                    Image(systemName: style.icon)
+                        .font(.title2.weight(.medium))
+                        .foregroundStyle(style.iconColor)
+                }
+                .frame(height: 54)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .strokeBorder(
+                            isSelected ? Color.accentColor : Color.primary.opacity(0.12),
+                            lineWidth: isSelected ? 2.5 : 1
+                        )
+                )
+                .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
+
+                Text(style.label)
+                    .font(.caption2)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+            }
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+    }
 }
 
 // MARK: - Preview

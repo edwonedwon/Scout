@@ -379,6 +379,7 @@ struct ScoutMapView {
     var isDrawingMode: Bool = false
     var searchPolygon: [CLLocationCoordinate2D]? = nil
     var onPolygonComplete: ([CLLocationCoordinate2D]) -> Void = { _ in }
+    var mapType: MKMapType = .standard
     var cyclingProvider: CyclingTileProvider? = nil
     var availableLists: [LocationListData] = []
     var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
@@ -420,6 +421,11 @@ struct ScoutMapView {
             }
         }
         #endif
+        if map.mapType != mapType {
+            map.mapType = mapType
+            // MKMapView can reset showsUserLocation when mapType changes — re-assert it
+            map.showsUserLocation = true
+        }
         context.coordinator.syncAnnotations(map, locations: locations)
         context.coordinator.syncProjectPins(map, pins: projectPins)
         context.coordinator.syncSelection(map, selection: selection)

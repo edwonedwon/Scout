@@ -142,6 +142,7 @@ private struct ListCard: View {
     @State private var isExpanded = true
     @State private var isEditingName = false
     @State private var editingName = ""
+    @FocusState private var nameFocused: Bool
 
     private var isActive: Bool { activeList?.persistentModelID == list.persistentModelID }
     private var listColor: Color { Color(hexString: list.colorHex) }
@@ -188,15 +189,36 @@ private struct ListCard: View {
 
     private var cardHeader: some View {
         HStack(spacing: 8) {
-            Circle().fill(listColor).frame(width: 10, height: 10)
+            // Select button — always visible ring, fills when active
+            Button {
+                withAnimation(.spring(duration: 0.2)) {
+                    activeList = isActive ? nil : list
+                }
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(isActive ? listColor : listColor.opacity(0.15))
+                        .frame(width: 14, height: 14)
+                    Circle()
+                        .strokeBorder(listColor, lineWidth: isActive ? 0 : 1.5)
+                        .frame(width: 14, height: 14)
+                    if isActive {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
 
             if isEditingName {
                 TextField("List name", text: $editingName)
                     .font(.subheadline)
                     .textFieldStyle(.plain)
+                    .focused($nameFocused)
                     .onSubmit { commitName() }
                     .onExitCommand { isEditingName = false }
-                    // Focus loss = commit
+                    .onChange(of: nameFocused) { _, focused in if !focused { commitName() } }
                     .onDisappear { commitName() }
             } else {
                 Text(list.name)
@@ -211,38 +233,35 @@ private struct ListCard: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            // Active-on-map indicator
-            Image(systemName: "mappin.circle.fill")
-                .font(.caption)
-                .foregroundStyle(isActive ? listColor : Color.clear)
-
-            // Expand/collapse chevron
-            if !list.pins.isEmpty {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
-                } label: {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
+            // Chevron — indicator only, whole row is tappable
+            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .opacity(list.pins.isEmpty ? 0 : 1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(isTargeted ? listColor.opacity(0.08) : Color.clear)
+        .background(
+            isEditingName
+                ? listColor.opacity(0.12)
+                : isTargeted ? listColor.opacity(0.08) : Color.clear
+        )
+        .overlay(alignment: .bottom) {
+            if isEditingName {
+                listColor.frame(height: 1.5)
+            }
+        }
         .contentShape(Rectangle())
         .onTapGesture {
             guard !isEditingName else { return }
-            withAnimation(.spring(duration: 0.2)) {
-                activeList = isActive ? nil : list
-            }
+            withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
         }
     }
 
     private func beginEditing() {
         editingName = list.name
         isEditingName = true
+        DispatchQueue.main.async { nameFocused = true }
     }
 
     private func commitName() {
