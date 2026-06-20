@@ -7,6 +7,13 @@ public final class FlickrService {
 
     private let base = "https://www.flickr.com/services/rest/"
 
+    private static let flickrDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
     private var apiKey: String {
         KeychainService.load(forKey: KeychainService.flickrAPIKey) ?? ""
     }
@@ -23,7 +30,7 @@ public final class FlickrService {
             .init(name: "has_geo",        value: "1"),
             .init(name: "content_type",   value: "1"),   // photos only
             .init(name: "media",          value: "photos"),
-            .init(name: "extras",         value: "url_l,url_m,geo,description,owner_name,views"),
+            .init(name: "extras",         value: "url_l,url_m,geo,description,owner_name,views,date_taken"),
             .init(name: "sort",           value: query == nil ? "interestingness-desc" : "relevance"),
             .init(name: "per_page",       value: "\(min(max(limit, 1), 500))"),
             .init(name: "format",         value: "json"),
@@ -74,8 +81,9 @@ public final class FlickrService {
                   lat != 0 || lng != 0 else { return nil }
 
             let imageURL = photo.url_l ?? photo.url_m
+            let dateTaken = photo.datetaken.flatMap { FlickrService.flickrDateFormatter.date(from: $0) }
             let images: [ScoutImage] = imageURL.map {
-                [ScoutImage(url: URL(string: $0), source: .googleMaps)]
+                [ScoutImage(url: URL(string: $0), source: .googleMaps, dateTaken: dateTaken)]
             } ?? []
 
             let pageURL = URL(string: "https://www.flickr.com/photos/\(photo.owner)/\(photo.id)")
@@ -114,6 +122,7 @@ public final class FlickrService {
             let url_l: String?
             let url_m: String?
             let description: DescriptionContent?
+            let datetaken: String?   // "2023-07-14 10:32:01"
 
             struct DescriptionContent: Decodable {
                 let _content: String

@@ -25,9 +25,24 @@ struct ContentView: View {
     @AppStorage("wikimedia.limit") private var wikiLimit: Double = 50
     @AppStorage("flickr.limit") private var flickrLimit: Double = 50
     @State private var showLayersPopover = false
+    @AppStorage("map.showPhotoAnnotations") private var showPhotoAnnotations = false
     @State private var regionQuery = ""
     @State private var regionName: String? = nil
     @State private var isRegionSearching = false
+
+    // Boundary overlay state
+    @AppStorage("boundary.showPrefectures") private var showPrefectures = false
+    @AppStorage("boundary.showMunicipalities") private var showMunicipalities = false
+    @AppStorage("boundary.showNames") private var showBoundaryNames = true
+    @AppStorage("boundary.opacity") private var boundaryOpacity: Double = 0.2
+    @State private var showBoundaryPopover = false
+    @State private var prefectureBoundaries: [JapanBoundaryService.BoundaryData] = []
+    @State private var municipalityBoundaries: [JapanBoundaryService.BoundaryData] = []
+    @State private var isLoadingPrefectures = false
+    @State private var isLoadingMunicipalities = false
+    @State private var boundaryError: String? = nil
+    @State private var cachedBoundaryPolygons: [BoundaryPolygon] = []
+    @AppStorage("boundary.nameLanguage") private var boundaryNameLanguage: BoundaryNameLanguage = .japanese
 
     private var cyclingProvider: CyclingTileProvider? {
         get { CyclingTileProvider(rawValue: cyclingProviderRaw) }
@@ -65,7 +80,17 @@ struct ContentView: View {
     var body: some View {
         HStack(spacing: 0) {
             if showProjectsPanel {
-                ProjectsPanel(activeList: $activeList)
+                ProjectsPanel(
+                    activeList: $activeList,
+                    onFitToList: { pins in
+                        let coords = pins.map(\.coordinate)
+                        guard !coords.isEmpty else { return }
+                        mapController.fit(coords, animated: true)
+                    },
+                    onPanToPin: { coord in
+                        mapController.pan(to: coord, animated: true)
+                    }
+                )
                     .frame(width: 240)
                     .transition(.move(edge: .leading))
                 Divider()
@@ -205,6 +230,27 @@ struct ContentView: View {
 
             Divider()
 
+            if !locations.isEmpty {
+                HStack {
+                    Text("\(locations.count) results")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        locations = []
+                        selectedLocation = nil
+                    } label: {
+                        Label("Clear", systemImage: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                Divider()
+            }
+
             List(locations, selection: $selectedLocation) { location in
                 LocationRow(location: location, availableLists: allLists) { list in
                     saveToList(location, list)
@@ -297,7 +343,7 @@ struct ContentView: View {
     }
 
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
-        let pin = PinnedLocationData(from: location)
+        let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
         pin.list = list
         list.pins.append(pin)
         modelContext.insert(pin)
@@ -322,8 +368,13 @@ struct ContentView: View {
             onPolygonComplete: { coords in searchArea.setPolygon(coords) },
             mapType: mapStyle.mapType,
             cyclingProvider: cyclingProvider,
+            showPhotoAnnotations: showPhotoAnnotations,
             availableLists: allLists,
-            onSaveToList: saveToList
+            onSaveToList: saveToList,
+            boundaryPolygons: cachedBoundaryPolygons,
+            boundaryOpacity: boundaryOpacity,
+            showBoundaryNames: showBoundaryNames,
+            boundaryNameLanguage: boundaryNameLanguage
         )
         .ignoresSafeArea()
         .overlay(alignment: .topTrailing) {
@@ -342,6 +393,7 @@ struct ContentView: View {
         .overlay(alignment: .bottomLeading) {
             HStack(alignment: .bottom, spacing: 8) {
                 layersButton
+                boundaryButton
                 if cyclingProvider == .cyclOSM {
                     cyclOSMLegend
                         .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
@@ -525,8 +577,98 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .help("Map Layers")
         .popover(isPresented: $showLayersPopover, arrowEdge: .top) {
-            LayersPopover(mapStyle: $mapStyle, cyclingProviderRaw: $cyclingProviderRaw)
+            LayersPopover(mapStyle: $mapStyle, cyclingProviderRaw: $cyclingProviderRaw, showPhotoAnnotations: $showPhotoAnnotations)
         }
+    }
+
+    private var boundaryButton: some View {
+        let active = showPrefectures || showMunicipalities
+        return Button { showBoundaryPopover.toggle() } label: {
+            Image(systemName: "map")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(active ? .orange : .primary)
+                .frame(width: 36, height: 36)
+                .background(.regularMaterial, in: Circle())
+                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
+        .help("Japan Boundaries")
+        .popover(isPresented: $showBoundaryPopover, arrowEdge: .top) {
+            BoundarySettingsPopover(
+                showPrefectures: $showPrefectures,
+                showMunicipalities: $showMunicipalities,
+                showNames: $showBoundaryNames,
+                opacity: $boundaryOpacity,
+                nameLanguage: $boundaryNameLanguage,
+                isLoadingPrefectures: isLoadingPrefectures,
+                isLoadingMunicipalities: isLoadingMunicipalities,
+                prefectureCount: prefectureBoundaries.count,
+                municipalityCount: municipalityBoundaries.count,
+                error: boundaryError
+            )
+            .onChange(of: showPrefectures) { _, on in
+                if on { Task { await loadPrefectures() } }
+                else { rebuildBoundaryPolygons() }
+            }
+            .onChange(of: showMunicipalities) { _, on in
+                if on { Task { await loadMunicipalities() } }
+                else { rebuildBoundaryPolygons() }
+            }
+        }
+    }
+
+    // MARK: - Boundary helpers
+
+    private func rebuildBoundaryPolygons() {
+        var result: [BoundaryPolygon] = []
+        let active: [JapanBoundaryService.BoundaryData] = (showPrefectures ? prefectureBoundaries : [])
+            + (showMunicipalities ? municipalityBoundaries : [])
+        for (idx, boundary) in active.enumerated() {
+            for ring in boundary.rings {
+                guard ring.count >= 3 else { continue }
+                var coords = ring
+                let poly = BoundaryPolygon(coordinates: &coords, count: coords.count)
+                poly.boundaryName = boundary.name
+                poly.boundaryNameEn = boundary.nameEn
+                poly.colorIndex = idx
+                result.append(poly)
+            }
+        }
+        cachedBoundaryPolygons = result
+    }
+
+    private func loadPrefectures() async {
+        guard prefectureBoundaries.isEmpty else { return }
+        isLoadingPrefectures = true
+        boundaryError = nil
+        do {
+            prefectureBoundaries = try await JapanBoundaryService.shared.fetchPrefectures()
+            rebuildBoundaryPolygons()
+        } catch {
+            boundaryError = "Prefectures: \(error.localizedDescription)"
+            showPrefectures = false
+        }
+        isLoadingPrefectures = false
+    }
+
+    private func loadMunicipalities() async {
+        isLoadingMunicipalities = true
+        boundaryError = nil
+        let region = mapController.mapView?.region
+        let bbox = JapanBoundaryService.BoundingBox(
+            south: (region?.center.latitude ?? 34) - (region?.span.latitudeDelta ?? 2) / 2,
+            west:  (region?.center.longitude ?? 135) - (region?.span.longitudeDelta ?? 2) / 2,
+            north: (region?.center.latitude ?? 34) + (region?.span.latitudeDelta ?? 2) / 2,
+            east:  (region?.center.longitude ?? 135) + (region?.span.longitudeDelta ?? 2) / 2
+        )
+        do {
+            municipalityBoundaries = try await JapanBoundaryService.shared.fetchMunicipalities(in: bbox)
+            rebuildBoundaryPolygons()
+        } catch {
+            boundaryError = "Cities: \(error.localizedDescription)"
+            showMunicipalities = false
+        }
+        isLoadingMunicipalities = false
     }
 
     private var lassoControls: some View {
@@ -912,6 +1054,7 @@ enum MapStyle: String, CaseIterable, Identifiable {
 struct LayersPopover: View {
     @Binding var mapStyle: MapStyle
     @Binding var cyclingProviderRaw: String
+    @Binding var showPhotoAnnotations: Bool
 
     private var cyclingProvider: CyclingTileProvider? {
         CyclingTileProvider(rawValue: cyclingProviderRaw)
@@ -935,6 +1078,27 @@ struct LayersPopover: View {
             .padding(.horizontal, 12)
 
             Divider().padding(.vertical, 12)
+
+            // ── Pins ──────────────────────────────────────
+            Text("Pins")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+
+            HStack {
+                Label("Show Photos", systemImage: "photo.on.rectangle")
+                    .font(.subheadline)
+                Spacer()
+                Toggle("", isOn: $showPhotoAnnotations)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+
+            Divider().padding(.bottom, 12)
 
             // ── Overlays ──────────────────────────────────
             Text("Overlays")
@@ -1036,6 +1200,103 @@ struct LayersPopover: View {
 // MARK: - Preview
 
 #if DEBUG
+// MARK: - Boundary settings popover
+
+struct BoundarySettingsPopover: View {
+    @Binding var showPrefectures: Bool
+    @Binding var showMunicipalities: Bool
+    @Binding var showNames: Bool
+    @Binding var opacity: Double
+    @Binding var nameLanguage: BoundaryNameLanguage
+
+    let isLoadingPrefectures: Bool
+    let isLoadingMunicipalities: Bool
+    let prefectureCount: Int
+    let municipalityCount: Int
+    let error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Japan Boundaries")
+                .font(.headline)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 10)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Boundary Level").font(.caption).foregroundStyle(.secondary).padding(.bottom, 2)
+
+                HStack {
+                    Toggle(isOn: $showPrefectures) {
+                        HStack(spacing: 4) {
+                            Text("Prefectures")
+                            if isLoadingPrefectures { ProgressView().controlSize(.mini) }
+                            else if prefectureCount > 0 { Text("(\(prefectureCount))").foregroundStyle(.secondary).font(.caption) }
+                        }
+                    }
+                    Spacer()
+                }
+                HStack {
+                    Toggle(isOn: $showMunicipalities) {
+                        HStack(spacing: 4) {
+                            Text("Cities / Towns")
+                            if isLoadingMunicipalities { ProgressView().controlSize(.mini) }
+                            else if municipalityCount > 0 { Text("(\(municipalityCount))").foregroundStyle(.secondary).font(.caption) }
+                        }
+                    }
+                    Spacer()
+                }
+
+                if let error {
+                    Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Display").font(.caption).foregroundStyle(.secondary)
+
+                Toggle("Show Names", isOn: $showNames)
+
+                if showNames {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Name language").font(.caption).foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            ForEach(BoundaryNameLanguage.allCases, id: \.self) { lang in
+                                Toggle(isOn: Binding(
+                                    get: { nameLanguage == lang },
+                                    set: { if $0 { nameLanguage = lang } }
+                                )) {
+                                    Text(lang.label).font(.caption)
+                                }
+                                .toggleStyle(.button)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
+                }
+
+                HStack {
+                    Text("Fill Opacity").font(.subheadline)
+                    Spacer()
+                    Text("\(Int(opacity * 100))%").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Slider(value: $opacity, in: 0.02...0.5)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .animation(.easeInOut(duration: 0.15), value: showNames)
+        }
+        .frame(width: 260)
+    }
+}
+
 #Preview("Main layout", traits: .fixedLayout(width: 1200, height: 800)) {
     ContentView()
         .environmentObject(APIKeyState.shared)

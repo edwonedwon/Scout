@@ -62,15 +62,19 @@ final class PinnedLocationData {
     var longitude: Double
     var statusRaw: String
     var createdAt: Date
+    var sortOrder: Int
+    var imageURL: String?
     var list: LocationListData?
 
-    init(from location: ScoutLocation) {
+    init(from location: ScoutLocation, sortOrder: Int = 0) {
         self.name = location.name
         self.notes = location.description
         self.latitude = location.coordinate.latitude
         self.longitude = location.coordinate.longitude
         self.statusRaw = LocationStatus.scouted.rawValue
         self.createdAt = Date()
+        self.sortOrder = sortOrder
+        self.imageURL = location.images.first?.url?.absoluteString
     }
 
     var coordinate: CLLocationCoordinate2D {

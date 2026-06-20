@@ -54,17 +54,19 @@ public struct ScoutImage: Identifiable, Codable, Hashable {
     public var localPath: String?
     public var caption: String
     public var source: ImageSource
+    public var dateTaken: Date?
 
     public enum ImageSource: String, Codable {
         case googleMaps, streetView, instagram, youtube, imported, scouting
     }
 
-    public init(id: UUID = UUID(), url: URL? = nil, localPath: String? = nil, caption: String = "", source: ImageSource) {
+    public init(id: UUID = UUID(), url: URL? = nil, localPath: String? = nil, caption: String = "", source: ImageSource, dateTaken: Date? = nil) {
         self.id = id
         self.url = url
         self.localPath = localPath
         self.caption = caption
         self.source = source
+        self.dateTaken = dateTaken
     }
 }
 

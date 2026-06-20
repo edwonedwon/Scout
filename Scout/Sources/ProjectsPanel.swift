@@ -1,6 +1,22 @@
 import SwiftUI
 import SwiftData
 import ScoutKit
+import CoreLocation
+import UniformTypeIdentifiers
+
+// MARK: - Transfer type for dragging saved pins
+
+struct PinnedPinTransfer: Transferable, Codable {
+    let modelID: PersistentIdentifier
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .pinnedPin)
+    }
+}
+
+extension UTType {
+    static var pinnedPin: UTType { UTType(importedAs: "com.scout.savedpin") }
+}
 
 // MARK: - Projects panel
 
@@ -9,11 +25,14 @@ struct ProjectsPanel: View {
     @Query(sort: \ProjectData.createdAt) private var projects: [ProjectData]
 
     @Binding var activeList: LocationListData?
+    var onFitToList: (([PinnedLocationData]) -> Void)? = nil
+    var onPanToPin: ((CLLocationCoordinate2D) -> Void)? = nil
 
     @State private var showAddProject = false
     @State private var newProjectName = ""
     @State private var addingListTo: ProjectData?
     @State private var newListName = ""
+    @AppStorage("sidebar.showPinPhotos") private var showPinPhotos = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,7 +94,9 @@ struct ProjectsPanel: View {
 
             let sorted = project.lists.sorted(by: { $0.createdAt < $1.createdAt })
             ForEach(sorted) { list in
-                ListCard(list: list, activeList: $activeList, modelContext: modelContext)
+                ListCard(list: list, activeList: $activeList, modelContext: modelContext,
+                         showPinPhotos: showPinPhotos,
+                         onFitToList: onFitToList, onPanToPin: onPanToPin)
             }
 
             Button {
@@ -117,6 +138,17 @@ struct ProjectsPanel: View {
             Text("Projects")
                 .font(.headline)
             Spacer()
+            // Photos toggle
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { showPinPhotos.toggle() }
+            } label: {
+                Image(systemName: showPinPhotos ? "photo.fill" : "photo")
+                    .font(.body)
+                    .foregroundStyle(showPinPhotos ? .blue : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(showPinPhotos ? "Hide photos" : "Show photos")
+
             Button { showAddProject = true } label: {
                 Image(systemName: "plus").font(.body.weight(.medium))
             }
@@ -125,20 +157,24 @@ struct ProjectsPanel: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         #if os(macOS)
-        // Push content below the traffic-light buttons (hidden title bar = no automatic safe area)
         .padding(.top, 28)
         #endif
     }
 }
 
-// MARK: - List card (draggable, drop target, expandable)
+// MARK: - List card
 
 private struct ListCard: View {
     let list: LocationListData
     @Binding var activeList: LocationListData?
     let modelContext: ModelContext
+    var showPinPhotos: Bool = false
+    var onFitToList: (([PinnedLocationData]) -> Void)? = nil
+    var onPanToPin: ((CLLocationCoordinate2D) -> Void)? = nil
 
-    @State private var isTargeted = false
+    @State private var isTargeted = false         // ScoutLocation drop highlight
+    @State private var isPinDropTarget = false    // PinnedPin drop highlight (move to list)
+    @State private var insertBeforeID: PersistentIdentifier? = nil
     @State private var isExpanded = true
     @State private var isEditingName = false
     @State private var editingName = ""
@@ -146,6 +182,7 @@ private struct ListCard: View {
 
     private var isActive: Bool { activeList?.persistentModelID == list.persistentModelID }
     private var listColor: Color { Color(hexString: list.colorHex) }
+    private var isHighlighted: Bool { isTargeted || isPinDropTarget }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -159,21 +196,31 @@ private struct ListCard: View {
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(
-                    isTargeted ? listColor : Color(nsColor: .separatorColor).opacity(0.6),
-                    lineWidth: isTargeted ? 2 : 1
+                    isHighlighted ? listColor : Color(nsColor: .separatorColor).opacity(0.6),
+                    lineWidth: isHighlighted ? 2 : 1
                 )
         )
-        .shadow(color: .black.opacity(isTargeted ? 0.12 : 0.04), radius: isTargeted ? 6 : 2, y: 1)
-        .animation(.easeInOut(duration: 0.15), value: isTargeted)
+        .shadow(color: .black.opacity(isHighlighted ? 0.12 : 0.04), radius: isHighlighted ? 6 : 2, y: 1)
+        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
+        // Drop from search results
         .dropDestination(for: ScoutLocation.self) { items, _ in
             for loc in items {
-                let pin = PinnedLocationData(from: loc)
+                let pin = PinnedLocationData(from: loc, sortOrder: list.pins.count)
                 pin.list = list
                 list.pins.append(pin)
                 modelContext.insert(pin)
             }
             return true
         } isTargeted: { isTargeted = $0 }
+        // Drop from another list (move pin)
+        .dropDestination(for: PinnedPinTransfer.self) { items, _ in
+            guard let transfer = items.first,
+                  let pin: PinnedLocationData? = modelContext.registeredModel(for: transfer.modelID), let pin,
+                  pin.list?.persistentModelID != list.persistentModelID
+            else { return false }
+            movePin(pin, toList: list)
+            return true
+        } isTargeted: { isPinDropTarget = $0 }
         .contextMenu {
             Button { beginEditing() } label: {
                 Label("Rename", systemImage: "pencil")
@@ -189,7 +236,6 @@ private struct ListCard: View {
 
     private var cardHeader: some View {
         HStack(spacing: 8) {
-            // Select button — always visible ring, fills when active
             Button {
                 withAnimation(.spring(duration: 0.2)) {
                     activeList = isActive ? nil : list
@@ -225,6 +271,10 @@ private struct ListCard: View {
                     .font(.subheadline)
                     .lineLimit(1)
                     .onTapGesture(count: 2) { beginEditing() }
+                    .onTapGesture(count: 1) {
+                        guard !list.pins.isEmpty else { return }
+                        onFitToList?(list.pins)
+                    }
             }
 
             Spacer()
@@ -233,7 +283,6 @@ private struct ListCard: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            // Chevron — indicator only, whole row is tappable
             Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -244,12 +293,10 @@ private struct ListCard: View {
         .background(
             isEditingName
                 ? listColor.opacity(0.12)
-                : isTargeted ? listColor.opacity(0.08) : Color.clear
+                : isHighlighted ? listColor.opacity(0.08) : Color.clear
         )
         .overlay(alignment: .bottom) {
-            if isEditingName {
-                listColor.frame(height: 1.5)
-            }
+            if isEditingName { listColor.frame(height: 1.5) }
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -270,26 +317,147 @@ private struct ListCard: View {
         isEditingName = false
     }
 
+    // MARK: - Pinned locations (with drag/drop reorder)
+
     private var pinnedLocations: some View {
-        let sorted = list.pins.sorted(by: { $0.createdAt < $1.createdAt })
+        let sorted = sortedPins()
         return LazyVStack(spacing: 0) {
             ForEach(sorted) { pin in
-                VStack(spacing: 0) {
-                    LocationRow(location: pin.asScoutLocation())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                modelContext.delete(pin)
-                            } label: {
-                                Label("Remove from List", systemImage: "minus.circle")
-                            }
+                pinRow(pin, in: sorted)
+            }
+
+            // Drop zone at the bottom of the list (append after last pin)
+            Color.clear
+                .frame(height: 8)
+                .dropDestination(for: PinnedPinTransfer.self) { items, _ in
+                    guard let transfer = items.first else { return false }
+                    guard let pin: PinnedLocationData = modelContext.registeredModel(for: transfer.modelID)
+                    else { return false }
+                    if pin.list?.persistentModelID == list.persistentModelID {
+                        appendPin(pin, in: sorted)
+                    } else {
+                        movePin(pin, toList: list)
+                    }
+                    return true
+                } isTargeted: { isBottom in
+                    if isBottom { insertBeforeID = nil }
+                }
+        }
+    }
+
+    @ViewBuilder
+    private func pinRow(_ pin: PinnedLocationData, in sorted: [PinnedLocationData]) -> some View {
+        let isInsertTarget = insertBeforeID == pin.persistentModelID
+        VStack(spacing: 0) {
+            // Insert indicator
+            if isInsertTarget {
+                listColor.frame(height: 2).padding(.horizontal, 10)
+            }
+
+            HStack(spacing: 8) {
+                // Drag handle
+                Image(systemName: "line.3.horizontal")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 16)
+
+                if showPinPhotos, let urlStr = pin.imageURL, let url = URL(string: urlStr) {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let img):
+                            img.resizable().scaledToFill()
+                                .frame(width: 44, height: 44)
+                                .clipped()
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        default:
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.secondary.opacity(0.15))
+                                .frame(width: 44, height: 44)
                         }
-                    if pin.persistentModelID != sorted.last?.persistentModelID {
-                        Divider().padding(.leading, 10)
                     }
                 }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pin.name)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Text(String(format: "%.4f, %.4f", pin.latitude, pin.longitude))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer()
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, showPinPhotos && pin.imageURL != nil ? 6 : 4)
+            .contentShape(Rectangle())
+            .onTapGesture { onPanToPin?(pin.coordinate) }
+            .draggable(PinnedPinTransfer(modelID: pin.persistentModelID))
+            .dropDestination(for: PinnedPinTransfer.self) { items, _ in
+                guard let transfer = items.first,
+                      let dragged: PinnedLocationData? = modelContext.registeredModel(for: transfer.modelID), let dragged
+                else { return false }
+                insertBeforeID = nil
+                if dragged.list?.persistentModelID == list.persistentModelID {
+                    reorder(pin: dragged, before: pin, in: sorted)
+                } else {
+                    movePin(dragged, toList: list, before: pin, in: sorted)
+                }
+                return true
+            } isTargeted: {
+                if $0 { insertBeforeID = pin.persistentModelID }
+                else if insertBeforeID == pin.persistentModelID { insertBeforeID = nil }
+            }
+            .contextMenu {
+                Button(role: .destructive) {
+                    modelContext.delete(pin)
+                } label: {
+                    Label("Remove from List", systemImage: "minus.circle")
+                }
+            }
+
+            if pin.persistentModelID != sorted.last?.persistentModelID {
+                Divider().padding(.leading, 34)
+            }
+        }
+    }
+
+    // MARK: - Sort + reorder helpers
+
+    private func sortedPins() -> [PinnedLocationData] {
+        list.pins.sorted {
+            if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
+            return $0.createdAt < $1.createdAt
+        }
+    }
+
+    private func reorder(pin dragged: PinnedLocationData, before target: PinnedLocationData, in sorted: [PinnedLocationData]) {
+        guard dragged.persistentModelID != target.persistentModelID else { return }
+        var pins = sorted.filter { $0.persistentModelID != dragged.persistentModelID }
+        if let idx = pins.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) {
+            pins.insert(dragged, at: idx)
+        }
+        for (i, p) in pins.enumerated() { p.sortOrder = i }
+    }
+
+    private func appendPin(_ dragged: PinnedLocationData, in sorted: [PinnedLocationData]) {
+        var pins = sorted.filter { $0.persistentModelID != dragged.persistentModelID }
+        pins.append(dragged)
+        for (i, p) in pins.enumerated() { p.sortOrder = i }
+    }
+
+    private func movePin(_ pin: PinnedLocationData, toList target: LocationListData,
+                         before insertBefore: PinnedLocationData? = nil,
+                         in sorted: [PinnedLocationData] = []) {
+        pin.list = target
+        if let insertBefore {
+            var pins = sorted.filter { $0.persistentModelID != pin.persistentModelID }
+            if let idx = pins.firstIndex(where: { $0.persistentModelID == insertBefore.persistentModelID }) {
+                pins.insert(pin, at: idx)
+            }
+            for (i, p) in pins.enumerated() { p.sortOrder = i }
+        } else {
+            pin.sortOrder = target.pins.count
         }
     }
 }

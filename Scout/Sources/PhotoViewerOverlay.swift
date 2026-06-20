@@ -124,6 +124,18 @@ struct PhotoViewerOverlay: View {
                         .buttonStyle(.plain)
                     }
 
+                    // Per-photo date
+                    let currentImage = viewer.images.indices.contains(viewer.selectedIndex)
+                        ? viewer.images[viewer.selectedIndex] : nil
+                    if let date = currentImage?.dateTaken {
+                        Text(date.formatted(.dateTime.year().month(.wide).day()))
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.55))
+                            .monospacedDigit()
+                            .transition(.opacity)
+                            .id(viewer.selectedIndex)
+                    }
+
                     // Location info bar
                     if let loc = viewer.location {
                         locationInfoBar(loc)
