@@ -19,7 +19,7 @@ struct ContentView: View {
     @StateObject private var searchArea = SearchAreaManager.shared
     @StateObject private var photoViewer = PhotoViewerState.shared
 
-    @AppStorage("search.mode") private var searchMode: SearchMode = .google
+    @AppStorage("rightPanel.tab") private var rightPanelTab: RightPanelTab = .ai
     @AppStorage("map.cyclingProvider") private var cyclingProviderRaw: String = ""
     @AppStorage("wikimedia.limit") private var wikiLimit: Double = 50
 
@@ -41,7 +41,6 @@ struct ContentView: View {
     @State private var chatMessages: [ChatMessage] = []
     @State private var viewMode: ViewMode = .map
     @State private var showProjectsPanel = false
-    @State private var showLeftPanel = true
     @State private var showRightPanel = true
     @State private var activeList: LocationListData?
 
@@ -65,22 +64,15 @@ struct ContentView: View {
                     .transition(.move(edge: .leading))
                 Divider()
             }
-            if showLeftPanel {
-                googlePanel
-                    .frame(width: 280)
-                    .transition(.move(edge: .leading))
-                Divider()
-            }
             centerPanel
             if showRightPanel {
                 Divider()
-                aiPanel
+                scoutPanel
                     .frame(width: 300)
                     .transition(.move(edge: .trailing))
             }
         }
         .animation(.spring(duration: 0.3), value: showProjectsPanel)
-        .animation(.spring(duration: 0.3), value: showLeftPanel)
         .animation(.spring(duration: 0.3), value: showRightPanel)
         .ignoresSafeArea()
         .onAppear {
@@ -99,6 +91,10 @@ struct ContentView: View {
         .onChange(of: locationManager.currentLocation?.latitude) { _, _ in
             centerOnUserIfNeeded()
         }
+        .onChange(of: rightPanelTab) { _, _ in
+            locations = []
+            selectedLocation = nil
+        }
         .onChange(of: viewMode) { _, newMode in
             if newMode == .photos && photoViewer.restoreOnPhotoMode {
                 photoViewer.restoreOnPhotoMode = false
@@ -116,47 +112,62 @@ struct ContentView: View {
         mapController.center(on: loc, animated: false)
     }
 
-    // MARK: - Left search panel
+    // MARK: - Unified right panel (AI + search sources)
 
-    private var googlePanel: some View {
+    private var scoutPanel: some View {
         VStack(spacing: 0) {
-            panelHeader("Locations") {
-                if isSearching && !isAISearching {
-                    ProgressView().controlSize(.small)
-                }
-            }
-
-            // Source toggle
-            Picker("Search source", selection: $searchMode) {
-                ForEach(SearchMode.allCases) { mode in
-                    Label(mode.label, systemImage: mode.icon).tag(mode)
+            // Tab bar: AI | Google | Flickr | Wiki
+            Picker("Panel", selection: $rightPanelTab) {
+                ForEach(RightPanelTab.allCases) { tab in
+                    Label(tab.label, systemImage: tab.icon).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(.horizontal, 10)
+            .padding(.top, 10)
             .padding(.bottom, 8)
-            .onChange(of: searchMode) { _, _ in locations = []; selectedLocation = nil }
 
+            Divider()
+
+            if rightPanelTab == .ai {
+                AIChatView(
+                    messages: $chatMessages,
+                    isSearching: isAISearching,
+                    onSend: { text, model, thinking in
+                        Task { await runAISearch(query: text, model: model, extendedThinking: thinking) }
+                    }
+                )
+            } else {
+                searchContent
+            }
+        }
+    }
+
+    private var searchContent: some View {
+        VStack(spacing: 0) {
             // Search bar
             HStack {
-                TextField(searchMode.placeholder, text: $searchText)
+                if isSearching {
+                    ProgressView().controlSize(.small)
+                }
+                TextField(rightPanelTab.placeholder, text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit {
-                        // Wikimedia: empty submit = browse area
-                        if searchMode == .wikimedia || !searchText.isEmpty {
+                        if rightPanelTab == .wikimedia || !searchText.isEmpty {
                             Task { await runSearch() }
                         }
                     }
                 Button { Task { await runSearch() } } label: {
                     Image(systemName: "magnifyingglass")
                 }
-                .disabled((searchText.isEmpty && searchMode != .wikimedia) || isSearching)
+                .disabled((searchText.isEmpty && rightPanelTab != .wikimedia) || isSearching)
             }
             .padding(.horizontal, 10)
-            .padding(.bottom, searchMode == .wikimedia ? 4 : 8)
+            .padding(.top, 8)
+            .padding(.bottom, rightPanelTab == .wikimedia ? 4 : 8)
 
-            if searchMode == .wikimedia {
+            if rightPanelTab == .wikimedia {
                 Button {
                     Task { await runSearch() }
                 } label: {
@@ -197,41 +208,12 @@ struct ContentView: View {
                 if locations.isEmpty {
                     ContentUnavailableView(
                         "No Results",
-                        systemImage: searchMode.emptyIcon,
-                        description: Text(searchMode.emptyHint)
+                        systemImage: rightPanelTab.emptyIcon,
+                        description: Text(rightPanelTab.emptyHint)
                     )
                 }
             }
         }
-    }
-
-    // MARK: - AI Scout panel (right)
-
-    private var aiPanel: some View {
-        VStack(spacing: 0) {
-            panelHeader("AI Scout") {
-                EmptyView()
-            }
-            Divider()
-            AIChatView(
-                messages: $chatMessages,
-                isSearching: isAISearching,
-                onSend: { text, model, thinking in
-                    Task { await runAISearch(query: text, model: model, extendedThinking: thinking) }
-                }
-            )
-        }
-    }
-
-    private func panelHeader<T: View>(_ title: String, @ViewBuilder trailing: () -> T) -> some View {
-        HStack {
-            Text(title)
-                .font(.headline)
-            Spacer()
-            trailing()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
     }
 
     // MARK: - Center panel (map or photo grid)
@@ -248,23 +230,16 @@ struct ContentView: View {
                 .allowsHitTesting(viewMode == .photos)
         }
         .overlay(alignment: .top) {
-            // Single top bar: projects | search | mode toggle | AI
             HStack {
-                HStack(spacing: 4) {
-                    panelToggleButton(
-                        icon: showProjectsPanel ? "folder.fill" : "folder",
-                        action: { showProjectsPanel.toggle() }
-                    )
-                    panelToggleButton(
-                        icon: showLeftPanel ? "sidebar.left" : "magnifyingglass",
-                        action: { showLeftPanel.toggle() }
-                    )
-                }
+                panelToggleButton(
+                    icon: showProjectsPanel ? "folder.fill" : "folder",
+                    action: { showProjectsPanel.toggle() }
+                )
                 Spacer()
                 viewModeToggle
                 Spacer()
                 panelToggleButton(
-                    icon: showRightPanel ? "sidebar.right" : "sparkles",
+                    icon: showRightPanel ? "sidebar.right" : "rectangle.rightthird.inset.filled",
                     action: { showRightPanel.toggle() }
                 )
             }
@@ -334,20 +309,21 @@ struct ContentView: View {
                     .padding()
             }
         }
-        .overlay(alignment: .bottomLeading) {
+        .overlay(alignment: .topLeading) {
             DebugPanelOverlay()
-                .padding()
-        }
-        .overlay(alignment: .topLeading) {
-            cyclingControls
                 .padding(.top, 58)
+                .padding(.leading, 16)
         }
-        .overlay(alignment: .topLeading) {
-            if cyclingProvider == .cyclOSM {
-                cyclOSMLegend
-                    .padding(.top, 102)
-                    .padding(.leading, 8)
+        .overlay(alignment: .bottomLeading) {
+            HStack(alignment: .bottom, spacing: 8) {
+                cyclingControls
+                if cyclingProvider == .cyclOSM {
+                    cyclOSMLegend
+                        .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
+                }
             }
+            .padding(16)
+            .animation(.easeInOut(duration: 0.2), value: cyclingProvider == .cyclOSM)
         }
         .overlay(alignment: .leading) {
             lassoControls
@@ -503,7 +479,8 @@ struct ContentView: View {
 
     @MainActor
     private func runSearch() async {
-        switch searchMode {
+        switch rightPanelTab {
+        case .ai:        break
         case .google:    await runGoogleSearch()
         case .flickr:    await runFlickrSearch()
         case .wikimedia: await runWikimediaSearch()
@@ -731,17 +708,16 @@ struct LocationRow: View {
     }
 }
 
-// MARK: - Search mode
+// MARK: - Right panel tabs
 
-enum SearchMode: String, CaseIterable, Identifiable {
-    case google
-    case flickr
-    case wikimedia
+enum RightPanelTab: String, CaseIterable, Identifiable {
+    case ai, google, flickr, wikimedia
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .ai:        "AI"
         case .google:    "Google"
         case .flickr:    "Flickr"
         case .wikimedia: "Wiki"
@@ -750,6 +726,7 @@ enum SearchMode: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .ai:        "sparkles"
         case .google:    "map"
         case .flickr:    "camera"
         case .wikimedia: "globe"
@@ -758,6 +735,7 @@ enum SearchMode: String, CaseIterable, Identifiable {
 
     var placeholder: String {
         switch self {
+        case .ai:        ""
         case .google:    "Search Google Maps…"
         case .flickr:    "Search Flickr photos…"
         case .wikimedia: "Search Wikimedia Commons…"
@@ -766,7 +744,8 @@ enum SearchMode: String, CaseIterable, Identifiable {
 
     var emptyHint: String {
         switch self {
-        case .google:    "Search above or use AI Scout"
+        case .ai:        "Ask AI Scout for locations"
+        case .google:    "Search Google Maps above"
         case .flickr:    "Search for geotagged Flickr photos"
         case .wikimedia: "Search for geotagged Commons photos"
         }
@@ -774,6 +753,7 @@ enum SearchMode: String, CaseIterable, Identifiable {
 
     var emptyIcon: String {
         switch self {
+        case .ai:        "sparkles"
         case .google:    "mappin.slash"
         case .flickr:    "camera"
         case .wikimedia: "globe"
