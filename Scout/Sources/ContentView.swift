@@ -427,10 +427,7 @@ struct ContentView: View {
     }
 
     private func fitMapToResults() {
-        var coords = locations.map(\.coordinate)
-        if let userCoord = locationManager.currentLocation {
-            coords.append(userCoord)
-        }
+        let coords = locations.map(\.coordinate)
         mapController.fit(coords, animated: true)
     }
 }
