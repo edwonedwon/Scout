@@ -3,19 +3,15 @@ import SwiftData
 import ScoutKit
 import CoreLocation
 import UniformTypeIdentifiers
+// MARK: - Shared drag state for moving/reordering saved pins
+//
+// Rather than serialize a pin identity through the pasteboard (which proved
+// unreliable across separate ListCard views), we hold the actual dragged pin
+// in a shared object. The drop reads the exact in-memory reference — no
+// serialization, no UUID lookup, works identically within and across lists.
 
-// MARK: - Transfer type for dragging saved pins
-
-struct PinnedPinTransfer: Transferable, Codable {
-    let modelID: PersistentIdentifier
-
-    static var transferRepresentation: some TransferRepresentation {
-        CodableRepresentation(contentType: .pinnedPin)
-    }
-}
-
-extension UTType {
-    static var pinnedPin: UTType { UTType(importedAs: "com.scout.savedpin") }
+final class PinDragState: ObservableObject {
+    var draggedPin: PinnedLocationData?
 }
 
 // MARK: - Projects panel
@@ -33,6 +29,7 @@ struct ProjectsPanel: View {
     @State private var addingListTo: ProjectData?
     @State private var newListName = ""
     @AppStorage("sidebar.showPinPhotos") private var showPinPhotos = false
+    @StateObject private var dragState = PinDragState()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -95,7 +92,7 @@ struct ProjectsPanel: View {
             let sorted = project.lists.sorted(by: { $0.createdAt < $1.createdAt })
             ForEach(sorted) { list in
                 ListCard(list: list, activeList: $activeList, modelContext: modelContext,
-                         showPinPhotos: showPinPhotos,
+                         showPinPhotos: showPinPhotos, dragState: dragState,
                          onFitToList: onFitToList, onPanToPin: onPanToPin)
             }
 
@@ -169,6 +166,7 @@ private struct ListCard: View {
     @Binding var activeList: LocationListData?
     let modelContext: ModelContext
     var showPinPhotos: Bool = false
+    let dragState: PinDragState
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
     var onPanToPin: ((CLLocationCoordinate2D) -> Void)? = nil
 
@@ -206,21 +204,11 @@ private struct ListCard: View {
         .dropDestination(for: ScoutLocation.self) { items, _ in
             for loc in items {
                 let pin = PinnedLocationData(from: loc, sortOrder: list.pins.count)
-                pin.list = list
-                list.pins.append(pin)
                 modelContext.insert(pin)
+                pin.list = list   // inverse relationship adds it to list.pins
             }
             return true
         } isTargeted: { isTargeted = $0 }
-        // Drop from another list (move pin)
-        .dropDestination(for: PinnedPinTransfer.self) { items, _ in
-            guard let transfer = items.first,
-                  let pin: PinnedLocationData? = modelContext.registeredModel(for: transfer.modelID), let pin,
-                  pin.list?.persistentModelID != list.persistentModelID
-            else { return false }
-            movePin(pin, toList: list)
-            return true
-        } isTargeted: { isPinDropTarget = $0 }
         .contextMenu {
             Button { beginEditing() } label: {
                 Label("Rename", systemImage: "pencil")
@@ -303,6 +291,17 @@ private struct ListCard: View {
             guard !isEditingName else { return }
             withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
         }
+        // Drop a pin onto the list title to move it here (works for empty lists too)
+        .onDrop(of: [.text], isTargeted: $isPinDropTarget) { _ in
+            guard let dragged = dragState.draggedPin else { return false }
+            if dragged.list?.persistentModelID != list.persistentModelID {
+                movePin(dragged, toList: list)
+            } else {
+                appendPin(dragged, in: sortedPins())
+            }
+            dragState.draggedPin = nil
+            return true
+        }
     }
 
     private func beginEditing() {
@@ -329,18 +328,15 @@ private struct ListCard: View {
             // Drop zone at the bottom of the list (append after last pin)
             Color.clear
                 .frame(height: 8)
-                .dropDestination(for: PinnedPinTransfer.self) { items, _ in
-                    guard let transfer = items.first else { return false }
-                    guard let pin: PinnedLocationData = modelContext.registeredModel(for: transfer.modelID)
-                    else { return false }
+                .onDrop(of: [.text], isTargeted: nil) { _ in
+                    guard let pin = dragState.draggedPin else { return false }
                     if pin.list?.persistentModelID == list.persistentModelID {
                         appendPin(pin, in: sorted)
                     } else {
                         movePin(pin, toList: list)
                     }
+                    dragState.draggedPin = nil
                     return true
-                } isTargeted: { isBottom in
-                    if isBottom { insertBeforeID = nil }
                 }
         }
     }
@@ -392,21 +388,26 @@ private struct ListCard: View {
             .padding(.vertical, showPinPhotos && pin.imageURL != nil ? 6 : 4)
             .contentShape(Rectangle())
             .onTapGesture { onPanToPin?(pin.coordinate) }
-            .draggable(PinnedPinTransfer(modelID: pin.persistentModelID))
-            .dropDestination(for: PinnedPinTransfer.self) { items, _ in
-                guard let transfer = items.first,
-                      let dragged: PinnedLocationData? = modelContext.registeredModel(for: transfer.modelID), let dragged
-                else { return false }
+            .onDrag {
+                dragState.draggedPin = pin
+                return NSItemProvider(object: pin.uuid.uuidString as NSString)
+            }
+            .onDrop(of: [.text], isTargeted: Binding(
+                get: { insertBeforeID == pin.persistentModelID },
+                set: { targeted in
+                    if targeted { insertBeforeID = pin.persistentModelID }
+                    else if insertBeforeID == pin.persistentModelID { insertBeforeID = nil }
+                }
+            )) { _ in
+                guard let dragged = dragState.draggedPin else { return false }
                 insertBeforeID = nil
                 if dragged.list?.persistentModelID == list.persistentModelID {
                     reorder(pin: dragged, before: pin, in: sorted)
                 } else {
                     movePin(dragged, toList: list, before: pin, in: sorted)
                 }
+                dragState.draggedPin = nil
                 return true
-            } isTargeted: {
-                if $0 { insertBeforeID = pin.persistentModelID }
-                else if insertBeforeID == pin.persistentModelID { insertBeforeID = nil }
             }
             .contextMenu {
                 Button(role: .destructive) {
@@ -421,6 +422,8 @@ private struct ListCard: View {
             }
         }
     }
+
+    // MARK: - Lookup by stable UUID
 
     // MARK: - Sort + reorder helpers
 
@@ -449,16 +452,25 @@ private struct ListCard: View {
     private func movePin(_ pin: PinnedLocationData, toList target: LocationListData,
                          before insertBefore: PinnedLocationData? = nil,
                          in sorted: [PinnedLocationData] = []) {
+        // `list` has @Relationship(inverse:), so setting it moves the pin out of
+        // its old list's `pins` and into the target's automatically.
         pin.list = target
-        if let insertBefore {
-            var pins = sorted.filter { $0.persistentModelID != pin.persistentModelID }
-            if let idx = pins.firstIndex(where: { $0.persistentModelID == insertBefore.persistentModelID }) {
-                pins.insert(pin, at: idx)
+
+        // Re-number the target list so the dropped pin lands in the right slot.
+        let targetSorted = target.pins
+            .filter { $0.persistentModelID != pin.persistentModelID }
+            .sorted {
+                $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder
+                                             : $0.createdAt < $1.createdAt
             }
-            for (i, p) in pins.enumerated() { p.sortOrder = i }
+        var pins = targetSorted
+        if let insertBefore,
+           let idx = pins.firstIndex(where: { $0.persistentModelID == insertBefore.persistentModelID }) {
+            pins.insert(pin, at: idx)
         } else {
-            pin.sortOrder = target.pins.count
+            pins.append(pin)
         }
+        for (i, p) in pins.enumerated() { p.sortOrder = i }
     }
 }
 

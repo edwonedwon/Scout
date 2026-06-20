@@ -3,6 +3,7 @@ import ScoutKit
 
 struct PhotoGridView: View {
     let locations: [ScoutLocation]
+    var pinnedLocations: [ScoutLocation] = []
 
     struct PhotoItem: Identifiable {
         let id: Int
@@ -11,10 +12,10 @@ struct PhotoGridView: View {
         let indexInLocation: Int
     }
 
-    private var items: [PhotoItem] {
+    private func makeItems(from locs: [ScoutLocation], startID: Int = 0) -> [PhotoItem] {
         var result: [PhotoItem] = []
-        var counter = 0
-        for loc in locations {
+        var counter = startID
+        for loc in locs {
             for (i, img) in loc.images.enumerated() {
                 result.append(PhotoItem(id: counter, image: img, location: loc, indexInLocation: i))
                 counter += 1
@@ -23,11 +24,15 @@ struct PhotoGridView: View {
         return result
     }
 
+    private var searchItems: [PhotoItem] { makeItems(from: locations) }
+    private var pinnedItems: [PhotoItem] { makeItems(from: pinnedLocations, startID: 1_000_000) }
+    private var hasAny: Bool { !searchItems.isEmpty || !pinnedItems.isEmpty }
+
     private let columns = 3
     private let gap: CGFloat = 2
 
     var body: some View {
-        if items.isEmpty {
+        if !hasAny {
             ContentUnavailableView(
                 "No Photos",
                 systemImage: "photo.on.rectangle.angled",
@@ -39,13 +44,14 @@ struct PhotoGridView: View {
             GeometryReader { geo in
                 let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
                 ScrollView {
-                    HStack(alignment: .top, spacing: gap) {
-                        ForEach(0..<columns, id: \.self) { col in
-                            LazyVStack(spacing: gap) {
-                                ForEach(items.indices.filter { $0 % columns == col }, id: \.self) { idx in
-                                    MasonryCell(item: items[idx], width: colWidth)
-                                }
-                            }
+                    VStack(alignment: .leading, spacing: 0) {
+                        if !pinnedItems.isEmpty {
+                            sectionHeader("Saved Pins")
+                            masonryGrid(items: pinnedItems, colWidth: colWidth)
+                        }
+                        if !searchItems.isEmpty {
+                            sectionHeader("Search Results")
+                            masonryGrid(items: searchItems, colWidth: colWidth)
                         }
                     }
                     .padding(.bottom, 8)
@@ -53,6 +59,28 @@ struct PhotoGridView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.black)
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.55))
+            .textCase(.uppercase)
+            .padding(.horizontal, 10)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+    }
+
+    private func masonryGrid(items: [PhotoItem], colWidth: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: gap) {
+            ForEach(0..<columns, id: \.self) { col in
+                LazyVStack(spacing: gap) {
+                    ForEach(items.indices.filter { $0 % columns == col }, id: \.self) { idx in
+                        MasonryCell(item: items[idx], width: colWidth)
+                    }
+                }
+            }
         }
     }
 }

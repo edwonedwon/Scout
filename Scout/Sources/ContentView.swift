@@ -107,9 +107,7 @@ struct ContentView: View {
         .animation(.spring(duration: 0.3), value: showRightPanel)
         .ignoresSafeArea()
         .onAppear {
-            #if !DEBUG
             locationManager.requestIfNeeded()
-            #endif
             centerOnUserIfNeeded()
             photoViewer.onViewOnMap = { loc in
                 withAnimation(.spring(duration: 0.3)) { viewMode = .map }
@@ -278,7 +276,7 @@ struct ContentView: View {
         // - PhotoGrid: never torn down so scroll position survives "Show on Map" round-trips
         ZStack {
             scoutMap
-            PhotoGridView(locations: locations)
+            PhotoGridView(locations: locations, pinnedLocations: projectPins.map(\.0).filter { !$0.images.isEmpty })
                 .ignoresSafeArea()
                 .opacity(viewMode == .photos ? 1 : 0)
                 .allowsHitTesting(viewMode == .photos)
@@ -344,9 +342,8 @@ struct ContentView: View {
 
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
         let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
-        pin.list = list
-        list.pins.append(pin)
         modelContext.insert(pin)
+        pin.list = list   // inverse relationship adds it to list.pins
     }
 
     private var scoutMap: some View {

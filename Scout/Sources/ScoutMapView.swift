@@ -26,8 +26,15 @@ final class ScoutMapController: ObservableObject {
 
     func toggleTracking() {
         guard let map = mapView else { return }
-        let next: MKUserTrackingMode = map.userTrackingMode == .follow ? .none : .follow
-        map.setUserTrackingMode(next, animated: true)
+        if map.userTrackingMode == .follow {
+            map.setUserTrackingMode(.none, animated: true)
+            return
+        }
+        // Engaging follow: make sure every precondition MapKit needs is in place,
+        // otherwise it silently reverts the mode back to .none.
+        LocationManager.shared.requestIfNeeded()
+        if !map.showsUserLocation { map.showsUserLocation = true }
+        map.setUserTrackingMode(.follow, animated: true)
     }
 
     func setRegion(_ region: MKCoordinateRegion, animated: Bool) {
@@ -616,7 +623,7 @@ final class BoundaryLabelView: MKAnnotationView {
 
     var labelText: String = "" { didSet { needsDisplay = true; updateLabelSize() } }
     var colorIndex: Int = 0 { didSet { needsDisplay = true } }
-    var fontSize: CGFloat = 13 { didSet { needsDisplay = true; updateLabelSize() } }
+    var fontSize: CGFloat = 17 { didSet { needsDisplay = true; updateLabelSize() } }
 
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
@@ -636,15 +643,15 @@ final class BoundaryLabelView: MKAnnotationView {
         let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
         let color = BoundaryPolygon.palette[colorIndex % BoundaryPolygon.palette.count]
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.85)
-        shadow.shadowBlurRadius = 2
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
+        shadow.shadowBlurRadius = 4
         shadow.shadowOffset = CGSize(width: 0, height: -1)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: NSColor(cgColor: color)?.withAlphaComponent(1.0) ?? .white,
+            .foregroundColor: NSColor.white,
             .shadow: shadow,
-            .strokeColor: NSColor.white.withAlphaComponent(0.6),
-            .strokeWidth: -2.0,
+            .strokeColor: NSColor.black.withAlphaComponent(0.5),
+            .strokeWidth: -1.5,
         ]
         (labelText as NSString).draw(in: bounds.insetBy(dx: 5, dy: 3), withAttributes: attrs)
     }
@@ -723,11 +730,12 @@ struct ScoutMapView {
             }
         }
         #endif
+        // NOTE: showsUserLocation is set once in makeMap and deliberately never
+        // re-asserted here. Toggling it false→true resets userTrackingMode and is
+        // what repeatedly broke the "follow me" button. Leave it alone.
         if map.mapType != mapType {
             map.mapType = mapType
         }
-        // Always re-assert — MapKit silently resets this on style/overlay changes
-        if !map.showsUserLocation { map.showsUserLocation = true }
         // When annotation style toggles, remove and re-add to force viewFor: to be called
         let coord = context.coordinator
         if coord.lastPhotoAnnotationsMode != showPhotoAnnotations {

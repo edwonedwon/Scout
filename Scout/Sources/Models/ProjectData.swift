@@ -62,9 +62,10 @@ final class PinnedLocationData {
     var longitude: Double
     var statusRaw: String
     var createdAt: Date
-    var sortOrder: Int
-    var imageURL: String?
-    var list: LocationListData?
+    var uuid: UUID = UUID()
+    var sortOrder: Int = 0
+    var imageURL: String? = nil
+    @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
 
     init(from location: ScoutLocation, sortOrder: Int = 0) {
         self.name = location.name
@@ -82,10 +83,14 @@ final class PinnedLocationData {
     }
 
     func asScoutLocation() -> ScoutLocation {
-        ScoutLocation(
+        let images: [ScoutImage] = imageURL.flatMap { URL(string: $0) }.map {
+            [ScoutImage(url: $0, source: .googleMaps)]
+        } ?? []
+        return ScoutLocation(
             name: name,
             description: notes,
             coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+            images: images,
             status: LocationStatus(rawValue: statusRaw) ?? .scouted
         )
     }
