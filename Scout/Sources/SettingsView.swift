@@ -48,24 +48,6 @@ struct SettingsView: View {
                 KeySectionHeader("Flickr", help: .flickr)
             }
 
-            Section {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("No API key required")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if let url = URL(string: "https://commons.wikimedia.org") {
-                        Link("Open Commons", destination: url)
-                            .font(.caption)
-                    }
-                }
-            } header: {
-                KeySectionHeader("Wikimedia Commons", help: .wikimedia)
-            } footer: {
-                Text("Wikimedia Commons is free and open — search millions of geotagged photos with no account needed.")
-            }
-
             #if os(macOS)
             Section {
                 Toggle("Two-finger scroll to zoom", isOn: $scrollToZoom)
@@ -286,52 +268,76 @@ struct APIKeyField: View {
 
     @State private var input = ""
     @State private var isRevealed = false
+    @State private var isReplacing = false
     @State private var errorMessage: String?
     @State private var justSaved = false
 
+    private var showInput: Bool { !isSet || isReplacing }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Group {
-                    if isRevealed {
-                        TextField(isSet ? "Update key..." : placeholder, text: $input)
+            if !showInput {
+                // Saved state — show status + Replace button
+                HStack {
+                    if justSaved {
+                        Label("Saved", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
                     } else {
-                        SecureField(isSet ? "Update key..." : placeholder, text: $input)
+                        Label("Key saved", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.secondary)
                     }
+                    Spacer()
+                    Button("Replace") { isReplacing = true }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                 }
-                .multilineTextAlignment(.leading)
-                #if os(iOS)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                #endif
+                .font(.subheadline)
+            } else {
+                // Input state — show text field + Save/Cancel
+                HStack {
+                    Group {
+                        if isRevealed {
+                            TextField(placeholder, text: $input)
+                        } else {
+                            SecureField(placeholder, text: $input)
+                        }
+                    }
+                    .multilineTextAlignment(.leading)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    #endif
+                    .onSubmit { if !input.isEmpty { save() } }
 
-                Button {
-                    isRevealed.toggle()
-                } label: {
-                    Image(systemName: isRevealed ? "eye.slash" : "eye")
-                        .foregroundStyle(.secondary)
+                    Button {
+                        isRevealed.toggle()
+                    } label: {
+                        Image(systemName: isRevealed ? "eye.slash" : "eye")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-            }
 
-            HStack {
-                if justSaved {
-                    Label("Saved", systemImage: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                } else if isSet && input.isEmpty {
-                    Label("Key saved", systemImage: "checkmark.circle.fill")
-                        .font(.caption)
+                HStack {
+                    if let error = errorMessage {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                    }
+                    Spacer()
+                    if isSet {
+                        Button("Cancel") {
+                            input = ""
+                            isReplacing = false
+                            errorMessage = nil
+                        }
+                        .buttonStyle(.plain)
+                        .controlSize(.small)
                         .foregroundStyle(.secondary)
+                    }
+                    Button("Save") { save() }
+                        .disabled(input.isEmpty)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                 }
-                if let error = errorMessage {
-                    Text(error).font(.caption).foregroundStyle(.red)
-                }
-                Spacer()
-                Button("Save") { save() }
-                    .disabled(input.isEmpty)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
             }
         }
         .padding(.vertical, 4)
@@ -342,6 +348,7 @@ struct APIKeyField: View {
         do {
             try onSave(input)
             input = ""
+            isReplacing = false
             justSaved = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { justSaved = false }
         } catch {

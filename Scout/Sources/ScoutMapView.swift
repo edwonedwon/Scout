@@ -2,6 +2,7 @@ import SwiftUI
 import MapKit
 import ScoutKit
 import CoreVideo
+import Combine
 
 // MARK: - Imperative controller
 
@@ -33,6 +34,69 @@ final class ScoutMapController: ObservableObject {
         )
         let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLng + maxLng) / 2)
         setRegion(MKCoordinateRegion(center: center, span: span), animated: animated)
+    }
+}
+
+// MARK: - Cycling tile providers
+
+enum CyclingTileProvider: String, CaseIterable, Identifiable {
+    case waymarked = "waymarked"
+    case cyclOSM   = "cyclosm"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .waymarked: "Waymarked Trails"
+        case .cyclOSM:   "CyclOSM"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .waymarked: "Cycling routes overlaid on Apple Maps (free)"
+        case .cyclOSM:   "Full cycling-focused map (free)"
+        }
+    }
+
+    var urlTemplate: String {
+        switch self {
+        case .waymarked: "https://tile.waymarkedtrails.org/cycling/{z}/{x}/{y}.png"
+        case .cyclOSM:   "https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png"
+        }
+    }
+
+    // Whether this layer replaces Apple Maps tiles entirely
+    var replacesBaseMap: Bool {
+        switch self {
+        case .waymarked: false
+        case .cyclOSM:   true
+        }
+    }
+}
+
+// MKTileOverlay subclass that handles {s} subdomain cycling
+final class CyclingTileOverlay: MKTileOverlay {
+    let provider: CyclingTileProvider
+    private let subdomains = ["a", "b", "c"]
+
+    init(provider: CyclingTileProvider) {
+        self.provider = provider
+        super.init(urlTemplate: nil)
+        canReplaceMapContent = provider.replacesBaseMap
+    }
+
+    override func url(forTilePath path: MKTileOverlayPath) -> URL {
+        var template = provider.urlTemplate
+        if template.contains("{s}") {
+            let sub = subdomains[(path.x + path.y) % subdomains.count]
+            template = template.replacingOccurrences(of: "{s}", with: sub)
+        }
+        template = template
+            .replacingOccurrences(of: "{z}", with: "\(path.z)")
+            .replacingOccurrences(of: "{x}", with: "\(path.x)")
+            .replacingOccurrences(of: "{y}", with: "\(path.y)")
+        return URL(string: template)!
     }
 }
 
@@ -279,6 +343,7 @@ struct ScoutMapView {
     var isDrawingMode: Bool = false
     var searchPolygon: [CLLocationCoordinate2D]? = nil
     var onPolygonComplete: ([CLLocationCoordinate2D]) -> Void = { _ in }
+    var cyclingProvider: CyclingTileProvider? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -327,20 +392,45 @@ struct ScoutMapView {
         #endif
         context.coordinator.syncAnnotations(map, locations: locations)
         context.coordinator.syncSelection(map, selection: selection)
+        syncTileOverlay(map)
         syncPolygonOverlay(map)
+    }
+
+    private func syncTileOverlay(_ map: MKMapView) {
+        let existing = map.overlays.compactMap { $0 as? CyclingTileOverlay }
+        // Skip update if provider hasn't changed
+        if let current = existing.first, current.provider == cyclingProvider { return }
+        map.removeOverlays(existing)
+        if let provider = cyclingProvider {
+            map.addOverlay(CyclingTileOverlay(provider: provider), level: .aboveRoads)
+        }
     }
 
     private func syncPolygonOverlay(_ map: MKMapView) {
         let existing = map.overlays.compactMap { $0 as? MKPolygon }
         map.removeOverlays(existing)
         if var coords = searchPolygon, coords.count >= 3 {
-            map.addOverlay(MKPolygon(coordinates: &coords, count: coords.count), level: .aboveRoads)
+            // Add above cycling tiles so the polygon is always visible
+            map.addOverlay(MKPolygon(coordinates: &coords, count: coords.count), level: .aboveLabels)
         }
     }
 
     final class Coordinator: NSObject, MKMapViewDelegate {
         var parent: ScoutMapView
-        init(_ parent: ScoutMapView) { self.parent = parent }
+
+        init(_ parent: ScoutMapView) {
+            self.parent = parent
+            super.init()
+            #if os(macOS)
+            // Close pin popover whenever the full-screen photo viewer opens
+            photoViewerCancellable = PhotoViewerState.shared.$isVisible
+                .sink { [weak self] isVisible in
+                    guard isVisible else { return }
+                    self?.activePopover?.close()
+                    self?.activePopover = nil
+                }
+            #endif
+        }
 
         func syncAnnotations(_ map: MKMapView, locations: [ScoutLocation]) {
             let current = map.annotations.compactMap { $0 as? LocationAnnotation }
@@ -371,6 +461,7 @@ struct ScoutMapView {
 
         #if os(macOS)
         private var activePopover: NSPopover?
+        private var photoViewerCancellable: AnyCancellable?
         #endif
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
@@ -406,6 +497,9 @@ struct ScoutMapView {
         #endif
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let tile = overlay as? MKTileOverlay {
+                return MKTileOverlayRenderer(tileOverlay: tile)
+            }
             if let polygon = overlay as? MKPolygon {
                 let r = MKPolygonRenderer(polygon: polygon)
                 r.fillColor   = .init(red: 0.2, green: 0.5, blue: 1, alpha: 0.12)

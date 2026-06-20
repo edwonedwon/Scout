@@ -1,34 +1,96 @@
 import Foundation
 import CoreLocation
 
-/// Searches Wikimedia Commons for geotagged photos matching a text query.
+/// Searches Wikimedia Commons for geotagged photos.
 /// No API key required — Commons is free and open.
 public final class WikimediaService {
     public static let shared = WikimediaService()
     private init() {}
 
     private let base = "https://commons.wikimedia.org/w/api.php"
-    private let thumbWidth = 1200
 
     public func search(query: String, region: GooglePlacesService.MapRegion? = nil) async throws -> [ScoutLocation] {
-        // Build the request — generator=search finds File: pages matching the query.
-        // prop=coordinates filters to geotagged files only.
-        var params: [URLQueryItem] = [
+        if let r = region {
+            return try await geoSearch(query: query, region: r)
+        } else {
+            return try await textSearch(query: query)
+        }
+    }
+
+    // MARK: - Geosearch (has map region → guaranteed coordinates)
+
+    private func geoSearch(query: String, region: GooglePlacesService.MapRegion) async throws -> [ScoutLocation] {
+        // Derive radius from region size; Wikimedia max is 10 000 m
+        let latM = region.latDelta * 111_000
+        let lngM = region.lngDelta * 111_000 * cos(region.centerLat * .pi / 180)
+        let radius = max(100, min(min(latM, lngM) / 2, 10_000))
+
+        let params: [URLQueryItem] = [
             .init(name: "action",       value: "query"),
-            .init(name: "generator",    value: "search"),
-            .init(name: "gsrsearch",    value: query),
-            .init(name: "gsrnamespace", value: "6"),       // File namespace
-            .init(name: "gsrlimit",     value: "30"),
+            .init(name: "generator",    value: "geosearch"),
+            .init(name: "ggscoord",     value: "\(region.centerLat)|\(region.centerLng)"),
+            .init(name: "ggsradius",    value: "\(Int(radius))"),
+            .init(name: "ggslimit",     value: "50"),
+            .init(name: "ggsnamespace", value: "6"),
             .init(name: "prop",         value: "imageinfo|coordinates"),
-            .init(name: "iiprop",       value: "url|extmetadata|size"),
-            .init(name: "iiurlwidth",   value: "\(thumbWidth)"),
+            .init(name: "iiprop",       value: "url|extmetadata"),
+            .init(name: "iiurlwidth",   value: "1200"),
             .init(name: "format",       value: "json"),
             .init(name: "origin",       value: "*"),
         ]
 
-        // If we have a region, add coordinate-based filtering via a second search pass.
-        // Wikimedia doesn't support combined text+geo in one call, so we use text search
-        // and then filter client-side by the returned coordinates.
+        let pages = try await fetchPages(params: params)
+
+        return pages.values.compactMap { page in
+            guard isImageFile(page.title),
+                  let coord = page.coordinates?.first,
+                  let info = page.imageinfo?.first else { return nil }
+
+            return makeLocation(
+                title: page.title,
+                lat: coord.lat, lng: coord.lon,
+                info: info
+            )
+        }
+        .sorted { $0.name < $1.name }
+    }
+
+    // MARK: - Text search (no region → no coordinate guarantee, show what we can)
+
+    private func textSearch(query: String) async throws -> [ScoutLocation] {
+        let params: [URLQueryItem] = [
+            .init(name: "action",       value: "query"),
+            .init(name: "generator",    value: "search"),
+            .init(name: "gsrsearch",    value: query),
+            .init(name: "gsrnamespace", value: "6"),
+            .init(name: "gsrlimit",     value: "30"),
+            .init(name: "prop",         value: "imageinfo|coordinates"),
+            .init(name: "iiprop",       value: "url|extmetadata"),
+            .init(name: "iiurlwidth",   value: "1200"),
+            .init(name: "format",       value: "json"),
+            .init(name: "origin",       value: "*"),
+        ]
+
+        let pages = try await fetchPages(params: params)
+
+        return pages.values.compactMap { page in
+            guard isImageFile(page.title),
+                  let info = page.imageinfo?.first,
+                  let thumbURL = info.thumburl.flatMap(URL.init) else { return nil }
+
+            // Use coordinates if available; otherwise place at (0,0) and caller can filter
+            let lat = page.coordinates?.first?.lat
+            let lng = page.coordinates?.first?.lon
+            guard let lat, let lng, lat != 0 || lng != 0 else { return nil }
+
+            return makeLocation(title: page.title, lat: lat, lng: lng, info: info)
+        }
+        .sorted { $0.name < $1.name }
+    }
+
+    // MARK: - Shared helpers
+
+    private func fetchPages(params: [URLQueryItem]) async throws -> [String: WikiPage] {
         var comps = URLComponents(string: base)!
         comps.queryItems = params
         guard let url = comps.url else { throw WikimediaError.badURL }
@@ -37,71 +99,52 @@ public final class WikimediaService {
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             throw WikimediaError.httpError(http.statusCode)
         }
-
         let decoded = try JSONDecoder().decode(WikimediaResponse.self, from: data)
-        guard let pages = decoded.query?.pages else { return [] }
-
-        var results: [ScoutLocation] = []
-
-        for page in pages.values {
-            // Only include pages that have geographic coordinates
-            guard let coord = page.coordinates?.first,
-                  let info  = page.imageinfo?.first else { continue }
-
-            let lat = coord.lat, lng = coord.lon
-
-            // Client-side region filter
-            if let r = region {
-                let halfLat = r.latDelta / 2, halfLng = r.lngDelta / 2
-                let inLat = lat >= r.centerLat - halfLat && lat <= r.centerLat + halfLat
-                let inLng = lng >= r.centerLng - halfLng && lng <= r.centerLng + halfLng
-                guard inLat && inLng else { continue }
-            }
-
-            // Skip non-image files (SVG diagrams, audio, etc.)
-            let title = page.title
-            let lower = title.lowercased()
-            guard lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") ||
-                  lower.hasSuffix(".png") || lower.hasSuffix(".webp") else { continue }
-
-            // Extract metadata
-            let meta = info.extmetadata
-            let rawDesc = meta?.ImageDescription?.value ?? ""
-            let description = stripHTML(rawDesc)
-            let artist = stripHTML(meta?.Artist?.value ?? "")
-            let displayName = title
-                .replacingOccurrences(of: "File:", with: "")
-                .replacingOccurrences(of: "_", with: " ")
-                .components(separatedBy: ".").dropLast().joined(separator: ".")
-                .trimmingCharacters(in: .whitespaces)
-
-            let imageURL = URL(string: info.thumburl ?? info.url)
-            let pageURL  = URL(string: "https://commons.wikimedia.org/wiki/\(title.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? title)")
-            let mapsURL  = URL(string: "https://www.google.com/maps/search/?api=1&query=\(lat),\(lng)")
-
-            let loc = ScoutLocation(
-                name: displayName.isEmpty ? "Wikimedia Photo" : displayName,
-                description: description.isEmpty ? artist : description,
-                coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
-                sourceURL: pageURL,
-                images: imageURL.map { [ScoutImage(url: $0, source: .googleMaps)] } ?? [],
-                googleMapsURL: mapsURL
-            )
-            results.append(loc)
-        }
-
-        // Stable order: sort by title so results don't shuffle on re-search
-        return results.sorted { $0.name < $1.name }
+        return decoded.query?.pages ?? [:]
     }
 
-    // MARK: - Helpers
+    private func isImageFile(_ title: String) -> Bool {
+        let lower = title.lowercased()
+        return lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") ||
+               lower.hasSuffix(".png") || lower.hasSuffix(".webp")
+    }
+
+    private func makeLocation(title: String, lat: Double, lng: Double, info: WikiImageInfo) -> ScoutLocation {
+        let meta = info.extmetadata
+        let description = stripHTML(meta?.ImageDescription?.value ?? "")
+        let artist = stripHTML(meta?.Artist?.value ?? "")
+        let displayName = title
+            .replacingOccurrences(of: "File:", with: "")
+            .replacingOccurrences(of: "_", with: " ")
+            .components(separatedBy: ".").dropLast().joined(separator: ".")
+            .trimmingCharacters(in: .whitespaces)
+
+        let encoded = title.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? title
+        let pageURL  = URL(string: "https://commons.wikimedia.org/wiki/\(encoded)")
+        let mapsURL  = URL(string: "https://www.google.com/maps/search/?api=1&query=\(lat),\(lng)")
+        let imageURL = info.thumburl.flatMap(URL.init) ?? URL(string: info.url)!
+
+        return ScoutLocation(
+            name: displayName.isEmpty ? "Wikimedia Photo" : displayName,
+            description: description.isEmpty ? artist : description,
+            coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
+            sourceURL: pageURL,
+            images: [ScoutImage(url: imageURL, source: .googleMaps)],
+            googleMapsURL: mapsURL
+        )
+    }
 
     private func stripHTML(_ string: String) -> String {
         guard string.contains("<") else { return string }
-        var result = string
-        // Remove tags
-        while let open = result.range(of: "<"), let close = result.range(of: ">", range: open.upperBound..<result.endIndex) {
-            result.removeSubrange(open.lowerBound...close.upperBound)
+        let result: String
+        if let regex = try? NSRegularExpression(pattern: "<[^>]+>") {
+            result = regex.stringByReplacingMatches(
+                in: string,
+                range: NSRange(string.startIndex..., in: string),
+                withTemplate: ""
+            )
+        } else {
+            result = string
         }
         return result
             .replacingOccurrences(of: "&amp;",  with: "&")
@@ -109,6 +152,7 @@ public final class WikimediaService {
             .replacingOccurrences(of: "&gt;",   with: ">")
             .replacingOccurrences(of: "&quot;", with: "\"")
             .replacingOccurrences(of: "&#039;", with: "'")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -117,29 +161,34 @@ public final class WikimediaService {
     private struct WikimediaResponse: Decodable {
         let query: QueryResult?
         struct QueryResult: Decodable {
-            let pages: [String: Page]
+            let pages: [String: WikiPage]
         }
-        struct Page: Decodable {
-            let title: String
-            let imageinfo: [ImageInfo]?
-            let coordinates: [Coordinate]?
-        }
-        struct ImageInfo: Decodable {
-            let url: String
-            let thumburl: String?
-            let extmetadata: ExtMetadata?
-        }
-        struct ExtMetadata: Decodable {
-            let ImageDescription: MetaValue?
-            let Artist: MetaValue?
-        }
-        struct MetaValue: Decodable {
-            let value: String
-        }
-        struct Coordinate: Decodable {
-            let lat: Double
-            let lon: Double
-        }
+    }
+
+    private struct WikiPage: Decodable {
+        let title: String
+        let imageinfo: [WikiImageInfo]?
+        let coordinates: [WikiCoordinate]?
+    }
+
+    private struct WikiImageInfo: Decodable {
+        let url: String
+        let thumburl: String?
+        let extmetadata: WikiExtMetadata?
+    }
+
+    private struct WikiExtMetadata: Decodable {
+        let ImageDescription: WikiMetaValue?
+        let Artist: WikiMetaValue?
+    }
+
+    private struct WikiMetaValue: Decodable {
+        let value: String
+    }
+
+    private struct WikiCoordinate: Decodable {
+        let lat: Double
+        let lon: Double
     }
 
     public enum WikimediaError: LocalizedError {

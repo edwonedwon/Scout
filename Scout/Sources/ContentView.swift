@@ -19,6 +19,12 @@ struct ContentView: View {
     @StateObject private var photoViewer = PhotoViewerState.shared
 
     @AppStorage("search.mode") private var searchMode: SearchMode = .google
+    @AppStorage("map.cyclingProvider") private var cyclingProviderRaw: String = ""
+
+    private var cyclingProvider: CyclingTileProvider? {
+        get { CyclingTileProvider(rawValue: cyclingProviderRaw) }
+        set { cyclingProviderRaw = newValue?.rawValue ?? "" }
+    }
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -98,14 +104,34 @@ struct ContentView: View {
             HStack {
                 TextField(searchMode.placeholder, text: $searchText)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { Task { await runSearch() } }
+                    .onSubmit {
+                        // Wikimedia: empty submit = browse area
+                        if searchMode == .wikimedia || !searchText.isEmpty {
+                            Task { await runSearch() }
+                        }
+                    }
                 Button { Task { await runSearch() } } label: {
                     Image(systemName: "magnifyingglass")
                 }
-                .disabled(searchText.isEmpty || isSearching)
+                .disabled((searchText.isEmpty && searchMode != .wikimedia) || isSearching)
             }
             .padding(.horizontal, 10)
-            .padding(.bottom, 8)
+            .padding(.bottom, searchMode == .wikimedia ? 4 : 8)
+
+            if searchMode == .wikimedia {
+                Button {
+                    Task { await runSearch() }
+                } label: {
+                    Label("Browse photos in this area", systemImage: "photo.on.rectangle.angled")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isSearching)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+            }
 
             Divider()
 
@@ -171,7 +197,8 @@ struct ContentView: View {
             },
             isDrawingMode: searchArea.isDrawing,
             searchPolygon: searchArea.polygon,
-            onPolygonComplete: { coords in searchArea.setPolygon(coords) }
+            onPolygonComplete: { coords in searchArea.setPolygon(coords) },
+            cyclingProvider: cyclingProvider
         )
         .ignoresSafeArea()
         .overlay(alignment: .topTrailing) {
@@ -186,6 +213,9 @@ struct ContentView: View {
             DebugPanelOverlay()
                 .padding()
         }
+        .overlay(alignment: .topLeading) {
+            cyclingControls
+        }
         .overlay(alignment: .bottomTrailing) {
             lassoControls
         }
@@ -196,6 +226,49 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
             }
         }
+    }
+
+    private var cyclingControls: some View {
+        Menu {
+            ForEach(CyclingTileProvider.allCases) { provider in
+                Button {
+                    if cyclingProvider == provider {
+                        cyclingProviderRaw = ""
+                    } else {
+                        cyclingProviderRaw = provider.rawValue
+                    }
+                } label: {
+                    Label {
+                        VStack(alignment: .leading) {
+                            Text(provider.displayName)
+                            Text(provider.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        if cyclingProvider == provider {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+            if cyclingProvider != nil {
+                Divider()
+                Button("Turn Off", role: .destructive) {
+                    cyclingProviderRaw = ""
+                }
+            }
+        } label: {
+            Image(systemName: "bicycle")
+                .font(.title2)
+                .foregroundStyle(cyclingProvider != nil ? .blue : .primary)
+                .frame(width: 36, height: 36)
+                .background(.regularMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .padding(16)
+        .help(cyclingProvider.map { "Cycling: \($0.displayName)" } ?? "Show cycling map")
     }
 
     private var lassoControls: some View {
@@ -289,7 +362,6 @@ struct ContentView: View {
 
     @MainActor
     private func runWikimediaSearch() async {
-        guard !searchText.isEmpty else { return }
         isSearching = true
         searchError = nil
         locations = []
@@ -498,3 +570,12 @@ enum SearchMode: String, CaseIterable, Identifiable {
         }
     }
 }
+
+// MARK: - Preview
+
+#if DEBUG
+#Preview("Main layout", traits: .fixedLayout(width: 1200, height: 800)) {
+    ContentView()
+        .environmentObject(APIKeyState.shared)
+}
+#endif
