@@ -486,25 +486,10 @@ final class ScoutDotAnnotationView: MKAnnotationView {
     }
 }
 
-// MARK: - Google photo loading (header auth)
-
-/// Builds a URLRequest for a Google Places photo URL, adding the X-Goog-Api-Key header.
-/// Google's photo media endpoint is more reliable with header auth than with the key baked
-/// into the URL query param (some key configurations reject bare URL+key requests).
-func makeGooglePhotoRequest(for url: URL) -> URLRequest {
-    var request = URLRequest(url: url)
-    if url.host?.contains("places.googleapis.com") == true,
-       let key = KeychainService.load(forKey: KeychainService.googleMapsAPIKey) {
-        request.setValue(key, forHTTPHeaderField: "X-Goog-Api-Key")
-    }
-    return request
-}
-
 // MARK: - Photo annotation view
 
 final class ScoutPhotoAnnotationView: MKAnnotationView {
     static let reuseID = "scoutPhoto"
-    private static let imageCache = NSCache<NSURL, NSImage>()
 
     private let imageView = NSImageView()
     private var loadTask: Task<Void, Never>?
@@ -559,18 +544,15 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
 
     func configure(imageURL: URL?) {
         loadTask?.cancel()
-        imageView.image = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)
-        guard let url = imageURL else { return }
-        let nsURL = url as NSURL
-        if let cached = Self.imageCache.object(forKey: nsURL) {
+        if let url = imageURL, let cached = PhotoLoader.cached(url) {
             imageView.image = cached
             return
         }
+        imageView.image = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)
+        guard let url = imageURL else { return }
         loadTask = Task {
-            guard let (data, _) = try? await URLSession.shared.data(for: makeGooglePhotoRequest(for: url)),
-                  let img = NSImage(data: data),
-                  !Task.isCancelled else { return }
-            Self.imageCache.setObject(img, forKey: nsURL)
+            let img = await PhotoLoader.load(url)
+            guard !Task.isCancelled, let img else { return }
             await MainActor.run { self.imageView.image = img }
         }
     }
@@ -770,8 +752,8 @@ struct ScoutMapView {
             #endif
         }
         coord.lastPinScale = pinScale
-        context.coordinator.syncAnnotations(map, locations: locations)
-        context.coordinator.syncProjectPins(map, pins: projectPins)
+        context.coordinator.syncAnnotations(map, desired: locations.map { ($0, nil) }, projectPins: false)
+        context.coordinator.syncAnnotations(map, desired: projectPins.map { ($0.0, $0.1) }, projectPins: true)
         context.coordinator.syncSelection(map, selection: selection)
         syncTileOverlay(map)
         syncPolygonOverlay(map)
@@ -817,23 +799,16 @@ struct ScoutMapView {
             #endif
         }
 
-        func syncAnnotations(_ map: MKMapView, locations: [ScoutLocation]) {
-            let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { !$0.isProjectPin }
-            let currentIDs = Set(current.map { $0.location.id })
-            let newIDs = Set(locations.map(\.id))
-            guard currentIDs != newIDs else { return }
-            map.removeAnnotations(current)
-            map.addAnnotations(locations.map { LocationAnnotation($0) })
-        }
-
-        func syncProjectPins(_ map: MKMapView, pins: [(ScoutLocation, String)]) {
-            let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { $0.isProjectPin }
-            // Re-key by id+color so a recolor (list change) also refreshes.
+        /// Diffs the on-map annotations of one kind (search results or saved project pins)
+        /// against the desired set and swaps them only when they differ. Keyed by id+tint
+        /// so a saved pin's recolor (e.g. moved to another list) also refreshes.
+        func syncAnnotations(_ map: MKMapView, desired: [(ScoutLocation, String?)], projectPins: Bool) {
+            let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { $0.isProjectPin == projectPins }
             let currentKeys = Set(current.map { "\($0.location.id)|\($0.tintHex ?? "")" })
-            let newKeys = Set(pins.map { "\($0.0.id)|\($0.1)" })
+            let newKeys = Set(desired.map { "\($0.0.id)|\($0.1 ?? "")" })
             guard currentKeys != newKeys else { return }
             map.removeAnnotations(current)
-            map.addAnnotations(pins.map { LocationAnnotation($0.0, isProjectPin: true, tintHex: $0.1) })
+            map.addAnnotations(desired.map { LocationAnnotation($0.0, isProjectPin: projectPins, tintHex: $0.1) })
         }
 
         func syncSelection(_ map: MKMapView, selection: ScoutLocation?) {

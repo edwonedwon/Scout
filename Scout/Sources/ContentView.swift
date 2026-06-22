@@ -274,11 +274,22 @@ struct ContentView: View {
             }
 
             List(locations, selection: $selectedLocation) { location in
-                LocationRow(location: location, availableLists: allLists) { list in
-                    saveToList(location, list)
-                }
-                .draggable(location)
-                .tag(location)
+                LocationRow(location: location)
+                    .draggable(location)
+                    .tag(location)
+                    .contextMenu {
+                        if !allLists.isEmpty {
+                            Menu {
+                                ForEach(allLists) { list in
+                                    Button { saveToList(location, list) } label: {
+                                        Label(list.name, systemImage: "mappin.circle")
+                                    }
+                                }
+                            } label: {
+                                Label("Save to List", systemImage: "folder.badge.plus")
+                            }
+                        }
+                    }
             }
             .overlay {
                 if locations.isEmpty {
@@ -342,16 +353,12 @@ struct ContentView: View {
             Image(systemName: tracking ? "location.fill" : "location")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(tracking ? .blue : .primary)
-                .frame(width: 32, height: 32)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+                .mapControlChrome(diameter: 32, circle: false)
         }
         .buttonStyle(.plain)
         #else
         return UserTrackingButtonView(controller: mapController)
-            .frame(width: 32, height: 32)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+            .mapControlChrome(diameter: 32, circle: false)
         #endif
     }
 
@@ -360,9 +367,7 @@ struct ContentView: View {
             Image(systemName: icon)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.primary)
-                .frame(width: 32, height: 32)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+                .mapControlChrome(diameter: 32, circle: false)
         }
         .buttonStyle(.plain)
     }
@@ -616,9 +621,7 @@ struct ContentView: View {
             Image(systemName: "square.3.layers.3d")
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(active ? .blue : .primary)
-                .frame(width: 36, height: 36)
-                .background(.regularMaterial, in: Circle())
-                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+                .mapControlChrome()
         }
         .buttonStyle(.plain)
         .help("Map Layers")
@@ -633,9 +636,7 @@ struct ContentView: View {
             Image(systemName: "map")
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(active ? .orange : .primary)
-                .frame(width: 36, height: 36)
-                .background(.regularMaterial, in: Circle())
-                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+                .mapControlChrome()
         }
         .buttonStyle(.plain)
         .help("Japan Boundaries")
@@ -724,9 +725,7 @@ struct ContentView: View {
             Image(systemName: searchArea.isDrawing ? "xmark.circle.fill" : "lasso")
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(searchArea.isDrawing ? .red : searchArea.isActive ? .blue : .primary)
-                .frame(width: 36, height: 36)
-                .background(.regularMaterial, in: Circle())
-                .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+                .mapControlChrome()
         }
         .buttonStyle(.plain)
         .help(searchArea.isDrawing ? "Cancel" : searchArea.isActive ? "Redraw search area" : "Draw search area")
@@ -750,81 +749,44 @@ struct ContentView: View {
 
     // MARK: - Search
 
+    /// Current map/saved area, used to bias all searches toward what you're looking at.
+    private var searchRegion: GooglePlacesService.MapRegion? {
+        searchArea.mapRegion ??
+        (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
+    }
+
+    /// Runs the active source's search. Google/Flickr/Wikimedia share the same
+    /// wrapper (loading state, area filtering, map fit); only the service call differs.
     @MainActor
     private func runSearch() async {
-        switch rightPanelTab {
-        case .ai:        break
-        case .google:    await runGoogleSearch()
-        case .flickr:    await runFlickrSearch()
-        case .wikimedia: await runWikimediaSearch()
-        }
-    }
+        guard rightPanelTab != .ai else { return }
+        if rightPanelTab == .google && searchText.isEmpty { return }
 
-    @MainActor
-    private func runGoogleSearch() async {
-        guard !searchText.isEmpty else { return }
         isSearching = true
         searchError = nil
         locations = []
-        do {
-            dlog("Google Maps search: \"\(searchText)\"", level: .info, tag: "Search")
-            let region: GooglePlacesService.MapRegion? =
-                searchArea.mapRegion ??
-                (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
-            var results = try await GooglePlacesService.shared.search(query: searchText, region: region)
-            if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
-            locations = results
-            selectedLocation = nil
-            dlog("Google Maps returned \(results.count) results", level: .success, tag: "Search")
-        } catch {
-            searchError = error.localizedDescription
-        }
-        isSearching = false
-        if !locations.isEmpty { fitMapToResults() }
-    }
+        defer { isSearching = false }
 
-    @MainActor
-    private func runFlickrSearch() async {
-        isSearching = true
-        searchError = nil
-        locations = []
         do {
-            let query = searchText.isEmpty ? nil : searchText
-            dlog("Flickr search: \"\(searchText)\"", level: .info, tag: "Search")
-            let region: GooglePlacesService.MapRegion? =
-                searchArea.mapRegion ??
-                (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
-            var results = try await FlickrService.shared.search(query: query, region: region, limit: Int(flickrLimit))
+            dlog("\(rightPanelTab.label) search: \"\(searchText)\"", level: .info, tag: "Search")
+            var results: [ScoutLocation]
+            switch rightPanelTab {
+            case .google:
+                results = try await GooglePlacesService.shared.search(query: searchText, region: searchRegion)
+            case .flickr:
+                results = try await FlickrService.shared.search(query: searchText.isEmpty ? nil : searchText, region: searchRegion, limit: Int(flickrLimit))
+            case .wikimedia:
+                results = try await WikimediaService.shared.search(query: searchText, region: searchRegion, limit: Int(wikiLimit))
+            case .ai:
+                return
+            }
             if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
             locations = results
             selectedLocation = nil
-            dlog("Flickr returned \(results.count) results", level: .success, tag: "Search")
+            dlog("\(rightPanelTab.label) returned \(results.count) results", level: .success, tag: "Search")
         } catch {
             searchError = error.localizedDescription
         }
-        isSearching = false
-        if !locations.isEmpty { fitMapToResults() }
-    }
-
-    @MainActor
-    private func runWikimediaSearch() async {
-        isSearching = true
-        searchError = nil
-        locations = []
-        do {
-            dlog("Wikimedia search: \"\(searchText)\"", level: .info, tag: "Search")
-            let region: GooglePlacesService.MapRegion? =
-                searchArea.mapRegion ??
-                (hasSavedRegion ? .init(centerLat: savedLat, centerLng: savedLng, latDelta: savedLatDelta, lngDelta: savedLngDelta) : nil)
-            var results = try await WikimediaService.shared.search(query: searchText, region: region, limit: Int(wikiLimit))
-            if searchArea.isActive { results = results.filter { searchArea.contains($0.coordinate) } }
-            locations = results
-            selectedLocation = nil
-            dlog("Wikimedia returned \(results.count) results", level: .success, tag: "Search")
-        } catch {
-            searchError = error.localizedDescription
-        }
-        isSearching = false
         if !locations.isEmpty { fitMapToResults() }
     }
 
@@ -880,15 +842,16 @@ struct ContentView: View {
 
 // MARK: - Supporting Views
 
+/// The one card used to show a location everywhere — sidebar search results and
+/// saved-list rows alike. Purely visual and driven by a `ScoutLocation`; callers
+/// attach their own behavior (drag, drop, tap, context menus) around it.
 struct LocationRow: View {
     let location: ScoutLocation
-    var availableLists: [LocationListData] = []
-    var onSaveToList: ((LocationListData) -> Void)? = nil
+    var showsPhotos: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Photo filmstrip
-            if !location.images.isEmpty {
+            if showsPhotos, !location.images.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
                         ForEach(location.images) { image in
@@ -907,11 +870,9 @@ struct LocationRow: View {
                     .padding(.vertical, 2)
                 }
                 .frame(height: 74)
-                // Allow horizontal scroll without stealing list swipes
                 .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             }
 
-            // Name + address
             Text(location.name)
                 .font(.headline)
                 .lineLimit(1)
@@ -923,40 +884,34 @@ struct LocationRow: View {
                     .lineLimit(1)
             }
 
-            // Status + Maps link
             HStack {
-                Label(location.status.rawValue, systemImage: statusIcon)
+                Label(location.status.rawValue, systemImage: location.status.icon)
                     .font(.caption2)
-                    .foregroundStyle(statusColor)
+                    .foregroundStyle(location.status.color)
                 Spacer()
                 if let url = location.googleMapsURL {
                     Link(destination: url) {
-                        Image(systemName: "map")
-                            .font(.caption)
+                        Image(systemName: "map").font(.caption)
                     }
                 }
             }
         }
         .padding(.vertical, 4)
-        .contextMenu {
-            if let onSaveToList, !availableLists.isEmpty {
-                Menu {
-                    ForEach(availableLists) { list in
-                        Button {
-                            onSaveToList(list)
-                        } label: {
-                            Label(list.name, systemImage: "mappin.circle")
-                        }
-                    }
-                } label: {
-                    Label("Save to List", systemImage: "folder.badge.plus")
-                }
-            }
-        }
     }
+}
 
-    private var statusIcon: String {
-        switch location.status {
+extension View {
+    /// Floating map-control chrome: material fill, soft shadow, fixed square.
+    func mapControlChrome(diameter: CGFloat = 36, circle: Bool = true) -> some View {
+        frame(width: diameter, height: diameter)
+            .background(.regularMaterial, in: circle ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 8)))
+            .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+    }
+}
+
+extension LocationStatus {
+    var icon: String {
+        switch self {
         case .scouted: "mappin.circle"
         case .shortlisted: "star.circle"
         case .approved: "checkmark.circle.fill"
@@ -964,8 +919,8 @@ struct LocationRow: View {
         }
     }
 
-    private var statusColor: Color {
-        switch location.status {
+    var color: Color {
+        switch self {
         case .scouted: .secondary
         case .shortlisted: .orange
         case .approved: .green

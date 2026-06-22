@@ -91,12 +91,7 @@ struct ProjectsPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             projectHeader(project)
 
-            let topLevel = project.lists
-                .filter { $0.parentList == nil }
-                .sorted {
-                    $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder
-                                                 : $0.createdAt < $1.createdAt
-                }
+            let topLevel = ordered(project.lists.filter { $0.parentList == nil })
             ForEach(topLevel) { list in
                 ListCard(list: list, activeListIDs: $activeListIDs, modelContext: modelContext,
                          showPinPhotos: showPinPhotos, dragState: dragState,
@@ -108,7 +103,7 @@ struct ProjectsPanel: View {
                 .frame(height: 8)
                 .onDrop(of: [.text], isTargeted: nil) { _ in
                     guard let dragged = dragState.draggedList else { return false }
-                    moveListToTopLevelEnd(dragged, in: project)
+                    moveToTopLevel(dragged, in: project)
                     dragState.draggedList = nil
                     return true
                 }
@@ -126,19 +121,6 @@ struct ProjectsPanel: View {
             }
             .buttonStyle(.plain)
         }
-    }
-
-    /// Detach a list from any parent and place it at the end of the project's top level.
-    private func moveListToTopLevelEnd(_ dragged: LocationListData, in project: ProjectData) {
-        // Guard against making a list top-level inside its own subtree (no-op concern only)
-        dragged.parentList = nil
-        dragged.project = project
-        let siblings = project.lists
-            .filter { $0.parentList == nil && $0.persistentModelID != dragged.persistentModelID }
-            .sorted { $0.sortOrder < $1.sortOrder }
-        var arr = siblings
-        arr.append(dragged)
-        for (i, l) in arr.enumerated() { l.sortOrder = i }
     }
 
     private func projectHeader(_ project: ProjectData) -> some View {
@@ -213,12 +195,7 @@ private struct ListCard: View {
     private var listColor: Color { Color(hexString: list.colorHex) }
     private var isHighlighted: Bool { isTargeted || isPinDropTarget }
 
-    private var sortedChildren: [LocationListData] {
-        list.childLists.sorted {
-            $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder
-                                         : $0.createdAt < $1.createdAt
-        }
-    }
+    private var sortedChildren: [LocationListData] { ordered(list.childLists) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -256,7 +233,7 @@ private struct ListCard: View {
                 .frame(height: 8)
                 .onDrop(of: [.text], isTargeted: nil) { _ in
                     guard let dragged = dragState.draggedList else { return false }
-                    nestList(dragged, into: list, atEnd: true)
+                    nestList(dragged, into: list)
                     dragState.draggedList = nil
                     return true
                 }
@@ -301,7 +278,7 @@ private struct ListCard: View {
             }
             if list.parentList != nil {
                 Button {
-                    if let project = list.project { unnest(list, in: project) }
+                    if let project = list.project { moveToTopLevel(list, in: project) }
                 } label: {
                     Label("Move to Top Level", systemImage: "arrow.up.left")
                 }
@@ -406,7 +383,7 @@ private struct ListCard: View {
                 return true
             }
             if let draggedList = dragState.draggedList {
-                let ok = nestList(draggedList, into: list, atEnd: true)
+                let ok = nestList(draggedList, into: list)
                 dragState.draggedList = nil
                 return ok
             }
@@ -467,25 +444,13 @@ private struct ListCard: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: 16)
 
-                if showPinPhotos {
-                    PinThumbnailView(pin: pin)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(pin.name)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                    Text(String(format: "%.4f, %.4f", pin.latitude, pin.longitude))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Spacer()
+                // Same row view as the sidebar search results.
+                LocationRow(location: pin.asScoutLocation(), showsPhotos: showPinPhotos)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, showPinPhotos ? 6 : 4)
             .contentShape(Rectangle())
             .onTapGesture { onPanToPin?(pin.coordinate) }
+            .task(id: pin.uuid) { await ensurePinPhoto(pin) }
             .onDrag {
                 dragState.draggedPin = pin
                 return NSItemProvider(object: pin.uuid.uuidString as NSString)
@@ -521,54 +486,36 @@ private struct ListCard: View {
         }
     }
 
-    // MARK: - Lookup by stable UUID
+    /// If a pin has a Google place ID but no stored photo yet, fetch one and persist it
+    /// so `asScoutLocation()` (and the shared row) can show it. No-op otherwise.
+    private func ensurePinPhoto(_ pin: PinnedLocationData) async {
+        guard pin.imageURL == nil, let placeId = pin.googlePlaceId,
+              let photos = try? await GooglePlacesService.shared.fetchPhotos(for: placeId),
+              let url = photos.first?.url else { return }
+        pin.imageURL = url.absoluteString
+        try? modelContext.save()
+    }
 
     // MARK: - Sort + reorder helpers
 
-    private func sortedPins() -> [PinnedLocationData] {
-        list.pins.sorted {
-            if $0.sortOrder != $1.sortOrder { return $0.sortOrder < $1.sortOrder }
-            return $0.createdAt < $1.createdAt
-        }
-    }
+    private func sortedPins() -> [PinnedLocationData] { ordered(list.pins) }
 
     private func reorder(pin dragged: PinnedLocationData, before target: PinnedLocationData, in sorted: [PinnedLocationData]) {
         guard dragged.persistentModelID != target.persistentModelID else { return }
-        var pins = sorted.filter { $0.persistentModelID != dragged.persistentModelID }
-        if let idx = pins.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) {
-            pins.insert(dragged, at: idx)
-        }
-        for (i, p) in pins.enumerated() { p.sortOrder = i }
+        placeInOrder(dragged, before: target, among: sorted)
     }
 
     private func appendPin(_ dragged: PinnedLocationData, in sorted: [PinnedLocationData]) {
-        var pins = sorted.filter { $0.persistentModelID != dragged.persistentModelID }
-        pins.append(dragged)
-        for (i, p) in pins.enumerated() { p.sortOrder = i }
+        placeInOrder(dragged, before: nil, among: sorted)
     }
 
+    /// Move `pin` into `target` (the inverse relationship pulls it out of its old list),
+    /// landing before `insertBefore` or at the end.
     private func movePin(_ pin: PinnedLocationData, toList target: LocationListData,
                          before insertBefore: PinnedLocationData? = nil,
                          in sorted: [PinnedLocationData] = []) {
-        // `list` has @Relationship(inverse:), so setting it moves the pin out of
-        // its old list's `pins` and into the target's automatically.
         pin.list = target
-
-        // Re-number the target list so the dropped pin lands in the right slot.
-        let targetSorted = target.pins
-            .filter { $0.persistentModelID != pin.persistentModelID }
-            .sorted {
-                $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder
-                                             : $0.createdAt < $1.createdAt
-            }
-        var pins = targetSorted
-        if let insertBefore,
-           let idx = pins.firstIndex(where: { $0.persistentModelID == insertBefore.persistentModelID }) {
-            pins.insert(pin, at: idx)
-        } else {
-            pins.append(pin)
-        }
-        for (i, p) in pins.enumerated() { p.sortOrder = i }
+        placeInOrder(pin, before: insertBefore, among: ordered(target.pins))
     }
 
     // MARK: - List move / nest helpers
@@ -583,60 +530,26 @@ private struct ListCard: View {
         return false
     }
 
-    /// Nest `dragged` inside `target` (target becomes its parent).
+    /// Nest `dragged` inside `target` at the end of its children.
     @discardableResult
-    private func nestList(_ dragged: LocationListData, into target: LocationListData, atEnd: Bool) -> Bool {
-        guard dragged.persistentModelID != target.persistentModelID else { return false }
-        // Can't nest a list into its own descendant.
-        guard !isAncestor(dragged, of: target) else { return false }
-
+    private func nestList(_ dragged: LocationListData, into target: LocationListData) -> Bool {
+        guard dragged.persistentModelID != target.persistentModelID,
+              !isAncestor(dragged, of: target) else { return false }
         dragged.parentList = target           // inverse maintains childLists arrays
         dragged.project = target.project
-        let siblings = target.childLists
-            .filter { $0.persistentModelID != dragged.persistentModelID }
-            .sorted { $0.sortOrder < $1.sortOrder }
-        var arr = siblings
-        arr.append(dragged)
-        for (i, l) in arr.enumerated() { l.sortOrder = i }
+        placeInOrder(dragged, before: nil, among: ordered(target.childLists))
         return true
     }
 
     /// Place `dragged` immediately before `target`, as a sibling at target's level.
     private func reorderListBefore(_ dragged: LocationListData, target: LocationListData) {
-        guard dragged.persistentModelID != target.persistentModelID else { return }
-        // Can't move a list to sit beside something inside its own subtree.
-        guard !isAncestor(dragged, of: target) else { return }
-
+        guard dragged.persistentModelID != target.persistentModelID,
+              !isAncestor(dragged, of: target) else { return }
         dragged.parentList = target.parentList
         dragged.project = target.project
-
-        let level: [LocationListData]
-        if let parent = target.parentList {
-            level = parent.childLists
-        } else {
-            level = target.project?.lists.filter { $0.parentList == nil } ?? []
-        }
-        var arr = level
-            .filter { $0.persistentModelID != dragged.persistentModelID }
-            .sorted { $0.sortOrder < $1.sortOrder }
-        if let idx = arr.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) {
-            arr.insert(dragged, at: idx)
-        } else {
-            arr.append(dragged)
-        }
-        for (i, l) in arr.enumerated() { l.sortOrder = i }
-    }
-
-    /// Promote a nested list back to the project's top level (end).
-    private func unnest(_ dragged: LocationListData, in project: ProjectData) {
-        dragged.parentList = nil
-        dragged.project = project
-        let siblings = project.lists
-            .filter { $0.parentList == nil && $0.persistentModelID != dragged.persistentModelID }
-            .sorted { $0.sortOrder < $1.sortOrder }
-        var arr = siblings
-        arr.append(dragged)
-        for (i, l) in arr.enumerated() { l.sortOrder = i }
+        let level = target.parentList?.childLists
+            ?? target.project?.lists.filter { $0.parentList == nil } ?? []
+        placeInOrder(dragged, before: target, among: ordered(level))
     }
 }
 
@@ -671,51 +584,42 @@ private struct NameEntrySheet: View {
     }
 }
 
-// MARK: - Pin thumbnail
+// MARK: - Drag reordering
 
-/// Shows a 44×44 thumbnail for a pinned location.
-/// If the pin has a googlePlaceId but no stored photo URL, fetches photos on first appear
-/// and persists the URL so subsequent loads are instant.
-private struct PinThumbnailView: View {
-    let pin: PinnedLocationData
-    @Environment(\.modelContext) private var modelContext
-    @State private var fetchTask: Task<Void, Never>? = nil
-    @State private var resolvedURL: URL? = nil
+/// SwiftData models carrying a manual `sortOrder` that can be reordered by drag/drop.
+protocol Reorderable: AnyObject {
+    var sortOrder: Int { get set }
+    var persistentModelID: PersistentIdentifier { get }
+}
+extension PinnedLocationData: Reorderable {}
+extension LocationListData: Reorderable {}
 
-    var body: some View {
-        GooglePhotoImage(url: resolvedURL) {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.15))
-                // Only animate if we're actively fetching; otherwise just a gray box.
-                .overlay(ProgressView().controlSize(.mini).opacity(fetchTask != nil ? 0.7 : 0))
-        }
-        .scaledToFill()
-        .frame(width: 44, height: 44)
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onAppear { resolveURL() }
-        .onDisappear { fetchTask?.cancel() }
-        .onChange(of: pin.imageURL) { _, _ in resolveURL() }
+/// The one routine behind every drag reorder/move/nest: rebuild `siblings` with `moved`
+/// placed just before `target` (appended when `target` is nil or absent), dropping any
+/// existing copy of `moved`, then renumber `sortOrder` to 0..<n.
+private func placeInOrder<T: Reorderable>(_ moved: T, before target: T?, among siblings: [T]) {
+    var arr = siblings.filter { $0.persistentModelID != moved.persistentModelID }
+    if let target, let idx = arr.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) {
+        arr.insert(moved, at: idx)
+    } else {
+        arr.append(moved)
     }
+    for (i, x) in arr.enumerated() { x.sortOrder = i }
+}
 
-    private func resolveURL() {
-        if let str = pin.imageURL, let url = URL(string: str) {
-            resolvedURL = url
-            return
-        }
-        guard let placeId = pin.googlePlaceId else { return }
-        fetchTask?.cancel()
-        fetchTask = Task { await fetchAndStore(placeId: placeId) }
-    }
+/// Detach `dragged` from any parent and append it to the project's top level.
+/// Free function so both the project section and a list's context menu can call it.
+private func moveToTopLevel(_ dragged: LocationListData, in project: ProjectData) {
+    dragged.parentList = nil
+    dragged.project = project
+    placeInOrder(dragged, before: nil, among: ordered(project.lists.filter { $0.parentList == nil }))
+}
 
-    @MainActor
-    private func fetchAndStore(placeId: String) async {
-        guard let photos = try? await GooglePlacesService.shared.fetchPhotos(for: placeId),
-              let first = photos.first, let url = first.url else { return }
-        pin.imageURL = url.absoluteString
-        try? modelContext.save()
-        resolvedURL = url
-    }
+private func ordered(_ pins: [PinnedLocationData]) -> [PinnedLocationData] {
+    pins.sorted { $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder : $0.createdAt < $1.createdAt }
+}
+private func ordered(_ lists: [LocationListData]) -> [LocationListData] {
+    lists.sorted { $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder : $0.createdAt < $1.createdAt }
 }
 
 // MARK: - Hex color helper

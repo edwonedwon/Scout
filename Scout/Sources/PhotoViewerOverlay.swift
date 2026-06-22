@@ -1,23 +1,58 @@
 import SwiftUI
 import ScoutKit
 
-// MARK: - Google photo image loader
+// MARK: - Photo loading
 
-/// Loads a photo from a Google Places photo URL using X-Goog-Api-Key header auth.
-/// Google's photo media endpoint is unreliable when the API key is baked into the URL
-/// query param — header auth (same as the search request) is required.
-/// Falls back to plain URL loading for non-Google URLs.
-private let _googlePhotoCache: NSCache<NSURL, _NativeImage> = {
-    let c = NSCache<NSURL, _NativeImage>()
-    c.countLimit = 200
-    return c
-}()
+#if os(macOS)
+typealias ScoutImageType = NSImage
+#else
+typealias ScoutImageType = UIImage
+#endif
 
+/// The single loader for every remote photo in the app (sidebar, carousel, grid, and
+/// map pins). One in-memory cache, one request builder.
+enum PhotoLoader {
+    private static let cache: NSCache<NSURL, ScoutImageType> = {
+        let c = NSCache<NSURL, ScoutImageType>()
+        c.countLimit = 200
+        return c
+    }()
+
+    /// Builds the request for a photo URL. For Google Places URLs it strips any baked-in
+    /// `?key=` param and sends the key as the `X-Goog-Api-Key` header instead — sending both
+    /// 400s on some key configs, and header auth is what the search request uses.
+    static func request(for url: URL) -> URLRequest {
+        let isGoogle = url.host?.contains("places.googleapis.com") == true
+        var target = url
+        if isGoogle, var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            comps.queryItems = comps.queryItems?.filter { $0.name != "key" }
+            target = comps.url ?? url
+        }
+        var request = URLRequest(url: target)
+        if isGoogle, let key = KeychainService.load(forKey: KeychainService.googleMapsAPIKey) {
+            request.setValue(key, forHTTPHeaderField: "X-Goog-Api-Key")
+        }
+        return request
+    }
+
+    static func cached(_ url: URL) -> ScoutImageType? { cache.object(forKey: url as NSURL) }
+
+    static func load(_ url: URL) async -> ScoutImageType? {
+        if let c = cached(url) { return c }
+        guard let (data, resp) = try? await URLSession.shared.data(for: request(for: url)),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let img = ScoutImageType(data: data) else { return nil }
+        cache.setObject(img, forKey: url as NSURL)
+        return img
+    }
+}
+
+/// Async image view backed by `PhotoLoader` (Google header auth + shared cache).
 struct GooglePhotoImage<Placeholder: View>: View {
     let url: URL?
     let placeholder: () -> Placeholder
 
-    @State private var image: _NativeImage? = nil
+    @State private var image: ScoutImageType? = nil
     @State private var loadTask: Task<Void, Never>? = nil
 
     init(url: URL?, @ViewBuilder placeholder: @escaping () -> Placeholder) {
@@ -44,48 +79,16 @@ struct GooglePhotoImage<Placeholder: View>: View {
 
     private func load() {
         loadTask?.cancel()
+        guard let url else { image = nil; return }
+        if let cached = PhotoLoader.cached(url) { image = cached; return }
         image = nil
-        guard let url else { return }
-        if let cached = _googlePhotoCache.object(forKey: url as NSURL) {
-            image = cached
-            return
-        }
         loadTask = Task {
-            // For Google Places URLs: strip any ?key= param baked into old stored URLs
-            // and add the key as a header instead (same auth method the search uses).
-            // Sending both causes 400 errors on some API key configurations.
-            let loadURL: URL
-            if url.host?.contains("places.googleapis.com") == true,
-               var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
-                comps.queryItems = comps.queryItems?.filter { $0.name != "key" }
-                loadURL = comps.url ?? url
-            } else {
-                loadURL = url
-            }
-            var request = URLRequest(url: loadURL)
-            if loadURL.host?.contains("places.googleapis.com") == true,
-               let key = KeychainService.load(forKey: KeychainService.googleMapsAPIKey) {
-                request.setValue(key, forHTTPHeaderField: "X-Goog-Api-Key")
-            }
-            guard !Task.isCancelled,
-                  let (data, _) = try? await URLSession.shared.data(for: request),
-                  !Task.isCancelled else { return }
-            #if os(macOS)
-            guard let img = NSImage(data: data) else { return }
-            #else
-            guard let img = UIImage(data: data) else { return }
-            #endif
-            _googlePhotoCache.setObject(img, forKey: url as NSURL)
-            await MainActor.run { image = img }
+            let loaded = await PhotoLoader.load(url)
+            guard !Task.isCancelled, let loaded else { return }
+            await MainActor.run { image = loaded }
         }
     }
 }
-
-#if os(macOS)
-private typealias _NativeImage = NSImage
-#else
-private typealias _NativeImage = UIImage
-#endif
 
 // MARK: -
 
