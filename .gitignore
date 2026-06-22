@@ -65,3 +65,6 @@ DerivedData/
 
 # Previews
 *.xliff
+
+# Local release builds
+Release/

@@ -5,6 +5,11 @@ struct PhotoViewerOverlay: View {
     @ObservedObject private var viewer = PhotoViewerState.shared
     @FocusState private var focused: Bool
 
+    /// Lists available to save into. A nil list means a general (unfiled) pin.
+    var availableLists: [LocationListData] = []
+    var onSave: ((ScoutLocation, LocationListData?) -> Void)? = nil
+    @State private var justSavedTo: String? = nil
+
     var body: some View {
         ZStack {
             // Backdrop — tap anywhere outside the scroll row to dismiss
@@ -149,7 +154,7 @@ struct PhotoViewerOverlay: View {
         .focused($focused)
         .onKeyPress(.leftArrow)  { viewer.previous(); return .handled }
         .onKeyPress(.rightArrow) { viewer.next();     return .handled }
-        .onKeyPress(.escape)     { viewer.dismiss();  return .handled }
+        // Escape is handled app-wide in ContentView.handleEscape (carousel → grid).
     }
 
     @ViewBuilder
@@ -169,6 +174,10 @@ struct PhotoViewerOverlay: View {
             }
 
             HStack(spacing: 12) {
+                if let onSave {
+                    saveMenu(for: loc, onSave: onSave)
+                }
+
                 if viewer.onViewOnMap != nil {
                     Button {
                         viewer.restoreOnPhotoMode = true
@@ -206,5 +215,51 @@ struct PhotoViewerOverlay: View {
         }
         .padding(.horizontal, 20)
         .padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private func saveMenu(for loc: ScoutLocation, onSave: @escaping (ScoutLocation, LocationListData?) -> Void) -> some View {
+        Menu {
+            Button {
+                onSave(loc, nil)
+                flashSaved("Pinned")
+            } label: {
+                Label("Pin to Map (no list)", systemImage: "mappin")
+            }
+
+            if !availableLists.isEmpty {
+                Divider()
+                Section("Add to List") {
+                    ForEach(availableLists) { list in
+                        Button {
+                            onSave(loc, list)
+                            flashSaved(list.name)
+                        } label: {
+                            Label(listLabel(list), systemImage: "mappin.circle")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Label(justSavedTo.map { "Saved · \($0)" } ?? "Save",
+                  systemImage: justSavedTo != nil ? "checkmark" : "bookmark")
+                .font(.caption.weight(.medium))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.bordered)
+        .tint(.white)
+        .controlSize(.small)
+        .fixedSize()
+    }
+
+    private func listLabel(_ list: LocationListData) -> String {
+        list.project.map { "\($0.name) › \(list.name)" } ?? list.name
+    }
+
+    private func flashSaved(_ name: String) {
+        withAnimation { justSavedTo = name }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            withAnimation { if justSavedTo == name { justSavedTo = nil } }
+        }
     }
 }

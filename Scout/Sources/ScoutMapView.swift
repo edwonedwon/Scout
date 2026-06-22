@@ -12,11 +12,15 @@ import Combine
 @MainActor
 final class ScoutMapController: ObservableObject {
     @Published var userTrackingMode: MKUserTrackingMode = .none
+    /// Bumped whenever `mapView` is (re)assigned so SwiftUI representables relying on
+    /// it (e.g. the native tracking button) get a chance to re-wire.
+    @Published private(set) var mapViewGeneration = 0
 
     private var trackingKVO: NSKeyValueObservation?
 
     weak var mapView: MKMapView? {
         didSet {
+            mapViewGeneration += 1
             trackingKVO?.invalidate()
             trackingKVO = mapView?.observe(\.userTrackingMode, options: [.initial, .new]) { [weak self] map, _ in
                 DispatchQueue.main.async { self?.userTrackingMode = map.userTrackingMode }
@@ -68,6 +72,24 @@ final class ScoutMapController: ObservableObject {
         setRegion(MKCoordinateRegion(center: center, span: span), animated: animated)
     }
 }
+
+// MARK: - Native user-tracking button (iOS only; macOS MapKit has no MKUserTrackingButton)
+
+#if !os(macOS)
+struct UserTrackingButtonView: UIViewRepresentable {
+    @ObservedObject var controller: ScoutMapController
+
+    func makeUIView(context: Context) -> MKUserTrackingButton {
+        MKUserTrackingButton(mapView: controller.mapView)
+    }
+    func updateUIView(_ uiView: MKUserTrackingButton, context: Context) {
+        _ = controller.mapViewGeneration
+        if uiView.mapView !== controller.mapView {
+            uiView.mapView = controller.mapView
+        }
+    }
+}
+#endif
 
 // MARK: - Cycling tile providers
 
@@ -136,27 +158,25 @@ final class CyclingTileOverlay: MKTileOverlay {
 
 final class LocationAnnotation: NSObject, MKAnnotation {
     let location: ScoutLocation
-    var coordinate: CLLocationCoordinate2D { location.coordinate }
-    var title: String? { location.name }
-    var subtitle: String? { location.description.isEmpty ? nil : location.description }
-    init(_ location: ScoutLocation) { self.location = location }
-}
+    /// Project (saved-list) pins set this so they sync separately and carry a list color.
+    let isProjectPin: Bool
+    /// Hex tint for project pins; nil means the default search-result blue.
+    let tintHex: String?
 
-final class ProjectAnnotation: NSObject, MKAnnotation {
-    let location: ScoutLocation
-    let colorHex: String
     var coordinate: CLLocationCoordinate2D { location.coordinate }
     var title: String? { location.name }
     var subtitle: String? { location.description.isEmpty ? nil : location.description }
-    init(_ location: ScoutLocation, colorHex: String) {
+
+    init(_ location: ScoutLocation, isProjectPin: Bool = false, tintHex: String? = nil) {
         self.location = location
-        self.colorHex = colorHex
+        self.isProjectPin = isProjectPin
+        self.tintHex = tintHex
     }
 
     #if os(macOS)
-    var pinColor: NSColor { NSColor(hexString: colorHex) ?? .systemOrange }
+    var tintColor: NSColor { tintHex.flatMap { NSColor(hexString: $0) } ?? .systemBlue }
     #else
-    var pinColor: UIColor { UIColor(hexString: colorHex) ?? .systemOrange }
+    var tintColor: UIColor { tintHex.flatMap { UIColor(hexString: $0) } ?? .systemBlue }
     #endif
 }
 
@@ -494,6 +514,15 @@ final class ScoutDotAnnotationView: MKAnnotationView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    static let baseSize: CGFloat = 14
+    func setScale(_ scale: CGFloat) {
+        let s = Self.baseSize * max(scale, 0.2)
+        guard abs(bounds.width - s) > 0.5 else { return }
+        // Resize via bounds (not frame) so the view stays centered on its coordinate.
+        bounds = CGRect(x: 0, y: 0, width: s, height: s)
+        needsDisplay = true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let inset: CGFloat = isHovered ? 0.5 : 1.5
         let ringWidth: CGFloat = isHovered ? 3.5 : 2.5
@@ -537,9 +566,19 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         imageView.wantsLayer = true
         imageView.layer?.cornerRadius = 6
         imageView.layer?.masksToBounds = true
+        imageView.autoresizingMask = [.width, .height]
         addSubview(imageView)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    static let baseSize: CGFloat = 50
+    func setScale(_ scale: CGFloat) {
+        let s = Self.baseSize * max(scale, 0.2)
+        guard abs(bounds.width - s) > 0.5 else { return }
+        // Resize via bounds (not frame) so the view stays centered on its coordinate.
+        bounds = CGRect(x: 0, y: 0, width: s, height: s)
+        imageView.frame = bounds
+    }
 
     override func prepareForReuse() {
         super.prepareForReuse()
@@ -684,6 +723,7 @@ struct ScoutMapView {
     var mapType: MKMapType = .standard
     var cyclingProvider: CyclingTileProvider? = nil
     var showPhotoAnnotations: Bool = false
+    var pinScale: Double = 1.0
     var availableLists: [LocationListData] = []
     var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
     var boundaryPolygons: [BoundaryPolygon] = []
@@ -736,11 +776,12 @@ struct ScoutMapView {
         if map.mapType != mapType {
             map.mapType = mapType
         }
-        // When annotation style toggles, remove and re-add to force viewFor: to be called
+        // When annotation style or pin size changes, remove and re-add to force viewFor: to re-run
         let coord = context.coordinator
-        if coord.lastPhotoAnnotationsMode != showPhotoAnnotations {
+        if coord.lastPhotoAnnotationsMode != showPhotoAnnotations || abs(coord.lastPinScale - pinScale) > 0.001 {
             coord.lastPhotoAnnotationsMode = showPhotoAnnotations
-            let toRecycle = map.annotations.filter { !($0 is MKUserLocation) }
+            coord.lastPinScale = pinScale
+            let toRecycle = map.annotations.filter { !($0 is MKUserLocation) && !($0 is BoundaryLabelAnnotation) }
             map.removeAnnotations(toRecycle)
             map.addAnnotations(toRecycle)
         }
@@ -792,21 +833,22 @@ struct ScoutMapView {
         }
 
         func syncAnnotations(_ map: MKMapView, locations: [ScoutLocation]) {
-            let current = map.annotations.compactMap { $0 as? LocationAnnotation }
+            let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { !$0.isProjectPin }
             let currentIDs = Set(current.map { $0.location.id })
             let newIDs = Set(locations.map(\.id))
             guard currentIDs != newIDs else { return }
             map.removeAnnotations(current)
-            map.addAnnotations(locations.map(LocationAnnotation.init))
+            map.addAnnotations(locations.map { LocationAnnotation($0) })
         }
 
         func syncProjectPins(_ map: MKMapView, pins: [(ScoutLocation, String)]) {
-            let current = map.annotations.compactMap { $0 as? ProjectAnnotation }
-            let currentIDs = Set(current.map { $0.location.id })
-            let newIDs = Set(pins.map { $0.0.id })
-            guard currentIDs != newIDs else { return }
+            let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { $0.isProjectPin }
+            // Re-key by id+color so a recolor (list change) also refreshes.
+            let currentKeys = Set(current.map { "\($0.location.id)|\($0.tintHex ?? "")" })
+            let newKeys = Set(pins.map { "\($0.0.id)|\($0.1)" })
+            guard currentKeys != newKeys else { return }
             map.removeAnnotations(current)
-            map.addAnnotations(pins.map { ProjectAnnotation($0.0, colorHex: $0.1) })
+            map.addAnnotations(pins.map { LocationAnnotation($0.0, isProjectPin: true, tintHex: $0.1) })
         }
 
         func syncSelection(_ map: MKMapView, selection: ScoutLocation?) {
@@ -1014,21 +1056,26 @@ struct ScoutMapView {
         }
 
         var lastPhotoAnnotationsMode: Bool = false
+        var lastPinScale: Double = 1.0
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if let ann = annotation as? LocationAnnotation {
                 #if os(macOS)
-                if parent.showPhotoAnnotations {
+                let scale = CGFloat(parent.pinScale)
+                // Photo annotations only make sense when the pin actually has an image.
+                if parent.showPhotoAnnotations, ann.location.images.first?.url != nil {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutPhotoAnnotationView.reuseID) as? ScoutPhotoAnnotationView)
                         ?? ScoutPhotoAnnotationView(annotation: annotation, reuseIdentifier: ScoutPhotoAnnotationView.reuseID)
                     view.annotation = annotation
+                    view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url)
                     return view
                 } else {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutDotAnnotationView.reuseID) as? ScoutDotAnnotationView)
                         ?? ScoutDotAnnotationView(annotation: annotation, reuseIdentifier: ScoutDotAnnotationView.reuseID)
                     view.annotation = annotation
-                    view.dotColor = .systemBlue
+                    view.dotColor = ann.tintColor
+                    view.setScale(scale)
                     return view
                 }
                 #else
@@ -1036,7 +1083,7 @@ struct ScoutMapView {
                 let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKMarkerAnnotationView)
                     ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: id)
                 view.annotation = annotation
-                view.markerTintColor = .systemBlue
+                view.markerTintColor = ann.tintColor
                 view.canShowCallout = true
                 let callout = LocationCalloutView(location: ann.location)
                 let size = CGSize(width: 420, height: LocationCalloutView.height(for: ann.location))
@@ -1044,24 +1091,6 @@ struct ScoutMapView {
                 host.view.frame = CGRect(origin: .zero, size: size)
                 host.view.backgroundColor = .clear
                 view.detailCalloutAccessoryView = host.view
-                return view
-                #endif
-            }
-
-            if let ann = annotation as? ProjectAnnotation {
-                #if os(macOS)
-                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutDotAnnotationView.reuseID + "_project") as? ScoutDotAnnotationView)
-                    ?? ScoutDotAnnotationView(annotation: annotation, reuseIdentifier: ScoutDotAnnotationView.reuseID + "_project")
-                view.annotation = annotation
-                view.dotColor = ann.pinColor
-                return view
-                #else
-                let id = "projectPin"
-                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? MKMarkerAnnotationView)
-                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: id)
-                view.annotation = annotation
-                view.markerTintColor = ann.pinColor
-                view.canShowCallout = true
                 return view
                 #endif
             }

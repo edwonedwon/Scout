@@ -26,6 +26,7 @@ struct ContentView: View {
     @AppStorage("flickr.limit") private var flickrLimit: Double = 50
     @State private var showLayersPopover = false
     @AppStorage("map.showPhotoAnnotations") private var showPhotoAnnotations = false
+    @AppStorage("map.pinSize") private var pinSize: Double = 1.0
     @State private var regionQuery = ""
     @State private var regionName: String? = nil
     @State private var isRegionSearching = false
@@ -51,6 +52,9 @@ struct ContentView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \LocationListData.createdAt) private var allLists: [LocationListData]
+    // General pins not attached to any list — always shown on the map.
+    @Query(filter: #Predicate<PinnedLocationData> { $0.list == nil }, sort: \PinnedLocationData.createdAt)
+    private var unfiledPins: [PinnedLocationData]
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -106,6 +110,13 @@ struct ContentView: View {
         .animation(.spring(duration: 0.3), value: showProjectsPanel)
         .animation(.spring(duration: 0.3), value: showRightPanel)
         .ignoresSafeArea()
+        .background {
+            // App-wide Escape handler (hidden). Carousel → grid → map → grid…
+            Button("", action: handleEscape)
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .allowsHitTesting(false)
+        }
         .onAppear {
             locationManager.requestIfNeeded()
             centerOnUserIfNeeded()
@@ -129,6 +140,19 @@ struct ContentView: View {
                 photoViewer.restoreOnPhotoMode = false
                 photoViewer.isVisible = true
             }
+        }
+    }
+
+    /// Escape cycles through the view contexts:
+    /// carousel → photo grid, photo grid → map, map → photo grid.
+    private func handleEscape() {
+        if photoViewer.isVisible {
+            photoViewer.dismiss()
+            withAnimation(.spring(duration: 0.3)) { viewMode = .photos }
+            return
+        }
+        withAnimation(.spring(duration: 0.3)) {
+            viewMode = (viewMode == .map) ? .photos : .map
         }
     }
 
@@ -303,7 +327,7 @@ struct ContentView: View {
         }
         .overlay {
             if photoViewer.isVisible {
-                PhotoViewerOverlay()
+                PhotoViewerOverlay(availableLists: allLists, onSave: savePinned)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
             }
@@ -311,6 +335,8 @@ struct ContentView: View {
     }
 
     private var locationTrackingButton: some View {
+        #if os(macOS)
+        // macOS MapKit has no MKUserTrackingButton, so drive the map directly.
         let tracking = mapController.userTrackingMode == .follow
         return Button { mapController.toggleTracking() } label: {
             Image(systemName: tracking ? "location.fill" : "location")
@@ -321,6 +347,12 @@ struct ContentView: View {
                 .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
         }
         .buttonStyle(.plain)
+        #else
+        return UserTrackingButtonView(controller: mapController)
+            .frame(width: 32, height: 32)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+        #endif
     }
 
     private func panelToggleButton(icon: String, action: @escaping () -> Void) -> some View {
@@ -335,17 +367,32 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
+    private static let generalPinColor = "#E53935"   // red for unfiled pins
+
     private var projectPins: [(ScoutLocation, String)] {
         let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
-        return active.flatMap { list in
+        var result = active.flatMap { list in
             list.pins.map { ($0.asScoutLocation(), list.colorHex) }
         }
+        // General (unfiled) pins are always visible, with a default color.
+        result += unfiledPins.map { ($0.asScoutLocation(), Self.generalPinColor) }
+        return result
     }
 
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
         let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
         modelContext.insert(pin)
         pin.list = list   // inverse relationship adds it to list.pins
+    }
+
+    /// Save from the carousel: to a chosen list, or as a general unfiled pin (list == nil).
+    private func savePinned(_ location: ScoutLocation, to list: LocationListData?) {
+        if let list {
+            saveToList(location, list)
+        } else {
+            let pin = PinnedLocationData(from: location)
+            modelContext.insert(pin)   // list stays nil → general pin
+        }
     }
 
     private var scoutMap: some View {
@@ -368,6 +415,7 @@ struct ContentView: View {
             mapType: mapStyle.mapType,
             cyclingProvider: cyclingProvider,
             showPhotoAnnotations: showPhotoAnnotations,
+            pinScale: pinSize,
             availableLists: allLists,
             onSaveToList: saveToList,
             boundaryPolygons: cachedBoundaryPolygons,
@@ -575,7 +623,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .help("Map Layers")
         .popover(isPresented: $showLayersPopover, arrowEdge: .top) {
-            LayersPopover(mapStyle: $mapStyle, cyclingProviderRaw: $cyclingProviderRaw, showPhotoAnnotations: $showPhotoAnnotations)
+            LayersPopover(mapStyle: $mapStyle, cyclingProviderRaw: $cyclingProviderRaw, showPhotoAnnotations: $showPhotoAnnotations, pinSize: $pinSize)
         }
     }
 
@@ -1052,6 +1100,7 @@ struct LayersPopover: View {
     @Binding var mapStyle: MapStyle
     @Binding var cyclingProviderRaw: String
     @Binding var showPhotoAnnotations: Bool
+    @Binding var pinSize: Double
 
     private var cyclingProvider: CyclingTileProvider? {
         CyclingTileProvider(rawValue: cyclingProviderRaw)
@@ -1091,6 +1140,19 @@ struct LayersPopover: View {
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .labelsHidden()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+
+            HStack(spacing: 8) {
+                Label("Size", systemImage: "circle.dotted")
+                    .font(.subheadline)
+                Slider(value: $pinSize, in: 0.5...2.5)
+                    .controlSize(.small)
+                Text("\(Int(pinSize * 100))%")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, alignment: .trailing)
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 12)
@@ -1196,7 +1258,6 @@ struct LayersPopover: View {
 
 // MARK: - Preview
 
-#if DEBUG
 // MARK: - Boundary settings popover
 
 struct BoundarySettingsPopover: View {
@@ -1294,6 +1355,7 @@ struct BoundarySettingsPopover: View {
     }
 }
 
+#if DEBUG
 #Preview("Main layout", traits: .fixedLayout(width: 1200, height: 800)) {
     ContentView()
         .environmentObject(APIKeyState.shared)
