@@ -23,7 +23,7 @@ struct ProjectsPanel: View {
 
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
-    var onPanToPin: ((CLLocationCoordinate2D) -> Void)? = nil
+    var onSelectPin: ((PinnedLocationData) -> Void)? = nil
 
     @State private var showAddProject = false
     @State private var newProjectName = ""
@@ -95,7 +95,7 @@ struct ProjectsPanel: View {
             ForEach(topLevel) { list in
                 ListCard(list: list, activeListIDs: $activeListIDs, modelContext: modelContext,
                          showPinPhotos: showPinPhotos, dragState: dragState,
-                         onFitToList: onFitToList, onPanToPin: onPanToPin)
+                         onFitToList: onFitToList, onSelectPin: onSelectPin)
             }
 
             // Drop a list here to move it to the end of the top level
@@ -180,7 +180,7 @@ private struct ListCard: View {
     var showPinPhotos: Bool = false
     let dragState: PinDragState
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
-    var onPanToPin: ((CLLocationCoordinate2D) -> Void)? = nil
+    var onSelectPin: ((PinnedLocationData) -> Void)? = nil
 
     @State private var isTargeted = false         // ScoutLocation drop highlight
     @State private var isPinDropTarget = false    // PinnedPin / nest drop highlight
@@ -226,7 +226,7 @@ private struct ListCard: View {
             ForEach(sortedChildren) { child in
                 ListCard(list: child, activeListIDs: $activeListIDs, modelContext: modelContext,
                          showPinPhotos: showPinPhotos, dragState: dragState,
-                         onFitToList: onFitToList, onPanToPin: onPanToPin)
+                         onFitToList: onFitToList, onSelectPin: onSelectPin)
             }
             // Drop a list here to append it at the end of this sub-level
             Color.clear
@@ -449,8 +449,7 @@ private struct ListCard: View {
             }
             .padding(.horizontal, 10)
             .contentShape(Rectangle())
-            .onTapGesture { onPanToPin?(pin.coordinate) }
-            .task(id: pin.uuid) { await ensurePinPhoto(pin) }
+            .onTapGesture { onSelectPin?(pin) }
             .onDrag {
                 dragState.draggedPin = pin
                 return NSItemProvider(object: pin.uuid.uuidString as NSString)
@@ -484,16 +483,6 @@ private struct ListCard: View {
                 Divider().padding(.leading, 34)
             }
         }
-    }
-
-    /// If a pin has a Google place ID but no stored photo yet, fetch one and persist it
-    /// so `asScoutLocation()` (and the shared row) can show it. No-op otherwise.
-    private func ensurePinPhoto(_ pin: PinnedLocationData) async {
-        guard pin.imageURL == nil, let placeId = pin.googlePlaceId,
-              let photos = try? await GooglePlacesService.shared.fetchPhotos(for: placeId),
-              let url = photos.first?.url else { return }
-        pin.imageURL = url.absoluteString
-        try? modelContext.save()
     }
 
     // MARK: - Sort + reorder helpers

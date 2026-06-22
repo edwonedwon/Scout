@@ -55,6 +55,8 @@ struct ContentView: View {
     // General pins not attached to any list — always shown on the map.
     @Query(filter: #Predicate<PinnedLocationData> { $0.list == nil }, sort: \PinnedLocationData.createdAt)
     private var unfiledPins: [PinnedLocationData]
+    // All pins, for the one-time offline-photo backfill.
+    @Query private var allPins: [PinnedLocationData]
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -91,9 +93,7 @@ struct ContentView: View {
                         guard !coords.isEmpty else { return }
                         mapController.fit(coords, animated: true)
                     },
-                    onPanToPin: { coord in
-                        mapController.pan(to: coord, animated: true)
-                    }
+                    onSelectPin: selectPin
                 )
                     .frame(width: 240)
                     .transition(.move(edge: .leading))
@@ -120,6 +120,7 @@ struct ContentView: View {
         .onAppear {
             locationManager.requestIfNeeded()
             centerOnUserIfNeeded()
+            backfillPhotos()
             photoViewer.onViewOnMap = { loc in
                 withAnimation(.spring(duration: 0.3)) { viewMode = .map }
                 selectedLocation = loc
@@ -384,10 +385,23 @@ struct ContentView: View {
         return result
     }
 
+    /// Tapping a saved pin in the sidebar selects it on the map and shows its popover —
+    /// exactly as if it were clicked on the map. Activates its list first so it's visible
+    /// (unfiled pins are always shown), then centers on it.
+    private func selectPin(_ pin: PinnedLocationData) {
+        if let listID = pin.list?.persistentModelID {
+            activeListIDs.insert(listID)
+        }
+        let location = pin.asScoutLocation()
+        selectedLocation = location
+        mapController.pan(to: location.coordinate, animated: true)
+    }
+
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
         let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
         modelContext.insert(pin)
         pin.list = list   // inverse relationship adds it to list.pins
+        cachePhotos(for: pin, from: location)
     }
 
     /// Save from the carousel: to a chosen list, or as a general unfiled pin (list == nil).
@@ -397,6 +411,27 @@ struct ContentView: View {
         } else {
             let pin = PinnedLocationData(from: location)
             modelContext.insert(pin)   // list stays nil → general pin
+            cachePhotos(for: pin, from: location)
+        }
+    }
+
+    /// Download a saved pin's photos to disk so it displays offline and never refetches.
+    private func cachePhotos(for pin: PinnedLocationData, from location: ScoutLocation) {
+        let placeId = pin.googlePlaceId
+        let uuid = pin.uuid
+        Task { @MainActor in
+            let files = await PinPhotoStore.download(for: location, placeId: placeId, pinUUID: uuid)
+            guard !files.isEmpty else { return }
+            pin.photoFiles = files
+            try? modelContext.save()
+        }
+    }
+
+    /// One-time pass over existing pins that have no offline photos yet, fetching them
+    /// from their original source (stored URLs, Google place ID, or a name+area search).
+    private func backfillPhotos() {
+        for pin in allPins where pin.photoFiles.isEmpty {
+            cachePhotos(for: pin, from: pin.asScoutLocation())
         }
     }
 
@@ -445,6 +480,7 @@ struct ContentView: View {
         .overlay(alignment: .bottomLeading) {
             HStack(alignment: .bottom, spacing: 8) {
                 layersButton
+                photosButton
                 boundaryButton
                 lassoControls
                 regionSearchOverlay
@@ -626,8 +662,19 @@ struct ContentView: View {
         .buttonStyle(.plain)
         .help("Map Layers")
         .popover(isPresented: $showLayersPopover, arrowEdge: .top) {
-            LayersPopover(mapStyle: $mapStyle, cyclingProviderRaw: $cyclingProviderRaw, showPhotoAnnotations: $showPhotoAnnotations, pinSize: $pinSize)
+            LayersPopover(mapStyle: $mapStyle, cyclingProviderRaw: $cyclingProviderRaw, pinSize: $pinSize)
         }
+    }
+
+    private var photosButton: some View {
+        Button { showPhotoAnnotations.toggle() } label: {
+            Image(systemName: showPhotoAnnotations ? "photo.fill" : "photo")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(showPhotoAnnotations ? .blue : .primary)
+                .mapControlChrome()
+        }
+        .buttonStyle(.plain)
+        .help(showPhotoAnnotations ? "Hide photos on pins" : "Show photos on pins")
     }
 
     private var boundaryButton: some View {
@@ -1047,7 +1094,6 @@ enum MapStyle: String, CaseIterable, Identifiable {
 struct LayersPopover: View {
     @Binding var mapStyle: MapStyle
     @Binding var cyclingProviderRaw: String
-    @Binding var showPhotoAnnotations: Bool
     @Binding var pinSize: Double
 
     private var cyclingProvider: CyclingTileProvider? {
@@ -1079,18 +1125,6 @@ struct LayersPopover: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
-
-            HStack {
-                Label("Show Photos", systemImage: "photo.on.rectangle")
-                    .font(.subheadline)
-                Spacer()
-                Toggle("", isOn: $showPhotoAnnotations)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 8)
 
             HStack(spacing: 8) {
                 Label("Size", systemImage: "circle.dotted")

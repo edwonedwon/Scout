@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 import ScoutKit
 
 // MARK: - Photo loading
@@ -37,13 +38,73 @@ enum PhotoLoader {
 
     static func cached(_ url: URL) -> ScoutImageType? { cache.object(forKey: url as NSURL) }
 
+    /// Raw bytes for a photo URL — local files read directly, remote via `request(for:)`.
+    static func data(for url: URL) async -> Data? {
+        if url.isFileURL { return try? Data(contentsOf: url) }
+        guard let (data, resp) = try? await URLSession.shared.data(for: request(for: url)),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
+    }
+
     static func load(_ url: URL) async -> ScoutImageType? {
         if let c = cached(url) { return c }
-        guard let (data, resp) = try? await URLSession.shared.data(for: request(for: url)),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let img = ScoutImageType(data: data) else { return nil }
+        guard let data = await data(for: url), let img = ScoutImageType(data: data) else { return nil }
         cache.setObject(img, forKey: url as NSURL)
         return img
+    }
+}
+
+// MARK: - Offline pin photos
+
+/// Downloads a saved pin's photos to disk so they display offline and never refetch.
+/// Photos are resolved from the location's own image URLs, else its Google place ID,
+/// else a last-resort name+area search on Google. Filenames (not absolute paths) are
+/// stored on the pin and resolved against `directory` at load time so they survive
+/// container path changes.
+enum PinPhotoStore {
+    static let directory: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("ScoutPhotos", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    static func fileURL(_ filename: String) -> URL { directory.appendingPathComponent(filename) }
+
+    static func download(for location: ScoutLocation, placeId: String?, pinUUID: UUID, limit: Int = 5) async -> [String] {
+        let urls = await resolvePhotoURLs(for: location, placeId: placeId, limit: limit)
+        var filenames: [String] = []
+        for (i, url) in urls.enumerated() where !url.isFileURL {
+            guard let data = await PhotoLoader.data(for: url) else { continue }
+            let name = "\(pinUUID.uuidString)-\(i).img"
+            if (try? data.write(to: fileURL(name))) != nil { filenames.append(name) }
+        }
+        return filenames
+    }
+
+    private static func resolvePhotoURLs(for location: ScoutLocation, placeId: String?, limit: Int) async -> [URL] {
+        let stored = location.images.compactMap(\.url).filter { !$0.isFileURL }
+        if !stored.isEmpty { return Array(stored.prefix(limit)) }
+
+        if let placeId, let photos = try? await GooglePlacesService.shared.fetchPhotos(for: placeId) {
+            let urls = photos.compactMap(\.url)
+            if !urls.isEmpty { return Array(urls.prefix(limit)) }
+        }
+
+        // Last resort for old pins with no stored source: re-find on Google by name nearby.
+        let c = location.coordinate
+        let region = GooglePlacesService.MapRegion(centerLat: c.latitude, centerLng: c.longitude,
+                                                   latDelta: 0.05, lngDelta: 0.05)
+        if let results = try? await GooglePlacesService.shared.search(query: location.name, region: region),
+           let best = results.min(by: { distSq($0.coordinate, c) < distSq($1.coordinate, c) }) {
+            return Array(best.images.compactMap(\.url).prefix(limit))
+        }
+        return []
+    }
+
+    private static func distSq(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
+        let dLat = a.latitude - b.latitude, dLng = a.longitude - b.longitude
+        return dLat * dLat + dLng * dLng
     }
 }
 

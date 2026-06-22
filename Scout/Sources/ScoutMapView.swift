@@ -467,8 +467,10 @@ final class ScoutDotAnnotationView: MKAnnotationView {
     func setScale(_ scale: CGFloat) {
         let s = Self.baseSize * max(scale, 0.2)
         guard abs(bounds.width - s) > 0.5 else { return }
-        // Resize via bounds (not frame) so the view stays centered on its coordinate.
-        bounds = CGRect(x: 0, y: 0, width: s, height: s)
+        // Resize about the current center so the pin grows in place. Setting bounds alone
+        // keeps frame.origin fixed (the pin appears to drift until MapKit's next layout).
+        let c = CGPoint(x: frame.midX, y: frame.midY)
+        frame = CGRect(x: c.x - s / 2, y: c.y - s / 2, width: s, height: s)
         needsDisplay = true
     }
 
@@ -525,8 +527,10 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     func setScale(_ scale: CGFloat) {
         let s = Self.baseSize * max(scale, 0.2)
         guard abs(bounds.width - s) > 0.5 else { return }
-        // Resize via bounds (not frame) so the view stays centered on its coordinate.
-        bounds = CGRect(x: 0, y: 0, width: s, height: s)
+        // Resize about the current center so the photo grows in place. Setting bounds alone
+        // keeps frame.origin fixed (the pin appears to drift until MapKit's next layout).
+        let c = CGPoint(x: frame.midX, y: frame.midY)
+        frame = CGRect(x: c.x - s / 2, y: c.y - s / 2, width: s, height: s)
         imageView.frame = bounds
         // Scale chrome with the view so the border/corner don't dominate small pins.
         let ratio = s / Self.baseSize
@@ -800,12 +804,16 @@ struct ScoutMapView {
         }
 
         /// Diffs the on-map annotations of one kind (search results or saved project pins)
-        /// against the desired set and swaps them only when they differ. Keyed by id+tint
-        /// so a saved pin's recolor (e.g. moved to another list) also refreshes.
+        /// against the desired set and swaps them only when they differ. Keyed by
+        /// id + tint + first photo URL, so a recolor (moved to another list) or a photo
+        /// arriving later (offline backfill) refreshes the pin while stable pins are left alone.
         func syncAnnotations(_ map: MKMapView, desired: [(ScoutLocation, String?)], projectPins: Bool) {
+            func key(_ loc: ScoutLocation, _ tint: String?) -> String {
+                "\(loc.id)|\(tint ?? "")|\(loc.images.first?.url?.absoluteString ?? "")"
+            }
             let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { $0.isProjectPin == projectPins }
-            let currentKeys = Set(current.map { "\($0.location.id)|\($0.tintHex ?? "")" })
-            let newKeys = Set(desired.map { "\($0.0.id)|\($0.1 ?? "")" })
+            let currentKeys = Set(current.map { key($0.location, $0.tintHex) })
+            let newKeys = Set(desired.map { key($0.0, $0.1) })
             guard currentKeys != newKeys else { return }
             map.removeAnnotations(current)
             map.addAnnotations(desired.map { LocationAnnotation($0.0, isProjectPin: projectPins, tintHex: $0.1) })

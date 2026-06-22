@@ -72,6 +72,12 @@ final class PinnedLocationData {
     var sortOrder: Int = 0
     var imageURL: String? = nil
     var googlePlaceId: String? = nil
+    // Original source, captured so photos can always be (re)fetched and saved offline.
+    var sourceURLString: String? = nil
+    var googleMapsURLString: String? = nil
+    var imageSourceRaw: String? = nil
+    // Filenames (in PinPhotoStore.directory) of photos downloaded for offline display.
+    var photoFiles: [String] = []
     @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
 
     init(from location: ScoutLocation, sortOrder: Int = 0) {
@@ -84,6 +90,9 @@ final class PinnedLocationData {
         self.sortOrder = sortOrder
         self.imageURL = location.images.first?.url?.absoluteString
         self.googlePlaceId = location.googlePlaceId
+        self.sourceURLString = location.sourceURL?.absoluteString
+        self.googleMapsURLString = location.googleMapsURL?.absoluteString
+        self.imageSourceRaw = location.images.first?.source.rawValue
     }
 
     var coordinate: CLLocationCoordinate2D {
@@ -91,14 +100,25 @@ final class PinnedLocationData {
     }
 
     func asScoutLocation() -> ScoutLocation {
-        let images: [ScoutImage] = imageURL.flatMap { URL(string: $0) }.map {
-            [ScoutImage(url: $0, source: .googleMaps)]
-        } ?? []
+        let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .googleMaps
+        let images: [ScoutImage]
+        if !photoFiles.isEmpty {
+            // Offline: serve the downloaded files as file:// URLs through the usual loader.
+            images = photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source) }
+        } else if let imageURL, let url = URL(string: imageURL) {
+            images = [ScoutImage(url: url, source: source)]
+        } else {
+            images = []
+        }
         return ScoutLocation(
+            id: uuid,   // stable id so map selection/popover and annotation diffing work
             name: name,
             description: notes,
             coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+            sourceURL: sourceURLString.flatMap { URL(string: $0) },
             images: images,
+            googleMapsURL: googleMapsURLString.flatMap { URL(string: $0) },
+            googlePlaceId: googlePlaceId,
             status: LocationStatus(rawValue: statusRaw) ?? .scouted
         )
     }
