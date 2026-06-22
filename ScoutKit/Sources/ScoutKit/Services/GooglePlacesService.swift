@@ -86,14 +86,17 @@ public actor GooglePlacesService {
             return nil
         }
 
+        let placeId = place["id"] as? String
         let address = place["formattedAddress"] as? String ?? ""
         let mapsURI = (place["googleMapsUri"] as? String).flatMap(URL.init)
 
-        // Build photo URLs from photo references (up to 5)
+        // Build photo URLs WITHOUT the API key baked in — the key is added as a header
+        // at load time (same as the search request) to avoid key-config failures with
+        // bare URL+key query param loading.
         let photoRefs = place["photos"] as? [[String: Any]] ?? []
         let images: [ScoutImage] = photoRefs.prefix(5).compactMap { photo in
             guard let name = photo["name"] as? String else { return nil }
-            let urlStr = "https://places.googleapis.com/v1/\(name)/media?maxWidthPx=800&key=\(apiKey)"
+            let urlStr = "https://places.googleapis.com/v1/\(name)/media?maxWidthPx=800"
             return URL(string: urlStr).map { ScoutImage(url: $0, source: .googleMaps) }
         }
 
@@ -104,8 +107,26 @@ public actor GooglePlacesService {
             description: address,
             coordinate: .init(latitude: lat, longitude: lng),
             images: images,
-            googleMapsURL: mapsURI
+            googleMapsURL: mapsURI,
+            googlePlaceId: placeId
         )
+    }
+
+    /// Fetches the photo list for a known place ID (for pins that were saved without a photo URL).
+    public func fetchPhotos(for placeId: String) async throws -> [ScoutImage] {
+        guard let apiKey else { throw PlacesError.missingAPIKey }
+        let url = URL(string: "https://places.googleapis.com/v1/places/\(placeId)?fields=photos")!
+        var request = URLRequest(url: url)
+        request.setValue(apiKey, forHTTPHeaderField: "X-Goog-Api-Key")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let photoRefs = json["photos"] as? [[String: Any]] else { return [] }
+        return photoRefs.prefix(5).compactMap { photo in
+            guard let name = photo["name"] as? String else { return nil }
+            let urlStr = "https://places.googleapis.com/v1/\(name)/media?maxWidthPx=800"
+            return URL(string: urlStr).map { ScoutImage(url: $0, source: .googleMaps) }
+        }
     }
 
     public enum PlacesError: LocalizedError {

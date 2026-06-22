@@ -467,20 +467,8 @@ private struct ListCard: View {
                     .foregroundStyle(.tertiary)
                     .frame(width: 16)
 
-                if showPinPhotos, let urlStr = pin.imageURL, let url = URL(string: urlStr) {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let img):
-                            img.resizable().scaledToFill()
-                                .frame(width: 44, height: 44)
-                                .clipped()
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        default:
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color.secondary.opacity(0.15))
-                                .frame(width: 44, height: 44)
-                        }
-                    }
+                if showPinPhotos {
+                    PinThumbnailView(pin: pin)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -495,7 +483,7 @@ private struct ListCard: View {
                 Spacer()
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, showPinPhotos && pin.imageURL != nil ? 6 : 4)
+            .padding(.vertical, showPinPhotos ? 6 : 4)
             .contentShape(Rectangle())
             .onTapGesture { onPanToPin?(pin.coordinate) }
             .onDrag {
@@ -680,6 +668,53 @@ private struct NameEntrySheet: View {
         }
         .padding(24)
         .frame(width: 280)
+    }
+}
+
+// MARK: - Pin thumbnail
+
+/// Shows a 44×44 thumbnail for a pinned location.
+/// If the pin has a googlePlaceId but no stored photo URL, fetches photos on first appear
+/// and persists the URL so subsequent loads are instant.
+private struct PinThumbnailView: View {
+    let pin: PinnedLocationData
+    @Environment(\.modelContext) private var modelContext
+    @State private var fetchTask: Task<Void, Never>? = nil
+    @State private var resolvedURL: URL? = nil
+
+    var body: some View {
+        GooglePhotoImage(url: resolvedURL) {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.15))
+                // Only animate if we're actively fetching; otherwise just a gray box.
+                .overlay(ProgressView().controlSize(.mini).opacity(fetchTask != nil ? 0.7 : 0))
+        }
+        .scaledToFill()
+        .frame(width: 44, height: 44)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .onAppear { resolveURL() }
+        .onDisappear { fetchTask?.cancel() }
+        .onChange(of: pin.imageURL) { _, _ in resolveURL() }
+    }
+
+    private func resolveURL() {
+        if let str = pin.imageURL, let url = URL(string: str) {
+            resolvedURL = url
+            return
+        }
+        guard let placeId = pin.googlePlaceId else { return }
+        fetchTask?.cancel()
+        fetchTask = Task { await fetchAndStore(placeId: placeId) }
+    }
+
+    @MainActor
+    private func fetchAndStore(placeId: String) async {
+        guard let photos = try? await GooglePlacesService.shared.fetchPhotos(for: placeId),
+              let first = photos.first, let url = first.url else { return }
+        pin.imageURL = url.absoluteString
+        try? modelContext.save()
+        resolvedURL = url
     }
 }
 

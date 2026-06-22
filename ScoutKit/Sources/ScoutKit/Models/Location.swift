@@ -10,6 +10,7 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
     public var sourceURL: URL?
     public var images: [ScoutImage]
     public var googleMapsURL: URL?
+    public var googlePlaceId: String?
     public var notes: String
     public var status: LocationStatus
     public var createdAt: Date
@@ -23,6 +24,7 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         sourceURL: URL? = nil,
         images: [ScoutImage] = [],
         googleMapsURL: URL? = nil,
+        googlePlaceId: String? = nil,
         notes: String = "",
         status: LocationStatus = .scouted,
         createdAt: Date = Date()
@@ -35,6 +37,7 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         self.sourceURL = sourceURL
         self.images = images
         self.googleMapsURL = googleMapsURL
+        self.googlePlaceId = googlePlaceId
         self.notes = notes
         self.status = status
         self.createdAt = createdAt

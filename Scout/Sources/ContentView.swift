@@ -893,18 +893,11 @@ struct LocationRow: View {
                     HStack(spacing: 4) {
                         ForEach(location.images) { image in
                             if let url = image.url {
-                                AsyncImage(url: url) { phase in
-                                    switch phase {
-                                    case .success(let img):
-                                        img.resizable()
-                                            .scaledToFill()
-                                    case .failure:
-                                        Color.secondary.opacity(0.2)
-                                    default:
-                                        Color.secondary.opacity(0.1)
-                                            .overlay(ProgressView().controlSize(.mini))
-                                    }
+                                GooglePhotoImage(url: url) {
+                                    Color.secondary.opacity(0.1)
+                                        .overlay(ProgressView().controlSize(.mini))
                                 }
+                                .scaledToFill()
                                 .frame(width: 100, height: 70)
                                 .clipped()
                                 .clipShape(RoundedRectangle(cornerRadius: 6))

@@ -15,12 +15,11 @@ struct LocationCalloutView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 3) {
                         ForEach(Array(images.enumerated()), id: \.offset) { idx, img in
-                            AsyncImage(url: img.url) { image in
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            } placeholder: {
+                            GooglePhotoImage(url: img.url) {
                                 Rectangle().fill(.quaternary)
                                     .overlay(ProgressView().controlSize(.small))
                             }
+                            .aspectRatio(contentMode: .fill)
                             .frame(width: 160, height: 120)
                             .clipped()
                             .contentShape(Rectangle())

@@ -1,6 +1,94 @@
 import SwiftUI
 import ScoutKit
 
+// MARK: - Google photo image loader
+
+/// Loads a photo from a Google Places photo URL using X-Goog-Api-Key header auth.
+/// Google's photo media endpoint is unreliable when the API key is baked into the URL
+/// query param — header auth (same as the search request) is required.
+/// Falls back to plain URL loading for non-Google URLs.
+private let _googlePhotoCache: NSCache<NSURL, _NativeImage> = {
+    let c = NSCache<NSURL, _NativeImage>()
+    c.countLimit = 200
+    return c
+}()
+
+struct GooglePhotoImage<Placeholder: View>: View {
+    let url: URL?
+    let placeholder: () -> Placeholder
+
+    @State private var image: _NativeImage? = nil
+    @State private var loadTask: Task<Void, Never>? = nil
+
+    init(url: URL?, @ViewBuilder placeholder: @escaping () -> Placeholder) {
+        self.url = url
+        self.placeholder = placeholder
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                #if os(macOS)
+                Image(nsImage: image).resizable()
+                #else
+                Image(uiImage: image).resizable()
+                #endif
+            } else {
+                placeholder()
+            }
+        }
+        .onAppear { load() }
+        .onDisappear { loadTask?.cancel() }
+        .onChange(of: url?.absoluteString ?? "") { _, _ in load() }
+    }
+
+    private func load() {
+        loadTask?.cancel()
+        image = nil
+        guard let url else { return }
+        if let cached = _googlePhotoCache.object(forKey: url as NSURL) {
+            image = cached
+            return
+        }
+        loadTask = Task {
+            // For Google Places URLs: strip any ?key= param baked into old stored URLs
+            // and add the key as a header instead (same auth method the search uses).
+            // Sending both causes 400 errors on some API key configurations.
+            let loadURL: URL
+            if url.host?.contains("places.googleapis.com") == true,
+               var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                comps.queryItems = comps.queryItems?.filter { $0.name != "key" }
+                loadURL = comps.url ?? url
+            } else {
+                loadURL = url
+            }
+            var request = URLRequest(url: loadURL)
+            if loadURL.host?.contains("places.googleapis.com") == true,
+               let key = KeychainService.load(forKey: KeychainService.googleMapsAPIKey) {
+                request.setValue(key, forHTTPHeaderField: "X-Goog-Api-Key")
+            }
+            guard !Task.isCancelled,
+                  let (data, _) = try? await URLSession.shared.data(for: request),
+                  !Task.isCancelled else { return }
+            #if os(macOS)
+            guard let img = NSImage(data: data) else { return }
+            #else
+            guard let img = UIImage(data: data) else { return }
+            #endif
+            _googlePhotoCache.setObject(img, forKey: url as NSURL)
+            await MainActor.run { image = img }
+        }
+    }
+}
+
+#if os(macOS)
+private typealias _NativeImage = NSImage
+#else
+private typealias _NativeImage = UIImage
+#endif
+
+// MARK: -
+
 struct PhotoViewerOverlay: View {
     @ObservedObject private var viewer = PhotoViewerState.shared
     @FocusState private var focused: Bool
@@ -43,21 +131,10 @@ struct PhotoViewerOverlay: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 0) {
                             ForEach(Array(viewer.images.enumerated()), id: \.offset) { idx, img in
-                                AsyncImage(url: img.url) { phase in
-                                    switch phase {
-                                    case .success(let image):
-                                        image
-                                            .resizable()
-                                            .aspectRatio(contentMode: .fit)
-                                    case .failure:
-                                        Image(systemName: "photo")
-                                            .font(.system(size: 48))
-                                            .foregroundStyle(.white.opacity(0.3))
-                                    default:
-                                        ProgressView()
-                                            .tint(.white)
-                                    }
+                                GooglePhotoImage(url: img.url) {
+                                    ProgressView().tint(.white)
                                 }
+                                .aspectRatio(contentMode: .fit)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .containerRelativeFrame(.horizontal)
                                 .id(idx)

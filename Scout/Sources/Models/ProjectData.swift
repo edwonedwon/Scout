@@ -71,6 +71,7 @@ final class PinnedLocationData {
     var uuid: UUID = UUID()
     var sortOrder: Int = 0
     var imageURL: String? = nil
+    var googlePlaceId: String? = nil
     @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
 
     init(from location: ScoutLocation, sortOrder: Int = 0) {
@@ -82,6 +83,7 @@ final class PinnedLocationData {
         self.createdAt = Date()
         self.sortOrder = sortOrder
         self.imageURL = location.images.first?.url?.absoluteString
+        self.googlePlaceId = location.googlePlaceId
     }
 
     var coordinate: CLLocationCoordinate2D {

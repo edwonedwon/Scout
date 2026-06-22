@@ -91,26 +91,13 @@ private struct MasonryCell: View {
     @State private var isHovered = false
 
     var body: some View {
-        AsyncImage(url: item.image.url) { phase in
-            switch phase {
-            case .success(let img):
-                img
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: width)
-            case .failure:
-                Color.gray.opacity(0.2)
-                    .frame(width: width, height: width * 0.65)
-                    .overlay(
-                        Image(systemName: "photo")
-                            .foregroundStyle(.white.opacity(0.3))
-                    )
-            default:
-                Color.gray.opacity(0.12)
-                    .frame(width: width, height: width * 0.65)
-                    .overlay(ProgressView().tint(.white).controlSize(.small))
-            }
+        GooglePhotoImage(url: item.image.url) {
+            Color.gray.opacity(0.12)
+                .frame(width: width, height: width * 0.65)
+                .overlay(ProgressView().tint(.white).controlSize(.small))
         }
+        .aspectRatio(contentMode: .fit)
+        .frame(width: width)
         .overlay(alignment: .bottomLeading) {
             if isHovered {
                 LinearGradient(

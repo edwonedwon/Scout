@@ -388,16 +388,9 @@ final class ZoomableMapView: MKMapView {
 
     deinit { if let link = cvLink { CVDisplayLinkStop(link) } }
 
-    // MARK: - Dock magnification
-
-    /// Only active in photo mode — set by updateMap when showPhotoAnnotations changes.
-    var photoMagnificationEnabled = false
-    /// The currently-selected annotation view; pinned at maxScale while popover is open.
-    weak var selectedAnnotationView: ScoutPhotoAnnotationView?
+    // MARK: - Dot hover
 
     private var magTrackingArea: NSTrackingArea?
-    private let magMaxScale: CGFloat = 4.5
-    private let magInfluenceRadius: CGFloat = 180
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -412,17 +405,12 @@ final class ZoomableMapView: MKMapView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         guard !isDrawingMode else { return }
-        let pt = convert(event.locationInWindow, from: nil)
-        if photoMagnificationEnabled {
-            applyDockMagnification(at: pt)
-        } else {
-            applyDotHover(at: pt)
-        }
+        applyDotHover(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        if photoMagnificationEnabled { resetMagnification() } else { clearDotHover() }
+        clearDotHover()
     }
 
     private var hoveredDotView: ScoutDotAnnotationView?
@@ -451,45 +439,6 @@ final class ZoomableMapView: MKMapView {
         hoveredDotView = nil
     }
 
-    private func applyDockMagnification(at point: CGPoint) {
-        let sigma = magInfluenceRadius / 2.8
-        let visible = annotations(in: visibleMapRect)
-        for ann in visible.prefix(300) {
-            guard let mkAnn = ann as? (any MKAnnotation),
-                  let av = view(for: mkAnn) as? ScoutPhotoAnnotationView else { continue }
-            // Keep the selected (open-popover) view pinned at max scale
-            if av === selectedAnnotationView {
-                applyScale(magMaxScale, to: av)
-                continue
-            }
-            let avCenter = CGPoint(x: av.frame.midX, y: av.frame.midY)
-            let center = convert(avCenter, from: av.superview)
-            let dist = hypot(center.x - point.x, center.y - point.y)
-            let scale: CGFloat = dist < magInfluenceRadius
-                ? 1 + (magMaxScale - 1) * exp(-(dist * dist) / (2 * sigma * sigma))
-                : 1
-            applyScale(scale, to: av)
-        }
-    }
-
-    func resetMagnification(except pinned: ScoutPhotoAnnotationView? = nil) {
-        for ann in annotations {
-            guard let mkAnn = ann as? (any MKAnnotation),
-                  let av = view(for: mkAnn) as? ScoutPhotoAnnotationView,
-                  av !== pinned else { continue }
-            applyScale(1, to: av)
-        }
-    }
-
-    private func applyScale(_ scale: CGFloat, to view: NSView) {
-        view.wantsLayer = true
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.08)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
-        view.layer?.setAffineTransform(CGAffineTransform(scaleX: scale, y: scale))
-        view.layer?.zPosition = scale > 1 ? (scale - 1) * 300 : 0
-        CATransaction.commit()
-    }
 }
 
 // MARK: - Dot annotation view
@@ -524,8 +473,10 @@ final class ScoutDotAnnotationView: MKAnnotationView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let inset: CGFloat = isHovered ? 0.5 : 1.5
-        let ringWidth: CGFloat = isHovered ? 3.5 : 2.5
+        // Scale ring geometry with the view so proportions hold at any pin size.
+        let ratio = max(bounds.width / Self.baseSize, 0.01)
+        let inset: CGFloat = (isHovered ? 0.5 : 1.5) * ratio
+        let ringWidth: CGFloat = (isHovered ? 3.5 : 2.5) * ratio
         let oval = NSBezierPath(ovalIn: bounds.insetBy(dx: inset, dy: inset))
         NSColor.white.withAlphaComponent(isHovered ? 1.0 : 0.9).setStroke()
         oval.lineWidth = ringWidth
@@ -533,6 +484,20 @@ final class ScoutDotAnnotationView: MKAnnotationView {
         dotColor.setFill()
         oval.fill()
     }
+}
+
+// MARK: - Google photo loading (header auth)
+
+/// Builds a URLRequest for a Google Places photo URL, adding the X-Goog-Api-Key header.
+/// Google's photo media endpoint is more reliable with header auth than with the key baked
+/// into the URL query param (some key configurations reject bare URL+key requests).
+func makeGooglePhotoRequest(for url: URL) -> URLRequest {
+    var request = URLRequest(url: url)
+    if url.host?.contains("places.googleapis.com") == true,
+       let key = KeychainService.load(forKey: KeychainService.googleMapsAPIKey) {
+        request.setValue(key, forHTTPHeaderField: "X-Goog-Api-Key")
+    }
+    return request
 }
 
 // MARK: - Photo annotation view
@@ -578,6 +543,12 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         // Resize via bounds (not frame) so the view stays centered on its coordinate.
         bounds = CGRect(x: 0, y: 0, width: s, height: s)
         imageView.frame = bounds
+        // Scale chrome with the view so the border/corner don't dominate small pins.
+        let ratio = s / Self.baseSize
+        layer?.cornerRadius = 8 * ratio
+        layer?.borderWidth = 2.5 * ratio
+        layer?.shadowRadius = 4 * ratio
+        imageView.layer?.cornerRadius = 6 * ratio
     }
 
     override func prepareForReuse() {
@@ -596,7 +567,7 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
             return
         }
         loadTask = Task {
-            guard let (data, _) = try? await URLSession.shared.data(from: url),
+            guard let (data, _) = try? await URLSession.shared.data(for: makeGooglePhotoRequest(for: url)),
                   let img = NSImage(data: data),
                   !Task.isCancelled else { return }
             Self.imageCache.setObject(img, forKey: nsURL)
@@ -764,7 +735,6 @@ struct ScoutMapView {
             zoomable.scrollZoomEnabled = scrollToZoom
             zoomable.isDrawingMode = isDrawingMode
             zoomable.onPolygonComplete = onPolygonComplete
-            zoomable.photoMagnificationEnabled = showPhotoAnnotations
             zoomable.onBuildAnnotationMenu = { [weak coordinator = context.coordinator] location in
                 coordinator?.buildAnnotationMenu(for: location)
             }
@@ -776,15 +746,30 @@ struct ScoutMapView {
         if map.mapType != mapType {
             map.mapType = mapType
         }
-        // When annotation style or pin size changes, remove and re-add to force viewFor: to re-run
         let coord = context.coordinator
-        if coord.lastPhotoAnnotationsMode != showPhotoAnnotations || abs(coord.lastPinScale - pinScale) > 0.001 {
+        // Photo mode changes the view *class*, so force viewFor: to re-run by recycling.
+        if coord.lastPhotoAnnotationsMode != showPhotoAnnotations {
             coord.lastPhotoAnnotationsMode = showPhotoAnnotations
-            coord.lastPinScale = pinScale
             let toRecycle = map.annotations.filter { !($0 is MKUserLocation) && !($0 is BoundaryLabelAnnotation) }
             map.removeAnnotations(toRecycle)
             map.addAnnotations(toRecycle)
+        } else if abs(coord.lastPinScale - pinScale) > 0.001 {
+            // Pin size only changes geometry, not the view class — resize in place.
+            // This avoids the flicker (and photo reload) of removing/re-adding pins
+            // on every slider tick. Off-screen pins are recreated at the right size
+            // by viewFor: (which reads parent.pinScale) when they scroll into view.
+            #if os(macOS)
+            let scale = CGFloat(pinScale)
+            for ann in map.annotations where ann is LocationAnnotation {
+                switch map.view(for: ann) {
+                case let dot as ScoutDotAnnotationView:   dot.setScale(scale)
+                case let photo as ScoutPhotoAnnotationView: photo.setScale(scale)
+                default: break
+                }
+            }
+            #endif
         }
+        coord.lastPinScale = pinScale
         context.coordinator.syncAnnotations(map, locations: locations)
         context.coordinator.syncProjectPins(map, pins: projectPins)
         context.coordinator.syncSelection(map, selection: selection)
@@ -936,23 +921,6 @@ struct ScoutMapView {
             guard let ann = view.annotation as? LocationAnnotation else { return }
             parent.selection = ann.location
             #if os(macOS)
-            if let zoomable = mapView as? ZoomableMapView,
-               let photoView = view as? ScoutPhotoAnnotationView {
-                zoomable.selectedAnnotationView = photoView
-                DispatchQueue.main.async {
-                    zoomable.selectedAnnotationView = photoView
-                    zoomable.resetMagnification(except: photoView)
-                }
-            }
-            if view is ScoutDotAnnotationView {
-                view.wantsLayer = true
-                CATransaction.begin()
-                CATransaction.setAnimationDuration(0.15)
-                CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
-                view.layer?.setAffineTransform(CGAffineTransform(scaleX: 2.0, y: 2.0))
-                view.layer?.zPosition = 100
-                CATransaction.commit()
-            }
             showPopover(for: ann.location, from: view, in: mapView)
             #endif
         }
@@ -962,18 +930,6 @@ struct ScoutMapView {
             #if os(macOS)
             activePopover?.close()
             activePopover = nil
-            if let zoomable = mapView as? ZoomableMapView {
-                zoomable.selectedAnnotationView = nil
-                zoomable.resetMagnification()
-            }
-            if view is ScoutDotAnnotationView {
-                CATransaction.begin()
-                CATransaction.setAnimationDuration(0.12)
-                CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeIn))
-                view.layer?.setAffineTransform(.identity)
-                view.layer?.zPosition = 0
-                CATransaction.commit()
-            }
             #endif
         }
 
@@ -995,13 +951,12 @@ struct ScoutMapView {
             pop.contentSize = vc.view.frame.size
             pop.behavior = .transient
 
-            // Annotation views live inside MKMapView's internal container which has its own
-            // coordinate transform. Convert the dot/photo center into the map view's own
-            // coordinate space so NSPopover can resolve the screen position reliably.
-            let avCenter = CGPoint(x: annotationView.bounds.midX, y: annotationView.bounds.midY)
-            let centerInMap = mapView.convert(avCenter, from: annotationView)
-            let anchorRect = NSRect(x: centerInMap.x - 1, y: centerInMap.y - 1, width: 2, height: 2)
-            pop.show(relativeTo: anchorRect, of: mapView, preferredEdge: .minY)
+            // Anchor directly to the annotation view rather than converting its center
+            // into MKMapView's coordinate space. Annotation views live inside MKMapView's
+            // internal container, whose transform NSView.convert(_:from:) doesn't fully
+            // account for — converting left the popover floating well above the pin.
+            // Showing relative to the view itself lets AppKit resolve the true screen rect.
+            pop.show(relativeTo: annotationView.bounds, of: annotationView, preferredEdge: .maxY)
             activePopover = pop
         }
 
