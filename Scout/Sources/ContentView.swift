@@ -53,10 +53,12 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \LocationListData.createdAt) private var allLists: [LocationListData]
     // General pins not attached to any list — always shown on the map.
-    @Query(filter: #Predicate<PinnedLocationData> { $0.list == nil }, sort: \PinnedLocationData.createdAt)
+    // Pins not attached to any list or project — always shown on the map.
+    @Query(filter: #Predicate<PinnedLocationData> { $0.list == nil && $0.owningProject == nil }, sort: \PinnedLocationData.createdAt)
     private var unfiledPins: [PinnedLocationData]
     // All pins, for the one-time offline-photo backfill.
     @Query private var allPins: [PinnedLocationData]
+    @Query private var allProjects: [ProjectData]
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -109,6 +111,30 @@ struct ContentView: View {
         }
         .animation(.spring(duration: 0.3), value: showProjectsPanel)
         .animation(.spring(duration: 0.3), value: showRightPanel)
+        .onDrop(of: [.fileURL, .image, .item], isTargeted: nil) { providers in
+            NSLog("🟡 DROP fired. providers=\(providers.count)")
+            for p in providers {
+                NSLog("🟡   provider types: \(p.registeredTypeIdentifiers)")
+            }
+            Task { @MainActor in
+                let urls = await loadImageURLs(from: providers)
+                NSLog("🟡 loadImageURLs returned \(urls.count) urls: \(urls.map(\.lastPathComponent))")
+                guard !urls.isEmpty else { return }
+                let project = allProjects.first ?? {
+                    let p = ProjectData(name: "My Photos")
+                    modelContext.insert(p)
+                    return p
+                }()
+                let results = await PhotoImportService.importPhotos(from: urls, into: nil)
+                NSLog("🟡 imported \(results.count) photos into project \(project.name)")
+                for result in results {
+                    modelContext.insert(result.pin)
+                    result.pin.owningProject = project
+                }
+                try? modelContext.save()
+            }
+            return true
+        }
         .ignoresSafeArea()
         .background {
             // App-wide Escape handler (hidden). Carousel → grid → map → grid…
@@ -144,12 +170,22 @@ struct ContentView: View {
         }
     }
 
-    /// Escape cycles through the view contexts:
-    /// carousel → photo grid, photo grid → map, map → photo grid.
+    /// Escape:
+    /// - carousel opened from map popover → close carousel, stay on map, reopen popover
+    /// - carousel opened from photo grid → close carousel, go back to photo grid
+    /// - on map → go to photo grid
+    /// - on photo grid → go to map
     private func handleEscape() {
         if photoViewer.isVisible {
+            let fromMap = photoViewer.openedFromMap
+            photoViewer.openedFromMap = false
             photoViewer.dismiss()
-            withAnimation(.spring(duration: 0.3)) { viewMode = .photos }
+            if fromMap {
+                // Return to map — stay in .map mode and reopen the pin popover
+                DispatchQueue.main.async { mapController.forceReopenPopover() }
+            } else {
+                withAnimation(.spring(duration: 0.3)) { viewMode = .photos }
+            }
             return
         }
         withAnimation(.spring(duration: 0.3)) {
@@ -378,10 +414,15 @@ struct ContentView: View {
     private var projectPins: [(ScoutLocation, String)] {
         let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
         var result = active.flatMap { list in
-            list.pins.map { ($0.asScoutLocation(), list.colorHex) }
+            // GPS-less imported photos don't appear on the map (no coordinate).
+            list.pins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), list.colorHex) }
+        }
+        // Project-level imported photos (not inside any list).
+        for project in allProjects {
+            result += project.importedPhotos.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
         }
         // General (unfiled) pins are always visible, with a default color.
-        result += unfiledPins.map { ($0.asScoutLocation(), Self.generalPinColor) }
+        result += unfiledPins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
         return result
     }
 
@@ -653,6 +694,7 @@ struct ContentView: View {
                         Capsule().fill(.white.opacity(viewMode == mode ? 0.18 : 0))
                     )
                     .animation(.spring(duration: 0.25), value: viewMode)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }

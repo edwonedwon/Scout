@@ -11,6 +11,9 @@ final class ProjectData {
     var notes: String
     var createdAt: Date
     @Relationship(deleteRule: .cascade) var lists: [LocationListData] = []
+    /// Photos imported directly into this project (not inside any list).
+    @Relationship(deleteRule: .cascade, inverse: \PinnedLocationData.owningProject)
+    var importedPhotos: [PinnedLocationData] = []
 
     init(name: String, notes: String = "") {
         self.name = name
@@ -78,7 +81,15 @@ final class PinnedLocationData {
     var imageSourceRaw: String? = nil
     // Filenames (in PinPhotoStore.directory) of photos downloaded for offline display.
     var photoFiles: [String] = []
+    // Whether this pin has a real GPS coordinate. False for photos imported without EXIF GPS.
+    // GPS-less pins appear in the list sidebar but not on the map.
+    var hasGPS: Bool = true
+    // Capture time from EXIF — reserved for a future Google Timeline sync feature that
+    // will derive coordinates for GPS-less imported photos from Timeline movement data.
+    var dateTaken: Date? = nil
     @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
+    /// Set when this pin was imported directly into a project (not inside a list).
+    var owningProject: ProjectData? = nil
 
     init(from location: ScoutLocation, sortOrder: Int = 0) {
         self.name = location.name

@@ -3,6 +3,58 @@ import SwiftData
 import ScoutKit
 import CoreLocation
 import UniformTypeIdentifiers
+
+// MARK: - Finder drag helpers
+
+let imageExtensions: Set<String> = ["jpg","jpeg","png","heic","heif","tiff","tif","webp","gif","bmp","raw","arw","cr2","nef","dng"]
+
+/// Extracts file URLs from NSItemProvider items produced by Finder drags.
+/// Uses NSURL (not loadItem) because that's what Finder actually vends.
+/// Returns only image files by extension.
+func loadImageURLs(from providers: [NSItemProvider]) async -> [URL] {
+    await withTaskGroup(of: URL?.self) { group in
+        for provider in providers {
+            group.addTask {
+                // Try NSURL first — this is what Finder drag-and-drop provides.
+                if provider.canLoadObject(ofClass: NSURL.self) {
+                    return await withCheckedContinuation { cont in
+                        _ = provider.loadObject(ofClass: NSURL.self) { reading, _ in
+                            if let url = reading as? URL,
+                               imageExtensions.contains(url.pathExtension.lowercased()) {
+                                cont.resume(returning: url)
+                            } else {
+                                cont.resume(returning: nil)
+                            }
+                        }
+                    }
+                }
+                // Fallback: raw loadItem for public.file-url
+                if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                    return await withCheckedContinuation { cont in
+                        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                            let url: URL?
+                            if let data = item as? Data {
+                                url = URL(dataRepresentation: data, relativeTo: nil)
+                            } else {
+                                url = item as? URL
+                            }
+                            if let url, imageExtensions.contains(url.pathExtension.lowercased()) {
+                                cont.resume(returning: url)
+                            } else {
+                                cont.resume(returning: nil)
+                            }
+                        }
+                    }
+                }
+                return nil
+            }
+        }
+        var urls: [URL] = []
+        for await url in group { if let url { urls.append(url) } }
+        return urls
+    }
+}
+
 // MARK: - Shared drag state for moving/reordering saved pins
 //
 // Rather than serialize a pin identity through the pasteboard (which proved
@@ -91,6 +143,8 @@ struct ProjectsPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             projectHeader(project)
 
+            ImportedPhotosList(project: project, showPhoto: showPinPhotos, onSelectPin: onSelectPin ?? { _ in })
+
             let topLevel = ordered(project.lists.filter { $0.parentList == nil })
             ForEach(topLevel) { list in
                 ListCard(list: list, activeListIDs: $activeListIDs, modelContext: modelContext,
@@ -108,38 +162,50 @@ struct ProjectsPanel: View {
                     return true
                 }
 
-            Button {
-                newListName = ""
-                addingListTo = project
-            } label: {
-                Label("Add List", systemImage: "plus")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
+            HStack(spacing: 12) {
+                Button {
+                    newListName = ""
+                    addingListTo = project
+                } label: {
+                    Label("Add List", systemImage: "plus")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    addDummyPhoto(to: project)
+                } label: {
+                    Label("Import Photo", systemImage: "photo.badge.plus")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func addDummyPhoto(to project: ProjectData) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.image]
+        guard panel.runModal() == .OK else { return }
+        let urls = panel.urls
+        Task { @MainActor in
+            let results = await PhotoImportService.importPhotos(from: urls, into: nil)
+            for result in results {
+                modelContext.insert(result.pin)
+                project.importedPhotos.append(result.pin)
+            }
+            try? modelContext.save()
         }
     }
 
     private func projectHeader(_ project: ProjectData) -> some View {
-        HStack {
-            Text(project.name)
-                .font(.subheadline.weight(.semibold))
-            Spacer()
-            Button {
-                for l in project.lists where activeListIDs.contains(l.persistentModelID) {
-                    activeListIDs.remove(l.persistentModelID)
-                }
-                modelContext.delete(project)
-            } label: {
-                Image(systemName: "trash")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
+        ProjectHeader(project: project, activeListIDs: $activeListIDs, modelContext: modelContext)
     }
 
     private var panelHeader: some View {
@@ -171,6 +237,87 @@ struct ProjectsPanel: View {
     }
 }
 
+// MARK: - Project header (own view for @State drop-highlight)
+
+private struct ProjectHeader: View {
+    let project: ProjectData
+    @Binding var activeListIDs: Set<PersistentIdentifier>
+    let modelContext: ModelContext
+
+    @State private var isImageDropTarget = false
+    @State private var importStatusMessage: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(project.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(isImageDropTarget ? .blue : .primary)
+                Spacer()
+                if let msg = importStatusMessage {
+                    Text(msg)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                }
+                Button {
+                    for l in project.lists where activeListIDs.contains(l.persistentModelID) {
+                        activeListIDs.remove(l.persistentModelID)
+                    }
+                    modelContext.delete(project)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.vertical, 2)
+            .padding(.horizontal, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isImageDropTarget ? Color.blue.opacity(0.08) : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(isImageDropTarget ? Color.blue.opacity(0.4) : Color.clear, lineWidth: 1.5)
+                    )
+            )
+            .animation(.easeInOut(duration: 0.12), value: isImageDropTarget)
+        }
+        .onDrop(of: [.fileURL, .image], isTargeted: $isImageDropTarget) { providers in
+            Task {
+                let urls = await loadImageURLs(from: providers)
+                guard !urls.isEmpty else { return }
+                let fmt = DateFormatter()
+                fmt.dateStyle = .medium
+                let listName = "Imported \(fmt.string(from: Date()))"
+                let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
+                let newList = LocationListData(name: listName, colorHex: colorHex)
+                newList.sortOrder = project.lists.filter { $0.parentList == nil }.count
+                modelContext.insert(newList)
+                newList.project = project
+                let results = await PhotoImportService.importPhotos(from: urls, into: newList)
+                var withGPS = 0, withoutGPS = 0
+                for r in results {
+                    modelContext.insert(r.pin)
+                    r.pin.list = newList
+                    if r.hadGPS { withGPS += 1 } else { withoutGPS += 1 }
+                }
+                if results.isEmpty { return }
+                var parts: [String] = []
+                if withGPS > 0 { parts.append("\(withGPS) on map") }
+                if withoutGPS > 0 { parts.append("\(withoutGPS) no GPS") }
+                withAnimation { importStatusMessage = parts.joined(separator: ", ") }
+                try? modelContext.save()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    withAnimation { importStatusMessage = nil }
+                }
+            }
+            return true
+        }
+    }
+}
+
 // MARK: - List card
 
 private struct ListCard: View {
@@ -184,16 +331,19 @@ private struct ListCard: View {
 
     @State private var isTargeted = false         // ScoutLocation drop highlight
     @State private var isPinDropTarget = false    // PinnedPin / nest drop highlight
+    @State private var isPhotoDropTarget = false  // Finder photo drag highlight
     @State private var isReorderTarget = false    // list-reorder gap highlight
     @State private var insertBeforeID: PersistentIdentifier? = nil
     @State private var isExpanded = true
     @State private var isEditingName = false
     @State private var editingName = ""
     @FocusState private var nameFocused: Bool
+    @State private var showImportPicker = false
+    @State private var importStatusMessage: String? = nil
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
     private var listColor: Color { Color(hexString: list.colorHex) }
-    private var isHighlighted: Bool { isTargeted || isPinDropTarget }
+    private var isHighlighted: Bool { isTargeted || isPinDropTarget || isPhotoDropTarget }
 
     private var sortedChildren: [LocationListData] { ordered(list.childLists) }
 
@@ -201,8 +351,39 @@ private struct ListCard: View {
         VStack(alignment: .leading, spacing: 6) {
             reorderZone   // drop a list here to place it before this one
             card
+            if let msg = importStatusMessage {
+                Text(msg)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+            }
             if isExpanded, !sortedChildren.isEmpty {
                 childListsView
+            }
+        }
+        .fileImporter(
+            isPresented: $showImportPicker,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: true
+        ) { result in
+            guard case .success(let urls) = result else { return }
+            Task {
+                let results = await PhotoImportService.importPhotos(from: urls, into: list)
+                var withGPS = 0, withoutGPS = 0
+                for r in results {
+                    modelContext.insert(r.pin)
+                    r.pin.list = list
+                    if r.hadGPS { withGPS += 1 } else { withoutGPS += 1 }
+                }
+                if results.isEmpty { return }
+                var parts: [String] = []
+                if withGPS > 0 { parts.append("\(withGPS) placed on map") }
+                if withoutGPS > 0 { parts.append("\(withoutGPS) without GPS (hidden from map)") }
+                importStatusMessage = parts.joined(separator: ", ")
+                try? modelContext.save()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    importStatusMessage = nil
+                }
             }
         }
     }
@@ -263,18 +444,44 @@ private struct ListCard: View {
         )
         .shadow(color: .black.opacity(isHighlighted ? 0.12 : 0.04), radius: isHighlighted ? 6 : 2, y: 1)
         .animation(.easeInOut(duration: 0.15), value: isHighlighted)
-        // Drop from search results
+        // Finder photo drop — must come BEFORE dropDestination so macOS doesn't
+        // let the ScoutLocation handler shadow it for non-matching content types.
+        .onDrop(of: [.fileURL, .image], isTargeted: $isPhotoDropTarget) { providers in
+            Task {
+                let urls = await loadImageURLs(from: providers)
+                guard !urls.isEmpty else { return }
+                let results = await PhotoImportService.importPhotos(from: urls, into: list)
+                var withGPS = 0, withoutGPS = 0
+                for r in results {
+                    modelContext.insert(r.pin)
+                    r.pin.list = list
+                    if r.hadGPS { withGPS += 1 } else { withoutGPS += 1 }
+                }
+                if results.isEmpty { return }
+                var parts: [String] = []
+                if withGPS > 0 { parts.append("\(withGPS) placed on map") }
+                if withoutGPS > 0 { parts.append("\(withoutGPS) without GPS") }
+                importStatusMessage = parts.joined(separator: ", ")
+                try? modelContext.save()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { importStatusMessage = nil }
+            }
+            return true
+        }
+        // Drop search results onto the list card
         .dropDestination(for: ScoutLocation.self) { items, _ in
             for loc in items {
                 let pin = PinnedLocationData(from: loc, sortOrder: list.pins.count)
                 modelContext.insert(pin)
-                pin.list = list   // inverse relationship adds it to list.pins
+                pin.list = list
             }
             return true
         } isTargeted: { isTargeted = $0 }
         .contextMenu {
             Button { beginEditing() } label: {
                 Label("Rename", systemImage: "pencil")
+            }
+            Button { showImportPicker = true } label: {
+                Label("Import Photos…", systemImage: "square.and.arrow.down")
             }
             if list.parentList != nil {
                 Button {
@@ -446,6 +653,13 @@ private struct ListCard: View {
 
                 // Same row view as the sidebar search results.
                 LocationRow(location: pin.asScoutLocation(), showsPhotos: showPinPhotos)
+
+                if !pin.hasGPS {
+                    Image(systemName: "location.slash")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help("No GPS — not shown on map")
+                }
             }
             .padding(.horizontal, 10)
             .contentShape(Rectangle())
@@ -609,6 +823,80 @@ private func ordered(_ pins: [PinnedLocationData]) -> [PinnedLocationData] {
 }
 private func ordered(_ lists: [LocationListData]) -> [LocationListData] {
     lists.sorted { $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder : $0.createdAt < $1.createdAt }
+}
+
+// MARK: - Imported photo row
+
+private struct ImportedPhotosList: View {
+    let project: ProjectData
+    let showPhoto: Bool
+    let onSelectPin: (PinnedLocationData) -> Void
+
+    var body: some View {
+        let sorted = project.importedPhotos.sorted { $0.sortOrder < $1.sortOrder }
+        ForEach(sorted) { pin in
+            ImportedPhotoRow(pin: pin, onSelectPin: onSelectPin, showPhoto: showPhoto)
+        }
+    }
+}
+
+private struct ImportedPhotoRow: View {
+    let pin: PinnedLocationData
+    let onSelectPin: (PinnedLocationData) -> Void
+    let showPhoto: Bool
+    @Environment(\.modelContext) private var modelContext
+
+    var body: some View {
+        Button {
+            onSelectPin(pin)
+        } label: {
+            HStack(spacing: 6) {
+                if let filename = pin.photoFiles.first {
+                    let url = PinPhotoStore.fileURL(filename)
+                    AsyncImage(url: url) { img in
+                        img.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Color.secondary.opacity(0.2)
+                    }
+                    .frame(width: 32, height: 32)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                } else {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.secondary.opacity(0.2))
+                        .frame(width: 32, height: 32)
+                        .overlay(
+                            Image(systemName: "photo")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        )
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(pin.name)
+                        .font(.caption)
+                        .lineLimit(1)
+                    if !pin.hasGPS {
+                        Label("No GPS", systemImage: "location.slash")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .contextMenu {
+            Button(role: .destructive) {
+                modelContext.delete(pin)
+                try? modelContext.save()
+            } label: {
+                Label("Delete Photo", systemImage: "trash")
+            }
+        }
+    }
 }
 
 // MARK: - Hex color helper

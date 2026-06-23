@@ -27,6 +27,11 @@ final class PhotoViewerState: ObservableObject {
     // viewer re-opens at the same photo if the user returns to Photos mode.
     var restoreOnPhotoMode = false
 
+    /// True when the carousel was opened from a pin popover on the map (not from
+    /// the photo grid). Escape should return to the map and restore the popover,
+    /// not navigate to the photo grid.
+    var openedFromMap = false
+
     func next() {
         if selectedIndex < images.count - 1 { selectedIndex += 1 }
     }

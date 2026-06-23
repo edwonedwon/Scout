@@ -34,10 +34,9 @@ final class ScoutMapController: ObservableObject {
             map.setUserTrackingMode(.none, animated: true)
             return
         }
-        // Engaging follow: make sure every precondition MapKit needs is in place,
-        // otherwise it silently reverts the mode back to .none.
         LocationManager.shared.requestIfNeeded()
-        if !map.showsUserLocation { map.showsUserLocation = true }
+        // NOTE: do NOT touch showsUserLocation here — it is set once in makeMap
+        // and enforced by showsUserLocationKVO. Resetting it resets userTrackingMode.
         map.setUserTrackingMode(.follow, animated: true)
     }
 
@@ -55,6 +54,15 @@ final class ScoutMapController: ObservableObject {
         guard let map = mapView else { return }
         let region = MKCoordinateRegion(center: coordinate, span: map.region.span)
         setRegion(region, animated: animated)
+    }
+
+    /// Deselects then immediately reselects the currently-selected annotation so
+    /// MapKit fires `didSelect`, which reopens the pin popover. Call this after
+    /// the carousel is dismissed while the map is in view.
+    func forceReopenPopover() {
+        guard let map = mapView, let ann = map.selectedAnnotations.first else { return }
+        map.deselectAnnotation(ann, animated: false)
+        map.selectAnnotation(ann, animated: false)
     }
 
     /// Frames all given coordinates with padding.

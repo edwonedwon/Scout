@@ -24,6 +24,7 @@ struct LocationCalloutView: View {
                             .clipped()
                             .contentShape(Rectangle())
                             .onTapGesture {
+                                PhotoViewerState.shared.openedFromMap = true
                                 PhotoViewerState.shared.show(images: images, startingAt: idx, location: location)
                             }
                             .cursor(.pointingHand)
