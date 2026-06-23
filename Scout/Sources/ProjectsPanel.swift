@@ -143,7 +143,7 @@ struct ProjectsPanel: View {
         VStack(alignment: .leading, spacing: 6) {
             projectHeader(project)
 
-            ImportedPhotosList(project: project, showPhoto: showPinPhotos, onSelectPin: onSelectPin ?? { _ in })
+            ImportedPhotosList(project: project, showPhoto: showPinPhotos, onSelectPin: onSelectPin ?? { _ in }, dragState: dragState)
 
             let topLevel = ordered(project.lists.filter { $0.parentList == nil })
             ForEach(topLevel) { list in
@@ -831,26 +831,100 @@ private struct ImportedPhotosList: View {
     let project: ProjectData
     let showPhoto: Bool
     let onSelectPin: (PinnedLocationData) -> Void
+    let dragState: PinDragState
+
+    @State private var insertBeforeID: PersistentIdentifier? = nil
 
     var body: some View {
         let sorted = project.importedPhotos.sorted { $0.sortOrder < $1.sortOrder }
         ForEach(sorted) { pin in
-            ImportedPhotoRow(pin: pin, onSelectPin: onSelectPin, showPhoto: showPhoto)
+            VStack(spacing: 0) {
+                // Gap above each row — drop here to insert before this pin
+                PhotoReorderGap(
+                    isTargeted: insertBeforeID == pin.persistentModelID,
+                    onDrop: { dropped in
+                        insertBeforeID = nil
+                        placeInOrder(dropped, before: pin, among: sorted)
+                        dragState.draggedPin = nil
+                    },
+                    onTargetChanged: { targeted in
+                        if targeted { insertBeforeID = pin.persistentModelID }
+                        else if insertBeforeID == pin.persistentModelID { insertBeforeID = nil }
+                    },
+                    dragState: dragState
+                )
+                ImportedPhotoRow(
+                    pin: pin,
+                    showPhoto: showPhoto,
+                    onSelectPin: onSelectPin,
+                    onDragStarted: { dragState.draggedPin = pin }
+                )
+            }
         }
+        // Gap at the end — drop here to append
+        AppendDropZone(dragState: dragState, sorted: sorted)
+    }
+}
+
+private struct PhotoReorderGap: View {
+    let isTargeted: Bool
+    let onDrop: (PinnedLocationData) -> Void
+    let onTargetChanged: (Bool) -> Void
+    let dragState: PinDragState
+
+    var body: some View {
+        Color.accentColor
+            .frame(maxWidth: .infinity)
+            .frame(height: isTargeted ? 2 : 6)
+            .opacity(isTargeted ? 1 : 0.001)
+            .onDrop(of: [.text], isTargeted: Binding(
+                get: { isTargeted },
+                set: { onTargetChanged($0) }
+            )) { _ in
+                guard let pin = dragState.draggedPin else { return false }
+                onDrop(pin)
+                return true
+            }
+    }
+}
+
+private struct AppendDropZone: View {
+    let dragState: PinDragState
+    let sorted: [PinnedLocationData]
+    @State private var isTargeted = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(isTargeted ? Color.accentColor.opacity(0.15) : Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(isTargeted ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1.5)
+            )
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+            .onDrop(of: [.text], isTargeted: $isTargeted) { _ in
+                guard let pin = dragState.draggedPin else { return false }
+                placeInOrder(pin, before: nil, among: sorted)
+                dragState.draggedPin = nil
+                return true
+            }
     }
 }
 
 private struct ImportedPhotoRow: View {
     let pin: PinnedLocationData
-    let onSelectPin: (PinnedLocationData) -> Void
     let showPhoto: Bool
+    let onSelectPin: (PinnedLocationData) -> Void
+    let onDragStarted: () -> Void
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
-        Button {
-            onSelectPin(pin)
-        } label: {
-            HStack(spacing: 6) {
+        HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 16)
+
                 if let filename = pin.photoFiles.first {
                     let url = PinPhotoStore.fileURL(filename)
                     AsyncImage(url: url) { img in
@@ -884,18 +958,21 @@ private struct ImportedPhotoRow: View {
                 Spacer()
             }
             .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .contextMenu {
-            Button(role: .destructive) {
-                modelContext.delete(pin)
-                try? modelContext.save()
-            } label: {
-                Label("Delete Photo", systemImage: "trash")
+            .onTapGesture { onSelectPin(pin) }
+            .onDrag {
+                onDragStarted()
+                return NSItemProvider(object: pin.uuid.uuidString as NSString)
             }
-        }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .contextMenu {
+                Button(role: .destructive) {
+                    modelContext.delete(pin)
+                    try? modelContext.save()
+                } label: {
+                    Label("Delete Photo", systemImage: "trash")
+                }
+            }
     }
 }
 
