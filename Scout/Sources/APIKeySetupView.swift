@@ -70,3 +70,9 @@ struct APIKeySetupView: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("API key setup") {
+    APIKeySetupView().environmentObject(APIKeyState.shared)
+}
+#endif

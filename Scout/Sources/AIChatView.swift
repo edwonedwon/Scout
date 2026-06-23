@@ -354,3 +354,15 @@ struct AIChatView: View {
         onSend(text, selectedModel, extendedThinking)
     }
 }
+
+#if DEBUG
+#Preview("AI chat") {
+    @Previewable @State var messages: [ChatMessage] = [
+        .user(text: "abandoned factories near Osaka"),
+        .status(text: "Searching the web…"),
+        .result(count: 7),
+    ]
+    AIChatView(messages: $messages, isSearching: false, onSend: { _, _, _ in })
+        .frame(width: 300, height: 600)
+}
+#endif

@@ -71,35 +71,55 @@ enum PinPhotoStore {
 
     static func fileURL(_ filename: String) -> URL { directory.appendingPathComponent(filename) }
 
-    static func download(for location: ScoutLocation, placeId: String?, pinUUID: UUID, limit: Int = 5) async -> [String] {
-        let urls = await resolvePhotoURLs(for: location, placeId: placeId, limit: limit)
-        var filenames: [String] = []
-        for (i, url) in urls.enumerated() where !url.isFileURL {
-            guard let data = await PhotoLoader.data(for: url) else { continue }
-            let name = "\(pinUUID.uuidString)-\(i).img"
-            if (try? data.write(to: fileURL(name))) != nil { filenames.append(name) }
-        }
-        return filenames
+    /// Downloaded photo filenames plus the source links resolved alongside them, so old
+    /// pins can backfill their Google Maps / Flickr / Wiki link too.
+    struct Result {
+        var files: [String] = []
+        var googleMapsURL: URL?
+        var sourceURL: URL?
     }
 
-    private static func resolvePhotoURLs(for location: ScoutLocation, placeId: String?, limit: Int) async -> [URL] {
-        let stored = location.images.compactMap(\.url).filter { !$0.isFileURL }
-        if !stored.isEmpty { return Array(stored.prefix(limit)) }
+    static func download(for location: ScoutLocation, placeId: String?, pinUUID: UUID, limit: Int = 5) async -> Result {
+        let resolved = await resolve(for: location, placeId: placeId, limit: limit)
+        var result = Result(googleMapsURL: resolved.googleMapsURL, sourceURL: resolved.sourceURL)
+        for (i, url) in resolved.photoURLs.enumerated() where !url.isFileURL {
+            guard let data = await PhotoLoader.data(for: url) else { continue }
+            let name = "\(pinUUID.uuidString)-\(i).img"
+            if (try? data.write(to: fileURL(name))) != nil { result.files.append(name) }
+        }
+        return result
+    }
 
+    private struct Resolved {
+        var photoURLs: [URL] = []
+        var googleMapsURL: URL?
+        var sourceURL: URL?
+    }
+
+    private static func resolve(for location: ScoutLocation, placeId: String?, limit: Int) async -> Resolved {
+        // Prefer the location's own stored source and photos.
+        let stored = location.images.compactMap(\.url).filter { !$0.isFileURL }
+        if !stored.isEmpty {
+            return Resolved(photoURLs: Array(stored.prefix(limit)),
+                            googleMapsURL: location.googleMapsURL, sourceURL: location.sourceURL)
+        }
         if let placeId, let photos = try? await GooglePlacesService.shared.fetchPhotos(for: placeId) {
             let urls = photos.compactMap(\.url)
-            if !urls.isEmpty { return Array(urls.prefix(limit)) }
+            if !urls.isEmpty {
+                return Resolved(photoURLs: Array(urls.prefix(limit)),
+                                googleMapsURL: location.googleMapsURL, sourceURL: location.sourceURL)
+            }
         }
-
         // Last resort for old pins with no stored source: re-find on Google by name nearby.
         let c = location.coordinate
         let region = GooglePlacesService.MapRegion(centerLat: c.latitude, centerLng: c.longitude,
                                                    latDelta: 0.05, lngDelta: 0.05)
         if let results = try? await GooglePlacesService.shared.search(query: location.name, region: region),
            let best = results.min(by: { distSq($0.coordinate, c) < distSq($1.coordinate, c) }) {
-            return Array(best.images.compactMap(\.url).prefix(limit))
+            return Resolved(photoURLs: Array(best.images.compactMap(\.url).prefix(limit)),
+                            googleMapsURL: best.googleMapsURL, sourceURL: best.sourceURL)
         }
-        return []
+        return Resolved(googleMapsURL: location.googleMapsURL, sourceURL: location.sourceURL)
     }
 
     private static func distSq(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
@@ -404,3 +424,22 @@ struct PhotoViewerOverlay: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Photo image") {
+    GooglePhotoImage(url: ScoutLocation.preview.images.first?.url) {
+        Color.secondary.opacity(0.15)
+    }
+    .scaledToFill()
+    .frame(width: 220, height: 160)
+    .clipped()
+}
+
+#Preview("Photo viewer") {
+    PhotoViewerState.shared.images = ScoutLocation.preview.images
+    PhotoViewerState.shared.location = .preview
+    PhotoViewerState.shared.selectedIndex = 0
+    return PhotoViewerOverlay()
+        .frame(width: 800, height: 600)
+}
+#endif

@@ -623,3 +623,12 @@ extension Color {
         self.init(red: r, green: g, blue: b)
     }
 }
+
+#if DEBUG
+#Preview("Projects panel") {
+    @Previewable @State var active: Set<PersistentIdentifier> = []
+    ProjectsPanel(activeListIDs: $active)
+        .frame(width: 240, height: 600)
+        .modelContainer(PreviewData.container)
+}
+#endif

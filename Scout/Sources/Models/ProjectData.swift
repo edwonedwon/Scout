@@ -123,3 +123,31 @@ final class PinnedLocationData {
         )
     }
 }
+
+// MARK: - Preview sample data
+
+#if DEBUG
+@MainActor
+enum PreviewData {
+    /// In-memory store with one project, one list, and a couple of saved pins —
+    /// for SwiftData-backed previews (ProjectsPanel, ContentView).
+    static let container: ModelContainer = {
+        let container = try! ModelContainer(
+            for: ProjectData.self, LocationListData.self, PinnedLocationData.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let ctx = container.mainContext
+        let project = ProjectData(name: "Tokyo Shoot")
+        ctx.insert(project)
+        let list = LocationListData(name: "Day 1 — Shibuya", colorHex: LocationListData.palette[1])
+        ctx.insert(list)
+        list.project = project
+        for (i, loc) in [ScoutLocation.preview, .previewNoPhotos].enumerated() {
+            let pin = PinnedLocationData(from: loc, sortOrder: i)
+            ctx.insert(pin)
+            pin.list = list
+        }
+        return container
+    }()
+}
+#endif

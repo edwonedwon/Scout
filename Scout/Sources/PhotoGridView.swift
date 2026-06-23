@@ -130,3 +130,10 @@ private struct MasonryCell: View {
         .animation(.easeInOut(duration: 0.12), value: isHovered)
     }
 }
+
+#if DEBUG
+#Preview("Photo grid") {
+    PhotoGridView(locations: [.preview], pinnedLocations: [.preview])
+        .frame(width: 700, height: 520)
+}
+#endif

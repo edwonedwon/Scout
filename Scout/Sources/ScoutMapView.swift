@@ -240,9 +240,19 @@ final class ZoomableMapView: MKMapView {
     private let pointSpacing: CGFloat = 6
 
     override func mouseDown(with event: NSEvent) {
-        guard isDrawingMode else { super.mouseDown(with: event); return }
-        wantsLayer = true
         let pt = convert(event.locationInWindow, from: nil)
+        guard isDrawingMode else {
+            // Select the highlighted pin directly so overlapping photos always resolve to
+            // the one under the cursor (MapKit's own hit-testing can miss or pick the wrong one).
+            applyHover(at: pt)
+            if let ann = pinUnderCursor?.annotation as? LocationAnnotation {
+                selectAnnotation(ann, animated: false)
+                return
+            }
+            super.mouseDown(with: event)
+            return
+        }
+        wantsLayer = true
         drawPoints = [pt]
         lastAddedPoint = pt
         setupDrawingLayer()
@@ -405,39 +415,57 @@ final class ZoomableMapView: MKMapView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         guard !isDrawingMode else { return }
-        applyDotHover(at: convert(event.locationInWindow, from: nil))
+        applyHover(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        clearDotHover()
+        setHovered(nil)
     }
 
-    private var hoveredDotView: ScoutDotAnnotationView?
+    private weak var hoveredView: MKAnnotationView?
 
-    private func applyDotHover(at point: CGPoint) {
-        let hoverRadius: CGFloat = 12
-        var nearest: ScoutDotAnnotationView? = nil
-        var nearestDist: CGFloat = .infinity
-        for ann in annotations(in: visibleMapRect).prefix(300) {
+    /// Highlights the single pin under the cursor (the nearest one when photos overlap).
+    /// Hit-tested against each pin's full on-screen frame, so the whole photo — border
+    /// included — is hoverable.
+    private func applyHover(at point: CGPoint) {
+        var best: MKAnnotationView?
+        var bestDist = CGFloat.infinity
+        for ann in annotations(in: visibleMapRect).prefix(400) {
             guard let mkAnn = ann as? (any MKAnnotation),
-                  let av = view(for: mkAnn) as? ScoutDotAnnotationView else { continue }
-            let avCenter = CGPoint(x: av.frame.midX, y: av.frame.midY)
-            let center = convert(avCenter, from: av.superview)
-            let dist = hypot(center.x - point.x, center.y - point.y)
-            if dist < hoverRadius && dist < nearestDist { nearestDist = dist; nearest = av }
+                  let av = view(for: mkAnn),
+                  av is ScoutDotAnnotationView || av is ScoutPhotoAnnotationView else { continue }
+            var hit = convert(av.frame, from: av.superview)
+            // Small pins (dots) get a generous minimum target; photos use their true size.
+            let minSize: CGFloat = 24
+            if hit.width < minSize {
+                hit = hit.insetBy(dx: -(minSize - hit.width) / 2, dy: -(minSize - hit.height) / 2)
+            }
+            guard hit.contains(point) else { continue }
+            let d = hypot(hit.midX - point.x, hit.midY - point.y)
+            if d < bestDist { bestDist = d; best = av }
         }
-        if nearest !== hoveredDotView {
-            hoveredDotView?.isHovered = false
-            nearest?.isHovered = true
-            hoveredDotView = nearest
+        setHovered(best)
+    }
+
+    private func setHovered(_ av: MKAnnotationView?) {
+        guard av !== hoveredView else { return }
+        apply(hover: false, to: hoveredView)
+        apply(hover: true, to: av)
+        hoveredView = av
+    }
+
+    private func apply(hover: Bool, to av: MKAnnotationView?) {
+        (av as? ScoutDotAnnotationView)?.isHovered = hover
+        if let photo = av as? ScoutPhotoAnnotationView {
+            photo.isHovered = hover
+            photo.layer?.zPosition = hover ? 60 : 0   // float the hovered photo above overlaps
         }
     }
 
-    private func clearDotHover() {
-        hoveredDotView?.isHovered = false
-        hoveredDotView = nil
-    }
+    /// The pin currently under the cursor, if any — used to make clicks always hit the
+    /// highlighted pin even when photos overlap.
+    var pinUnderCursor: MKAnnotationView? { hoveredView }
 
 }
 
@@ -496,6 +524,16 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     private let imageView = NSImageView()
     private var loadTask: Task<Void, Never>?
 
+    /// Set by the map's hover tracking — thickens the white border to show this photo is
+    /// the one a click will select (only one is ever hovered, even when photos overlap).
+    var isHovered: Bool = false {
+        didSet { guard oldValue != isHovered else { return }; applyBorder() }
+    }
+    private func applyBorder() {
+        let ratio = bounds.width / Self.baseSize
+        layer?.borderWidth = (isHovered ? 5 : 2.5) * ratio
+    }
+
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
         let size: CGFloat = 50
@@ -535,15 +573,16 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         // Scale chrome with the view so the border/corner don't dominate small pins.
         let ratio = s / Self.baseSize
         layer?.cornerRadius = 8 * ratio
-        layer?.borderWidth = 2.5 * ratio
         layer?.shadowRadius = 4 * ratio
         imageView.layer?.cornerRadius = 6 * ratio
+        applyBorder()   // keeps the hover thickness consistent across sizes
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
         layer?.setAffineTransform(.identity)
         layer?.zPosition = 0
+        isHovered = false
     }
 
     func configure(imageURL: URL?) {
@@ -827,9 +866,9 @@ struct ScoutMapView {
                let annotation = map.annotations
                    .compactMap({ $0 as? LocationAnnotation })
                    .first(where: { $0.location.id == selection.id }) {
-                map.selectAnnotation(annotation, animated: true)
+                map.selectAnnotation(annotation, animated: false)
             } else if selection == nil, let current = map.selectedAnnotations.first {
-                map.deselectAnnotation(current, animated: true)
+                map.deselectAnnotation(current, animated: false)
             }
         }
 
@@ -902,14 +941,16 @@ struct ScoutMapView {
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? LocationAnnotation else { return }
-            parent.selection = ann.location
+            // Defer the binding write: this delegate can fire mid view-update (via
+            // syncSelection → selectAnnotation), and mutating SwiftUI state then is undefined.
+            DispatchQueue.main.async { self.parent.selection = ann.location }
             #if os(macOS)
             showPopover(for: ann.location, from: view, in: mapView)
             #endif
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
-            parent.selection = nil
+            DispatchQueue.main.async { self.parent.selection = nil }
             #if os(macOS)
             activePopover?.close()
             activePopover = nil
@@ -933,13 +974,16 @@ struct ScoutMapView {
             pop.contentViewController = vc
             pop.contentSize = vc.view.frame.size
             pop.behavior = .transient
+            pop.animates = false   // appear instantly on click instead of fading in
 
-            // Anchor directly to the annotation view rather than converting its center
-            // into MKMapView's coordinate space. Annotation views live inside MKMapView's
-            // internal container, whose transform NSView.convert(_:from:) doesn't fully
-            // account for — converting left the popover floating well above the pin.
-            // Showing relative to the view itself lets AppKit resolve the true screen rect.
-            pop.show(relativeTo: annotationView.bounds, of: annotationView, preferredEdge: .maxY)
+            // Anchor to a 1pt rect at the TOP-CENTER of the annotation view, not its center,
+            // so the popover clears the whole pin/photo instead of overlapping its top half.
+            // bounds is the actual on-screen size (small dot vs. a scaled photo), so the gap
+            // automatically tracks the photo size. .minY puts the popover above the pin
+            // (arrow pointing down); NSPopover auto-flips below only when there isn't room.
+            let anchor = NSRect(x: annotationView.bounds.midX - 0.5,
+                                y: annotationView.bounds.minY, width: 1, height: 1)
+            pop.show(relativeTo: anchor, of: annotationView, preferredEdge: .minY)
             activePopover = pop
         }
 

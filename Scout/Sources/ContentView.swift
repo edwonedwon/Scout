@@ -415,15 +415,22 @@ struct ContentView: View {
         }
     }
 
-    /// Download a saved pin's photos to disk so it displays offline and never refetches.
+    /// Download a saved pin's photos to disk and capture its source links, so it displays
+    /// offline (never refetches) and shows its Google Maps / source link in the popover.
     private func cachePhotos(for pin: PinnedLocationData, from location: ScoutLocation) {
         let placeId = pin.googlePlaceId
         let uuid = pin.uuid
         Task { @MainActor in
-            let files = await PinPhotoStore.download(for: location, placeId: placeId, pinUUID: uuid)
-            guard !files.isEmpty else { return }
-            pin.photoFiles = files
-            try? modelContext.save()
+            let result = await PinPhotoStore.download(for: location, placeId: placeId, pinUUID: uuid)
+            var changed = false
+            if !result.files.isEmpty { pin.photoFiles = result.files; changed = true }
+            if pin.googleMapsURLString == nil, let url = result.googleMapsURL {
+                pin.googleMapsURLString = url.absoluteString; changed = true
+            }
+            if pin.sourceURLString == nil, let url = result.sourceURL {
+                pin.sourceURLString = url.absoluteString; changed = true
+            }
+            if changed { try? modelContext.save() }
         }
     }
 
@@ -1341,6 +1348,7 @@ struct BoundarySettingsPopover: View {
 #Preview("Main layout", traits: .fixedLayout(width: 1200, height: 800)) {
     ContentView()
         .environmentObject(APIKeyState.shared)
+        .modelContainer(PreviewData.container)
         .onAppear {
             NSApp.windows.forEach { window in
                 window.titleVisibility = .hidden
@@ -1348,5 +1356,41 @@ struct BoundarySettingsPopover: View {
                 window.styleMask.insert(.fullSizeContentView)
             }
         }
+}
+
+#Preview("Location row") {
+    List {
+        LocationRow(location: .preview)
+        LocationRow(location: .previewNoPhotos)
+        LocationRow(location: .preview, showsPhotos: false)
+    }
+    .frame(width: 320, height: 360)
+}
+
+#Preview("Layers popover") {
+    @Previewable @State var style = MapStyle.explore
+    @Previewable @State var cycling = ""
+    @Previewable @State var size = 1.0
+    LayersPopover(mapStyle: $style, cyclingProviderRaw: $cycling, pinSize: $size)
+}
+
+#Preview("Boundary popover") {
+    @Previewable @State var prefectures = true
+    @Previewable @State var municipalities = false
+    @Previewable @State var names = true
+    @Previewable @State var opacity = 0.2
+    @Previewable @State var language = BoundaryNameLanguage.japanese
+    BoundarySettingsPopover(
+        showPrefectures: $prefectures,
+        showMunicipalities: $municipalities,
+        showNames: $names,
+        opacity: $opacity,
+        nameLanguage: $language,
+        isLoadingPrefectures: false,
+        isLoadingMunicipalities: false,
+        prefectureCount: 47,
+        municipalityCount: 0,
+        error: nil
+    )
 }
 #endif

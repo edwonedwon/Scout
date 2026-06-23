@@ -96,3 +96,11 @@ struct DebugPanelOverlay: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Debug panel") {
+    DebugPanelOverlay()
+        .padding()
+        .frame(width: 420, height: 320, alignment: .topLeading)
+}
+#endif

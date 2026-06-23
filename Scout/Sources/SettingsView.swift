@@ -356,3 +356,23 @@ struct APIKeyField: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Settings") {
+    SettingsView().environmentObject(APIKeyState.shared)
+}
+
+#Preview("Key field") {
+    APIKeyField(placeholder: "sk-ant-…", isSet: false, onSave: { _ in })
+        .padding().frame(width: 380)
+}
+
+#Preview("Key section header") {
+    KeySectionHeader("Anthropic API Key", help: .anthropic)
+        .padding().frame(width: 380)
+}
+
+#Preview("Key help popover") {
+    KeyHelpPopover(help: .anthropic)
+}
+#endif
