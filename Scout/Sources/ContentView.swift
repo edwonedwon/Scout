@@ -389,10 +389,15 @@ struct ContentView: View {
     /// exactly as if it were clicked on the map. Activates its list first so it's visible
     /// (unfiled pins are always shown), then centers on it.
     private func selectPin(_ pin: PinnedLocationData) {
+        let location = pin.asScoutLocation()
+        // Toggle: tapping the already-selected pin again closes its popover.
+        if selectedLocation?.id == location.id {
+            selectedLocation = nil
+            return
+        }
         if let listID = pin.list?.persistentModelID {
             activeListIDs.insert(listID)
         }
-        let location = pin.asScoutLocation()
         selectedLocation = location
         mapController.pan(to: location.coordinate, animated: true)
     }

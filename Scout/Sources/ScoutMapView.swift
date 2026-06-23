@@ -246,9 +246,16 @@ final class ZoomableMapView: MKMapView {
             // the one under the cursor (MapKit's own hit-testing can miss or pick the wrong one).
             applyHover(at: pt)
             if let ann = pinUnderCursor?.annotation as? LocationAnnotation {
-                selectAnnotation(ann, animated: false)
+                // Toggle: clicking the open pin closes its popover, clicking a closed pin opens it.
+                let isSelected = selectedAnnotations.contains {
+                    ($0 as? LocationAnnotation)?.location.id == ann.location.id
+                }
+                if isSelected { deselectAnnotation(ann, animated: false) }
+                else { selectAnnotation(ann, animated: false) }
                 return
             }
+            // Click on empty map: close any open popover, then let the map pan as usual.
+            if let sel = selectedAnnotations.first { deselectAnnotation(sel, animated: false) }
             super.mouseDown(with: event)
             return
         }
@@ -973,7 +980,10 @@ struct ScoutMapView {
             let pop = NSPopover()
             pop.contentViewController = vc
             pop.contentSize = vc.view.frame.size
-            pop.behavior = .transient
+            // Application-defined (not .transient): a transient popover eats the dismiss
+            // click while leaving the pin selected, which broke re-opening. We toggle
+            // open/close explicitly in mouseDown instead.
+            pop.behavior = .applicationDefined
             pop.animates = false   // appear instantly on click instead of fading in
 
             // Anchor to a 1pt rect at the TOP-CENTER of the annotation view, not its center,
