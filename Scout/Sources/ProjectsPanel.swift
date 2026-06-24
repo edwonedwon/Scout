@@ -180,6 +180,7 @@ private struct ProjectDetailView: View {
     @State private var showAddList = false
     @State private var newListName = ""
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
+    @State private var topLevelDropTargeted = false
 
     private var sidebarItems: [SidebarItem] {
         let photos = project.importedPhotos.map { SidebarItem.photo($0) }
@@ -206,48 +207,140 @@ private struct ProjectDetailView: View {
         sidebarItems.first { $0.dragID == dragID }
     }
 
-    /// Loads the dragged String from `providers` (async) and applies the drop on
-    /// the main actor. Using NSItemProvider-based onDrop fires reliably on every
-    /// drop, unlike .dropDestination which only works once inside a List on macOS.
+    /// Finds a pin anywhere in the project — top-level or inside any list.
+    private func findPin(uuid: String) -> PinnedLocationData? {
+        if let p = project.importedPhotos.first(where: { $0.uuid.uuidString == uuid }) { return p }
+        for list in project.lists {
+            if let p = list.pins.first(where: { $0.uuid.uuidString == uuid }) { return p }
+        }
+        return nil
+    }
+
+    /// Removes a pin from wherever it currently lives (list or top-level).
+    private func detach(_ pin: PinnedLocationData) {
+        if let list = pin.list {
+            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
+            pin.list = nil
+        }
+        project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+        pin.owningProject = nil
+    }
+
+    // MARK: - Drop loading
+
+    /// Loads drag payload from providers and dispatches to handleDrop on main actor.
     private func loadDrop(_ providers: [NSItemProvider], onto target: SidebarItem) -> Bool {
         guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
             return false
         }
         _ = provider.loadObject(ofClass: NSString.self) { object, _ in
             guard let dragID = object as? String else { return }
+            Task { @MainActor in _ = handleDrop(dragID, onto: target) }
+        }
+        return true
+    }
+
+    /// Moves a list pin to the top-level project. `atTop` places it first, otherwise last.
+    private func loadDropToTopLevel(_ providers: [NSItemProvider], atTop: Bool) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
+        }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let dragID = object as? String else { return }
             Task { @MainActor in
-                _ = handleDrop([dragID], onto: target)
+                let uuid: String
+                if dragID.hasPrefix("pin:") { uuid = String(dragID.dropFirst(4)) }
+                else if dragID.hasPrefix("photo:") { uuid = String(dragID.dropFirst(6)) }
+                else { return }
+                guard let pin = findPin(uuid: uuid) else { return }
+                guard pin.list != nil else { return } // already top-level, nothing to do
+                detach(pin)
+                pin.owningProject = project
+                // Set panelOrder outside the current range so normalizeOrder places it correctly.
+                pin.panelOrder = atTop ? -1 : sidebarItems.count + 1
+                project.importedPhotos.append(pin)
+                normalizeOrder()
+                try? modelContext.save()
             }
         }
         return true
     }
 
-    /// Handles a drop of `ids` onto `target`. Returns true if anything changed.
-    private func handleDrop(_ ids: [String], onto target: SidebarItem) -> Bool {
-        guard let id = ids.first, let dragged = resolve(id) else { return false }
-        // Don't act when dropping an item onto itself.
-        if dragged.id == target.id { return false }
-
-        // Dragging a photo onto a list moves it into that list.
-        if case .photo(let pin) = dragged, case .list(let list) = target {
-            moveIntoList(pin, list)
-            return true
+    /// Loads drag payload and moves the pin into a list, optionally after a specific pin.
+    private func loadDropPin(_ providers: [NSItemProvider], intoList list: LocationListData, afterPin: PinnedLocationData? = nil) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
         }
-
-        // Otherwise reorder: place the dragged item where the target sits.
-        reorder(dragged, before: target)
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let dragID = object as? String else { return }
+            Task { @MainActor in
+                let uuid: String
+                if dragID.hasPrefix("pin:") { uuid = String(dragID.dropFirst(4)) }
+                else if dragID.hasPrefix("photo:") { uuid = String(dragID.dropFirst(6)) }
+                else { return }
+                guard let pin = findPin(uuid: uuid) else { return }
+                detach(pin)
+                if let after = afterPin, let idx = list.pins.firstIndex(where: { $0.persistentModelID == after.persistentModelID }) {
+                    list.pins.insert(pin, at: idx + 1)
+                } else {
+                    list.pins.append(pin)
+                }
+                pin.list = list
+                for (i, p) in list.pins.enumerated() { p.sortOrder = i }
+                normalizeOrder()
+                try? modelContext.save()
+            }
+        }
         return true
     }
 
-    /// Moves a project photo into a list and removes it from the top-level sidebar.
-    private func moveIntoList(_ pin: PinnedLocationData, _ list: LocationListData) {
-        project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-        pin.owningProject = nil
-        pin.sortOrder = list.pins.count
-        pin.list = list
-        list.pins.append(pin)
-        normalizeOrder()
-        try? modelContext.save()
+    // MARK: - Drop handling
+
+    /// Central drop handler for top-level sidebar items.
+    private func handleDrop(_ dragID: String, onto target: SidebarItem) -> Bool {
+        // Pin dragged from inside a list onto a top-level target.
+        if dragID.hasPrefix("pin:") {
+            let uuid = String(dragID.dropFirst(4))
+            guard let pin = findPin(uuid: uuid) else { return false }
+            switch target {
+            case .list(let list):
+                // Move into this list.
+                if pin.list?.persistentModelID == list.persistentModelID { return false }
+                detach(pin)
+                pin.list = list
+                list.pins.append(pin)
+                for (i, p) in list.pins.enumerated() { p.sortOrder = i }
+                normalizeOrder()
+            case .photo(let targetPin):
+                // Move out to top-level, placed near the target photo.
+                detach(pin)
+                pin.owningProject = project
+                pin.panelOrder = targetPin.panelOrder
+                project.importedPhotos.append(pin)
+                normalizeOrder()
+            }
+            try? modelContext.save()
+            return true
+        }
+
+        // Top-level item dragged onto another top-level item.
+        guard let dragged = resolve(dragID) else { return false }
+        if dragged.id == target.id { return false }
+
+        // Top-level photo dragged onto a list → move into list.
+        if case .photo(let pin) = dragged, case .list(let list) = target {
+            detach(pin)
+            pin.list = list
+            list.pins.append(pin)
+            for (i, p) in list.pins.enumerated() { p.sortOrder = i }
+            normalizeOrder()
+            try? modelContext.save()
+            return true
+        }
+
+        // Otherwise reorder.
+        reorder(dragged, before: target)
+        return true
     }
 
     /// Reorders `dragged` to sit at `target`'s current position in the sidebar.
@@ -269,6 +362,29 @@ private struct ProjectDetailView: View {
     var body: some View {
         List {
             Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
+
+            // Drop zone: drag any list pin here to move it to the top-level project.
+            HStack(spacing: 6) {
+                Image(systemName: "tray.and.arrow.up")
+                    .font(.caption)
+                Text("Drop here to remove from list")
+                    .font(.caption)
+            }
+            .foregroundStyle(topLevelDropTargeted ? Color.accentColor : Color.secondary.opacity(0.5))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(topLevelDropTargeted ? Color.accentColor : Color.secondary.opacity(0.3),
+                            style: StrokeStyle(lineWidth: 1, dash: [4]))
+                    .padding(.horizontal, 4)
+            )
+            .listRowBackground(Color.clear)
+            .onDrop(of: [.text], isTargeted: $topLevelDropTargeted) { providers in
+                loadDropToTopLevel(providers, atTop: true)
+            }
+
             ForEach(sidebarItems) { item in
                 switch item {
                 case .photo(let pin):
@@ -310,10 +426,23 @@ private struct ProjectDetailView: View {
                             PinRow(pin: pin, onSelectPin: onSelectPin)
                                 .padding(.leading, 24)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+                                .onDrag { NSItemProvider(object: "pin:\(pin.uuid.uuidString)" as NSString) }
+                                .onDrop(of: [.text], isTargeted: nil) { providers in
+                                    loadDropPin(providers, intoList: list, afterPin: pin)
+                                }
                         }
                     }
                 }
             }
+
+            // Bottom drop zone — same as the top one, for when the list is scrolled down.
+            Color.clear
+                .frame(maxWidth: .infinity)
+                .frame(height: 80)
+                .listRowBackground(Color.clear)
+                .onDrop(of: [.text], isTargeted: nil) { providers in
+                    loadDropToTopLevel(providers, atTop: false)
+                }
         }
         .onAppear { normalizeOrder() }
         .onChange(of: project.importedPhotos.count) { normalizeOrder() }
@@ -396,7 +525,8 @@ private struct ListRow: View {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(width: 14)
+                    .frame(width: 28, height: 32)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
