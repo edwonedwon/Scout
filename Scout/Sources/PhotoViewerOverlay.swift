@@ -298,11 +298,11 @@ struct PhotoViewerOverlay: View {
                         .buttonStyle(.plain)
                     }
 
-                    // Per-photo date
+                    // Per-photo date/time (from EXIF DateTimeOriginal)
                     let currentImage = viewer.images.indices.contains(viewer.selectedIndex)
                         ? viewer.images[viewer.selectedIndex] : nil
                     if let date = currentImage?.dateTaken {
-                        Text(date.formatted(.dateTime.year().month(.wide).day()))
+                        Text(date.formatted(.dateTime.year().month(.wide).day().hour().minute()))
                             .font(.caption)
                             .foregroundStyle(.white.opacity(0.55))
                             .monospacedDigit()

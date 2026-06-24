@@ -4,6 +4,8 @@ import ScoutKit
 struct PhotoGridView: View {
     let locations: [ScoutLocation]
     var pinnedLocations: [ScoutLocation] = []
+    /// UUID of the location (== PinnedLocationData.uuid) to scroll to and highlight.
+    var highlightedLocationID: UUID? = nil
     var onClearSearchResults: (() -> Void)? = nil
 
     struct PhotoItem: Identifiable {
@@ -44,30 +46,40 @@ struct PhotoGridView: View {
         } else {
             GeometryReader { geo in
                 let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        if !pinnedItems.isEmpty {
-                            sectionHeader("Saved Pins")
-                            masonryGrid(items: pinnedItems, colWidth: colWidth)
-                        }
-                        if !searchItems.isEmpty {
-                            HStack {
-                                sectionHeader("Search Results")
-                                Spacer()
-                                if let onClearSearchResults {
-                                    Button(action: onClearSearchResults) {
-                                        Label("Clear", systemImage: "xmark.circle.fill")
-                                            .font(.caption)
-                                            .foregroundStyle(.white.opacity(0.55))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(.trailing, 10)
-                                }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if !pinnedItems.isEmpty {
+                                sectionHeader("Saved Pins")
+                                masonryGrid(items: pinnedItems, colWidth: colWidth)
                             }
-                            masonryGrid(items: searchItems, colWidth: colWidth)
+                            if !searchItems.isEmpty {
+                                HStack {
+                                    sectionHeader("Search Results")
+                                    Spacer()
+                                    if let onClearSearchResults {
+                                        Button(action: onClearSearchResults) {
+                                            Label("Clear", systemImage: "xmark.circle.fill")
+                                                .font(.caption)
+                                                .foregroundStyle(.white.opacity(0.55))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .padding(.trailing, 10)
+                                    }
+                                }
+                                masonryGrid(items: searchItems, colWidth: colWidth)
+                            }
+                        }
+                        .padding(.bottom, 8)
+                    }
+                    .onChange(of: highlightedLocationID) { _, id in
+                        guard let id,
+                              let first = (pinnedItems + searchItems).first(where: { $0.location.id == id })
+                        else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(first.id, anchor: .center)
                         }
                     }
-                    .padding(.bottom, 8)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -90,7 +102,13 @@ struct PhotoGridView: View {
             ForEach(0..<columns, id: \.self) { col in
                 LazyVStack(spacing: gap) {
                     ForEach(items.indices.filter { $0 % columns == col }, id: \.self) { idx in
-                        MasonryCell(item: items[idx], width: colWidth)
+                        let item = items[idx]
+                        MasonryCell(
+                            item: item,
+                            width: colWidth,
+                            isHighlighted: highlightedLocationID == item.location.id
+                        )
+                        .id(item.id)
                     }
                 }
             }
@@ -101,6 +119,7 @@ struct PhotoGridView: View {
 private struct MasonryCell: View {
     let item: PhotoGridView.PhotoItem
     let width: CGFloat
+    var isHighlighted: Bool = false
     @State private var isHovered = false
 
     var body: some View {
@@ -128,6 +147,12 @@ private struct MasonryCell: View {
                 }
             }
         }
+        .overlay {
+            if isHighlighted {
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(Color.accentColor, lineWidth: 2.5)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { inside in
             isHovered = inside
@@ -141,6 +166,7 @@ private struct MasonryCell: View {
             )
         }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
+        .animation(.easeInOut(duration: 0.2), value: isHighlighted)
     }
 }
 

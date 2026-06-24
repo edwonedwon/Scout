@@ -121,7 +121,8 @@ final class PinnedLocationData {
         let images: [ScoutImage]
         if !photoFiles.isEmpty {
             // Offline: serve the downloaded files as file:// URLs through the usual loader.
-            images = photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source) }
+            // dateTaken is stored per-pin (from EXIF), so all images in the pin share it.
+            images = photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken) }
         } else if let imageURL, let url = URL(string: imageURL) {
             images = [ScoutImage(url: url, source: source)]
         } else {

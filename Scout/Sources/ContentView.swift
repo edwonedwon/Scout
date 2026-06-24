@@ -77,6 +77,8 @@ struct ContentView: View {
     @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
     // Flipped by the debug "Clear Old Lists" button to drive the purge inside ProjectsPanel.
     @State private var purgeTrigger = false
+    // Pin highlighted via list-view tap — used to scroll+highlight in the photo grid.
+    @State private var highlightedPinID: UUID? = nil
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -171,6 +173,7 @@ struct ContentView: View {
                 photoViewer.restoreOnPhotoMode = false
                 photoViewer.isVisible = true
             }
+            if newMode == .map { highlightedPinID = nil }
         }
     }
 
@@ -355,6 +358,7 @@ struct ContentView: View {
             PhotoGridView(
                 locations: locations,
                 pinnedLocations: allProjectPins.filter { !$0.images.isEmpty },
+                highlightedLocationID: highlightedPinID,
                 onClearSearchResults: clearSearchResults
             )
                 .ignoresSafeArea()
@@ -449,7 +453,13 @@ struct ContentView: View {
     /// exactly as if it were clicked on the map. Activates its list first so it's visible
     /// (unfiled pins are always shown), then centers on it.
     private func selectPin(_ pin: PinnedLocationData) {
-        guard pin.hasGPS, viewMode == .map else { return }
+        if viewMode == .photos {
+            // In photo view, scroll the grid to this pin's photos and highlight them.
+            let id = pin.uuid
+            highlightedPinID = (highlightedPinID == id) ? nil : id
+            return
+        }
+        guard pin.hasGPS else { return }
         let location = pin.asScoutLocation()
         // Toggle: tapping the already-selected pin again closes its popover.
         if selectedLocation?.id == location.id {

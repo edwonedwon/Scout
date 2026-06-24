@@ -998,13 +998,14 @@ struct ScoutMapView {
             pop.behavior = .applicationDefined
             pop.animates = false   // appear instantly on click instead of fading in
 
-            // Anchor to a 1pt rect just above the pin's map coordinate (the view's center).
-            // Using midY keeps the popover the same distance from the coordinate for every
-            // pin size — dots, photos, and scaled variants all appear consistently.
-            // Adjust annotationPopoverOffset to tune the gap for all pin types at once.
+            // Anchor just above the pin's coordinate. For small dot pins (14pt) the naive
+            // midY - offset goes negative (outside bounds), which silently prevents the
+            // popover from appearing. Clamp to bounds.minY so it always stays inside the view.
             let annotationPopoverOffset: CGFloat = 10
+            let anchorY = max(annotationView.bounds.minY,
+                              annotationView.bounds.midY - annotationPopoverOffset)
             let anchor = NSRect(x: annotationView.bounds.midX - 0.5,
-                                y: annotationView.bounds.midY - annotationPopoverOffset, width: 1, height: 1)
+                                y: anchorY, width: 1, height: 1)
             pop.show(relativeTo: anchor, of: annotationView, preferredEdge: .minY)
             activePopover = pop
         }

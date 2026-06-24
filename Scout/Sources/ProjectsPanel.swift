@@ -745,6 +745,11 @@ private struct ProjectDetailView: View {
                 .opacity(0)
                 .allowsHitTesting(false)
                 .disabled(selectedItemIDs.isEmpty)
+            Button("") { selectedItemIDs = [] }
+                .keyboardShortcut("a", modifiers: .shift)
+                .opacity(0)
+                .allowsHitTesting(false)
+                .disabled(selectedItemIDs.isEmpty)
         }
         .onChange(of: project.importedPhotos.count) { normalizeOrder() }
         .onChange(of: project.lists.count) { normalizeOrder() }
