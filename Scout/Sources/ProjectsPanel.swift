@@ -530,17 +530,26 @@ private struct ListRow: View {
             }
             .buttonStyle(.plain)
 
-            Circle()
-                .fill(listColor)
-                .frame(width: 10, height: 10)
-            Text(list.name)
-                .font(.body)
-            Spacer()
-            if !list.pins.isEmpty {
-                Text("\(list.pins.count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Button {
+                onFitToList?(list.pins.filter { $0.hasGPS })
+            } label: {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(listColor)
+                        .frame(width: 10, height: 10)
+                    Text(list.name)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    if !list.pins.isEmpty {
+                        Text("\(list.pins.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             Button {
                 if isActive { activeListIDs.remove(list.persistentModelID) }
                 else { activeListIDs.insert(list.persistentModelID) }
