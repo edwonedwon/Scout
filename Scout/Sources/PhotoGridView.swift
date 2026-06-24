@@ -4,6 +4,7 @@ import ScoutKit
 struct PhotoGridView: View {
     let locations: [ScoutLocation]
     var pinnedLocations: [ScoutLocation] = []
+    var onClearSearchResults: (() -> Void)? = nil
 
     struct PhotoItem: Identifiable {
         let id: Int
@@ -50,7 +51,19 @@ struct PhotoGridView: View {
                             masonryGrid(items: pinnedItems, colWidth: colWidth)
                         }
                         if !searchItems.isEmpty {
-                            sectionHeader("Search Results")
+                            HStack {
+                                sectionHeader("Search Results")
+                                Spacer()
+                                if let onClearSearchResults {
+                                    Button(action: onClearSearchResults) {
+                                        Label("Clear", systemImage: "xmark.circle.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.55))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.trailing, 10)
+                                }
+                            }
                             masonryGrid(items: searchItems, colWidth: colWidth)
                         }
                     }

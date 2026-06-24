@@ -2,6 +2,7 @@ import SwiftUI
 import ScoutKit
 
 struct DebugPanelOverlay: View {
+    var onPurgeOrphanedLists: (() -> Void)? = nil
     @ObservedObject private var logger = DebugLogger.shared
     @State private var isExpanded = false
 
@@ -42,6 +43,16 @@ struct DebugPanelOverlay: View {
                 Text("Debug Log")
                     .font(.caption.bold())
                 Spacer()
+                if let purge = onPurgeOrphanedLists {
+                    Button {
+                        purge()
+                    } label: {
+                        Text("Clear Old Lists")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.orange)
+                }
                 Button {
                     logger.clear()
                 } label: {

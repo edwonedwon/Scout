@@ -74,6 +74,9 @@ struct ContentView: View {
     @AppStorage("ui.showRightPanel") private var showRightPanel = true
     @State private var activeListIDs: Set<PersistentIdentifier> = []
     @AppStorage("nav.activeListUUIDs") private var activeListUUIDs: String = ""
+    @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
+    // Flipped by the debug "Clear Old Lists" button to drive the purge inside ProjectsPanel.
+    @State private var purgeTrigger = false
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -92,6 +95,7 @@ struct ContentView: View {
             if showProjectsPanel {
                 ProjectsPanel(
                     activeListIDs: $activeListIDs,
+                    purgeTrigger: purgeTrigger,
                     onFitToList: { pins in
                         let coords = pins.map(\.coordinate)
                         guard !coords.isEmpty else { return }
@@ -123,11 +127,11 @@ struct ContentView: View {
                 .allowsHitTesting(false)
         }
         .onAppear {
+            locations = []   // clear any stale search results from prior session
             modelContext.undoManager = undoManager
             locationManager.requestIfNeeded()
             centerOnUserIfNeeded()
             backfillPhotos()
-            purgeOrphanedData()
             // allLists is already populated here (SwiftData @Query delivers synchronously).
             if !activeListUUIDs.isEmpty {
                 let uuids = Set(activeListUUIDs.split(separator: ",").map(String.init))
@@ -288,8 +292,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button {
-                        locations = []
-                        selectedLocation = nil
+                        clearSearchResults()
                     } label: {
                         Label("Clear", systemImage: "xmark.circle.fill")
                             .font(.caption)
@@ -341,7 +344,11 @@ struct ContentView: View {
         // - PhotoGrid: never torn down so scroll position survives "Show on Map" round-trips
         ZStack {
             scoutMap
-            PhotoGridView(locations: locations, pinnedLocations: allProjectPins.filter { !$0.images.isEmpty })
+            PhotoGridView(
+                locations: locations,
+                pinnedLocations: allProjectPins.filter { !$0.images.isEmpty },
+                onClearSearchResults: clearSearchResults
+            )
                 .ignoresSafeArea()
                 .opacity(viewMode == .photos ? 1 : 0)
                 .allowsHitTesting(viewMode == .photos)
@@ -493,22 +500,20 @@ struct ContentView: View {
         }
     }
 
-    private func purgeOrphanedData() {
-        // Walk from the projects side (always-valid @Query objects) to collect
-        // UUIDs of lists that legitimately belong to a project. Never touch
-        // list.project directly — if it's a stale FK to a deleted project, any
-        // access causes a SwiftData fatal error.
-        let validListUUIDs = allProjects.flatMap { $0.lists }.map(\.uuid)
-
-        // Use batch delete (operates at SQL level, no in-memory fault firing).
-        if validListUUIDs.isEmpty {
-            try? modelContext.delete(model: LocationListData.self,
-                                     where: #Predicate { $0.parentList == nil })
+    /// AGGRESSIVE manual cleanup (Debug "Clear Old Lists" button): deletes every project,
+    /// list, and pin in the store. When the projects panel is open, the delete MUST happen
+    /// inside ProjectsPanel so the NavigationStack pop and the deletion share one atomic
+    /// transaction (otherwise the @Bindable detail view renders against a deleted project
+    /// mid-animation and crashes). When the panel is closed, no detail view holds a
+    /// project reference, so we can purge directly here.
+    private func clearOldProjectsAndLists() {
+        if showProjectsPanel {
+            purgeTrigger.toggle()   // ProjectsPanel.onChange runs purgeAllProjects atomically
         } else {
-            try? modelContext.delete(model: LocationListData.self,
-                                     where: #Predicate { !validListUUIDs.contains($0.uuid) && $0.parentList == nil })
+            activeListIDs = []
+            openProjectUUID = ""
+            purgeAllProjects(modelContext)
         }
-        try? modelContext.save()
     }
 
     private var scoutMap: some View {
@@ -532,7 +537,7 @@ struct ContentView: View {
             cyclingProvider: cyclingProvider,
             showPhotoAnnotations: showPhotoAnnotations,
             pinScale: pinSize,
-            availableLists: allLists,
+            availableLists: allLists.filter { $0.project != nil },
             onSaveToList: saveToList,
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,
@@ -549,7 +554,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            DebugPanelOverlay()
+            DebugPanelOverlay(onPurgeOrphanedLists: clearOldProjectsAndLists)
                 .padding(.top, 58)
                 .padding(.leading, 16)
         }
@@ -961,6 +966,14 @@ struct ContentView: View {
     private func fitMapToResults() {
         let coords = locations.map(\.coordinate)
         mapController.fit(coords, animated: true)
+    }
+
+    /// Clears the current search results everywhere they appear: the right-panel list,
+    /// the map pins, and the "Search Results" section of the photo grid (all driven by
+    /// the shared `locations` state).
+    private func clearSearchResults() {
+        locations = []
+        selectedLocation = nil
     }
 }
 

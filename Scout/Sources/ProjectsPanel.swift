@@ -53,6 +53,53 @@ func loadImageURLs(from providers: [NSItemProvider]) async -> [URL] {
 /// Adjust this to clear the traffic light buttons in the sidebar.
 private let sidebarTopPadding: CGFloat = 35
 
+/// Deletes EVERY project, list, and pin in the store via SwiftData batch deletes,
+/// logging counts before and after. Must be called only after any open-project detail
+/// view has been popped/unmounted (see the purgeTrigger handler), so no @Bindable view
+/// is bound to a model being deleted.
+@MainActor
+func purgeAllProjects(_ context: ModelContext) {
+    let projects = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
+    let listsBefore = (try? context.fetch(FetchDescriptor<LocationListData>())) ?? []
+
+    DebugLogger.shared.log("--- BEFORE PURGE ---", level: .warning, tag: "Purge")
+    DebugLogger.shared.log("Projects (\(projects.count)):", level: .info, tag: "Purge")
+    for p in projects {
+        DebugLogger.shared.log("  📁 \"\(p.name)\" — \(p.lists.count) lists, \(p.importedPhotos.count) photos", level: .info, tag: "Purge")
+        for list in p.lists {
+            DebugLogger.shared.log("    📋 \"\(list.name)\" — \(list.pins.count) pins", level: .info, tag: "Purge")
+        }
+    }
+    let orphans = listsBefore.filter { $0.project == nil }
+    if !orphans.isEmpty {
+        DebugLogger.shared.log("Orphaned lists (\(orphans.count)):", level: .info, tag: "Purge")
+        for list in orphans {
+            DebugLogger.shared.log("  📋 \"\(list.name)\" (no project)", level: .info, tag: "Purge")
+        }
+    }
+
+    // Delete in a SEPARATE ModelContext on the same container. Two reasons:
+    //  1) No crash — the main context's @Query observers (ContentView.projectPins, the
+    //     root project ForEach, the `allLists` query that feeds "Save to List") refresh
+    //     ASYNCHRONOUSLY when the background save propagates, instead of synchronously
+    //     mid-save where they'd re-render against an invalidated model and fault.
+    //  2) The menu actually clears — `context.delete(model:)` batch deletes don't reliably
+    //     refresh existing @Query results (and silently no-op on the self-referential
+    //     list relationship), which left stale lists in the "Save to List" menu. Deleting
+    //     real objects per-instance here propagates cleanly to every @Query.
+    let purge = ModelContext(context.container)
+    for pin in (try? purge.fetch(FetchDescriptor<PinnedLocationData>())) ?? [] { purge.delete(pin) }
+    for list in (try? purge.fetch(FetchDescriptor<LocationListData>())) ?? [] { purge.delete(list) }
+    for project in (try? purge.fetch(FetchDescriptor<ProjectData>())) ?? [] { purge.delete(project) }
+    try? purge.save()
+
+    let projectsAfter = (try? purge.fetch(FetchDescriptor<ProjectData>())) ?? []
+    let listsAfter = (try? purge.fetch(FetchDescriptor<LocationListData>())) ?? []
+    DebugLogger.shared.log("--- AFTER PURGE ---", level: .warning, tag: "Purge")
+    DebugLogger.shared.log("Projects remaining: \(projectsAfter.count)", level: projectsAfter.isEmpty ? .success : .error, tag: "Purge")
+    DebugLogger.shared.log("Lists remaining: \(listsAfter.count)", level: listsAfter.isEmpty ? .success : .error, tag: "Purge")
+}
+
 // MARK: - Projects panel
 
 struct ProjectsPanel: View {
@@ -60,6 +107,9 @@ struct ProjectsPanel: View {
     @Query(sort: \ProjectData.createdAt) private var projects: [ProjectData]
 
     @Binding var activeListIDs: Set<PersistentIdentifier>
+    /// Toggled by the debug "Clear Old Lists" button. Flipping it runs the full purge
+    /// here (where navPath lives) so nav-pop + delete happen in one atomic transaction.
+    var purgeTrigger: Bool = false
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
     var onSelectPin: ((PinnedLocationData) -> Void)? = nil
     var onClearPin: (() -> Void)? = nil
@@ -99,6 +149,23 @@ struct ProjectsPanel: View {
         }
         .onChange(of: navPath) { _, path in
             openProjectUUID = path.first?.uuid.uuidString ?? ""
+        }
+        // Debug "Clear Old Lists": pop the open project's detail view, THEN delete.
+        // The nav pop must be un-animated so the @Bindable ProjectDetailView unmounts in
+        // the next frame (an animated pop keeps it alive ~300ms). We then delete on a
+        // later runloop, after SwiftUI has torn the detail view down — otherwise the
+        // synchronous @Query refresh that save() triggers re-renders a view bound to a
+        // deleted project and crashes.
+        .onChange(of: purgeTrigger) { _, _ in
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) { navPath = [] }
+            openProjectUUID = ""
+            expandedListUUIDs = ""
+            activeListIDs = []
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                purgeAllProjects(modelContext)
+            }
         }
         .sheet(isPresented: $showAddProject) {
             NameEntrySheet(
@@ -371,6 +438,40 @@ private struct ProjectDetailView: View {
         return true
     }
 
+    /// Moves `pin` and all other selected pins (if pin is in the selection) into `list`.
+    private func movePinsToList(_ primaryPin: PinnedLocationData, intoList list: LocationListData, afterPin: PinnedLocationData? = nil) {
+        // Collect all pins to move: the primary one plus any other selected pins.
+        var allPins: [PinnedLocationData] = [primaryPin]
+        if selectedItemIDs.contains(primaryPin.persistentModelID) {
+            for id in selectedItemIDs where id != primaryPin.persistentModelID {
+                if let pin = findPin(byID: id) { allPins.append(pin) }
+            }
+        }
+        for pin in allPins {
+            guard pin.list?.persistentModelID != list.persistentModelID else { continue }
+            detach(pin)
+            if let after = afterPin, allPins.count == 1,
+               let idx = list.pins.firstIndex(where: { $0.persistentModelID == after.persistentModelID }) {
+                list.pins.insert(pin, at: idx + 1)
+            } else {
+                list.pins.append(pin)
+            }
+            pin.list = list
+        }
+        for (i, p) in list.pins.enumerated() { p.sortOrder = i }
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// Finds a pin anywhere in the project by its PersistentIdentifier.
+    private func findPin(byID id: PersistentIdentifier) -> PinnedLocationData? {
+        if let p = project.importedPhotos.first(where: { $0.persistentModelID == id }) { return p }
+        for list in project.lists {
+            if let p = list.pins.first(where: { $0.persistentModelID == id }) { return p }
+        }
+        return nil
+    }
+
     /// Loads drag payload and moves the pin into a list, optionally after a specific pin.
     private func loadDropPin(_ providers: [NSItemProvider], intoList list: LocationListData, afterPin: PinnedLocationData? = nil) -> Bool {
         guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
@@ -384,16 +485,7 @@ private struct ProjectDetailView: View {
                 else if dragID.hasPrefix("photo:") { uuid = String(dragID.dropFirst(6)) }
                 else { return }
                 guard let pin = findPin(uuid: uuid) else { return }
-                detach(pin)
-                if let after = afterPin, let idx = list.pins.firstIndex(where: { $0.persistentModelID == after.persistentModelID }) {
-                    list.pins.insert(pin, at: idx + 1)
-                } else {
-                    list.pins.append(pin)
-                }
-                pin.list = list
-                for (i, p) in list.pins.enumerated() { p.sortOrder = i }
-                normalizeOrder()
-                try? modelContext.save()
+                movePinsToList(pin, intoList: list, afterPin: afterPin)
             }
         }
         return true
@@ -409,13 +501,9 @@ private struct ProjectDetailView: View {
             guard let pin = findPin(uuid: uuid) else { return false }
             switch target {
             case .list(let list):
-                // Move into this list.
+                // Move pin (and any other selected pins) into this list.
                 if pin.list?.persistentModelID == list.persistentModelID { return false }
-                detach(pin)
-                pin.list = list
-                list.pins.append(pin)
-                for (i, p) in list.pins.enumerated() { p.sortOrder = i }
-                normalizeOrder()
+                movePinsToList(pin, intoList: list)
             case .photo(let targetPin):
                 // Move out to top-level, placed near the target photo.
                 detach(pin)
@@ -423,8 +511,8 @@ private struct ProjectDetailView: View {
                 pin.panelOrder = targetPin.panelOrder
                 project.importedPhotos.append(pin)
                 normalizeOrder()
+                try? modelContext.save()
             }
-            try? modelContext.save()
             return true
         }
 
@@ -432,14 +520,9 @@ private struct ProjectDetailView: View {
         guard let dragged = resolve(dragID) else { return false }
         if dragged.id == target.id { return false }
 
-        // Top-level photo dragged onto a list → move into list.
+        // Top-level photo dragged onto a list → move into list (with multi-select support).
         if case .photo(let pin) = dragged, case .list(let list) = target {
-            detach(pin)
-            pin.list = list
-            list.pins.append(pin)
-            for (i, p) in list.pins.enumerated() { p.sortOrder = i }
-            normalizeOrder()
-            try? modelContext.save()
+            movePinsToList(pin, intoList: list)
             return true
         }
 
@@ -467,6 +550,64 @@ private struct ProjectDetailView: View {
         try? modelContext.save()
     }
 
+    /// Deletes a single pin, whether it's a top-level photo or lives inside a list.
+    private func deletePin(_ pin: PinnedLocationData) {
+        if let list = pin.list {
+            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
+        } else {
+            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+        }
+        modelContext.delete(pin)
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// Deletes every currently-selected sidebar item — top-level photos, pins inside
+    /// lists, and whole lists alike. Resolves all targets first, then deletes, so we never
+    /// re-read a relationship mid-mutation.
+    private func deleteSelectedItems() {
+        let ids = selectedItemIDs
+        guard !ids.isEmpty else { return }
+        var pinsToDelete: [PinnedLocationData] = []
+        var listsToDelete: [LocationListData] = []
+        for id in ids {
+            if let pin = findPin(byID: id) {
+                pinsToDelete.append(pin)
+            } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
+                listsToDelete.append(list)
+            }
+        }
+        for pin in pinsToDelete {
+            if let list = pin.list {
+                list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
+            } else {
+                project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+            }
+            modelContext.delete(pin)
+        }
+        for list in listsToDelete {
+            activeListIDs.remove(list.persistentModelID)
+            modelContext.delete(list)
+        }
+        selectedItemIDs = []
+        anchorItemID = nil
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// True when `id` is part of a multi-item selection (used to switch context-menu
+    /// actions and labels between single-item and whole-selection delete).
+    private func isInMultiSelection(_ id: PersistentIdentifier) -> Bool {
+        selectedItemIDs.count > 1 && selectedItemIDs.contains(id)
+    }
+
+    /// "Delete Photos (3)" when the selection is all photos/pins, else "Delete Items (3)".
+    private var deleteSelectionLabel: String {
+        let allPhotos = selectedItemIDs.allSatisfy { findPin(byID: $0) != nil }
+        return allPhotos ? "Delete Photos (\(selectedItemIDs.count))"
+                         : "Delete Items (\(selectedItemIDs.count))"
+    }
+
     var body: some View {
         List {
             Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
@@ -489,8 +630,8 @@ private struct ProjectDetailView: View {
                     .padding(.horizontal, 4)
             )
             .listRowBackground(Color.clear)
-            .onDrop(of: [.text], isTargeted: $topLevelDropTargeted) { providers in
-                loadDropToTopLevel(providers, atTop: true)
+            .onDrop(of: [.text, .fileURL, .image], isTargeted: $topLevelDropTargeted) { providers in
+                tryImportDrop(providers, into: nil) || loadDropToTopLevel(providers, atTop: true)
             }
 
             ForEach(sidebarItems) { item in
@@ -507,17 +648,16 @@ private struct ProjectDetailView: View {
                         }
                     )
                     .contextMenu {
+                        let multi = isInMultiSelection(pin.persistentModelID)
                         Button(role: .destructive) {
-                            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-                            modelContext.delete(pin)
-                            try? modelContext.save()
+                            if multi { deleteSelectedItems() } else { deletePin(pin) }
                         } label: {
-                            Label("Delete Photo", systemImage: "trash")
+                            Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
                         }
                     }
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        loadDrop(providers, onto: .photo(pin))
+                    .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
+                        tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .photo(pin))
                     }
                 case .list(let list):
                     let isExpanded = expandedListIDs.contains(list.persistentModelID)
@@ -538,8 +678,8 @@ private struct ProjectDetailView: View {
                         onSelectPin: onSelectPin
                     )
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
-                    .onDrop(of: [.text], isTargeted: nil) { providers in
-                        loadDrop(providers, onto: .list(list))
+                    .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
+                        tryImportDrop(providers, into: list) || loadDrop(providers, onto: .list(list))
                     }
 
                     if isExpanded {
@@ -558,9 +698,17 @@ private struct ProjectDetailView: View {
                             )
                             .padding(.leading, 24)
                             .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+                            .contextMenu {
+                                let multi = isInMultiSelection(pin.persistentModelID)
+                                Button(role: .destructive) {
+                                    if multi { deleteSelectedItems() } else { deletePin(pin) }
+                                } label: {
+                                    Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
+                                }
+                            }
                             .onDrag { NSItemProvider(object: "pin:\(pin.uuid.uuidString)" as NSString) }
-                            .onDrop(of: [.text], isTargeted: nil) { providers in
-                                loadDropPin(providers, intoList: list, afterPin: pin)
+                            .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
+                                tryImportDrop(providers, into: list) || loadDropPin(providers, intoList: list, afterPin: pin)
                             }
                         }
                     }
@@ -572,8 +720,8 @@ private struct ProjectDetailView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 80)
                 .listRowBackground(Color.clear)
-                .onDrop(of: [.text], isTargeted: nil) { providers in
-                    loadDropToTopLevel(providers, atTop: false)
+                .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
+                    tryImportDrop(providers, into: nil) || loadDropToTopLevel(providers, atTop: false)
                 }
         }
         .onAppear {
@@ -585,6 +733,18 @@ private struct ProjectDetailView: View {
                                  .map(\.persistentModelID)
                 )
             }
+        }
+        // Delete key removes the current selection. A hidden keyboard-shortcut button is
+        // used instead of `.onDeleteCommand` because the latter makes the List a focus
+        // sink on macOS, which blocks click-to-focus on TextFields elsewhere in the window
+        // (e.g. the Google Maps search box). Disabled when nothing is selected so it never
+        // swallows Backspace; a focused TextField consumes Backspace itself anyway.
+        .background {
+            Button("", action: deleteSelectedItems)
+                .keyboardShortcut(.delete, modifiers: [])
+                .opacity(0)
+                .allowsHitTesting(false)
+                .disabled(selectedItemIDs.isEmpty)
         }
         .onChange(of: project.importedPhotos.count) { normalizeOrder() }
         .onChange(of: project.lists.count) { normalizeOrder() }
@@ -639,8 +799,20 @@ private struct ProjectDetailView: View {
         panel.allowedContentTypes = [.image]
         guard panel.runModal() == .OK else { return }
         let urls = panel.urls
-        Task { @MainActor in
-            let results = await PhotoImportService.importPhotos(from: urls, into: nil)
+        Task { @MainActor in await importImageURLs(urls, into: nil) }
+    }
+
+    /// Imports photo files into a list (or top-level when `list` is nil), inserting the
+    /// pins and wiring their relationship. Shared by the Import menu and Finder drag-drop.
+    @MainActor
+    private func importImageURLs(_ urls: [URL], into list: LocationListData?) async {
+        let results = await PhotoImportService.importPhotos(from: urls, into: list)
+        if let list {
+            for result in results {
+                modelContext.insert(result.pin)
+                result.pin.list = list
+            }
+        } else {
             var nextOrder = sidebarItems.count
             for result in results {
                 result.pin.panelOrder = nextOrder
@@ -648,8 +820,26 @@ private struct ProjectDetailView: View {
                 modelContext.insert(result.pin)
                 project.importedPhotos.append(result.pin)
             }
-            try? modelContext.save()
         }
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// If `providers` carry Finder image files, kicks off an import into `list`
+    /// (top-level when nil) and returns true. Returns false for internal reorder drags
+    /// (plain-text drag ids), so the caller can fall back to its move/reorder handler.
+    private func tryImportDrop(_ providers: [NSItemProvider], into list: LocationListData?) -> Bool {
+        let hasFiles = providers.contains {
+            $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) ||
+            $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+        }
+        guard hasFiles else { return false }
+        Task { @MainActor in
+            let urls = await loadImageURLs(from: providers)
+            guard !urls.isEmpty else { return }
+            await importImageURLs(urls, into: list)
+        }
+        return true
     }
 }
 

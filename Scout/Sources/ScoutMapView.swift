@@ -998,13 +998,13 @@ struct ScoutMapView {
             pop.behavior = .applicationDefined
             pop.animates = false   // appear instantly on click instead of fading in
 
-            // Anchor to a 1pt rect at the TOP-CENTER of the annotation view, not its center,
-            // so the popover clears the whole pin/photo instead of overlapping its top half.
-            // bounds is the actual on-screen size (small dot vs. a scaled photo), so the gap
-            // automatically tracks the photo size. .minY puts the popover above the pin
-            // (arrow pointing down); NSPopover auto-flips below only when there isn't room.
+            // Anchor to a 1pt rect just above the pin's map coordinate (the view's center).
+            // Using midY keeps the popover the same distance from the coordinate for every
+            // pin size — dots, photos, and scaled variants all appear consistently.
+            // Adjust annotationPopoverOffset to tune the gap for all pin types at once.
+            let annotationPopoverOffset: CGFloat = 10
             let anchor = NSRect(x: annotationView.bounds.midX - 0.5,
-                                y: annotationView.bounds.minY, width: 1, height: 1)
+                                y: annotationView.bounds.midY - annotationPopoverOffset, width: 1, height: 1)
             pop.show(relativeTo: anchor, of: annotationView, preferredEdge: .minY)
             activePopover = pop
         }
