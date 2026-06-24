@@ -351,7 +351,7 @@ struct ContentView: View {
             .padding(.horizontal, 8)
         }
         .overlay {
-            if photoViewer.isVisible {
+            if photoViewer.isVisible && viewMode == .map {
                 PhotoViewerOverlay(availableLists: allLists, onSave: savePinned)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
