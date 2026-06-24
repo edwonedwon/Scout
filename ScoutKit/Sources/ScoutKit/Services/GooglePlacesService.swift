@@ -5,7 +5,10 @@ public actor GooglePlacesService {
     public static let shared = GooglePlacesService()
 
     private let baseURL = URL(string: "https://places.googleapis.com/v1/places:searchText")!
-    private let fieldMask = "places.id,places.displayName,places.location,places.formattedAddress,places.googleMapsUri,places.rating,places.userRatingCount,places.photos"
+    // Keep this to Places "Pro" SKU fields only. `rating`/`userRatingCount` are
+    // "Enterprise" SKU fields (more expensive per request) and aren't used anywhere in
+    // the app, so requesting them just inflated every Text Search bill.
+    private let fieldMask = "places.id,places.displayName,places.location,places.formattedAddress,places.googleMapsUri,places.photos"
 
     private var apiKey: String? {
         KeychainService.load(forKey: KeychainService.googleMapsAPIKey)

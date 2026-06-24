@@ -79,6 +79,10 @@ struct ContentView: View {
     @State private var purgeTrigger = false
     // Pin highlighted via list-view tap — used to scroll+highlight in the photo grid.
     @State private var highlightedPinID: UUID? = nil
+    // Cached pin arrays so asScoutLocation() isn't called on every ContentView body render.
+    // Rebuilt only when the underlying SwiftData queries or activeListIDs actually change.
+    @State private var cachedProjectPins: [(ScoutLocation, String)] = []
+    @State private var cachedAllProjectPins: [ScoutLocation] = []
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -112,6 +116,7 @@ struct ContentView: View {
                         mapController.fit(coords, animated: true)
                     },
                     onSelectPin: selectPin,
+                    onZoomToPin: zoomToPin,
                     onClearPin: { selectedLocation = nil }
                 )
                     .frame(width: 240)
@@ -137,6 +142,7 @@ struct ContentView: View {
                 .allowsHitTesting(false)
         }
         .onAppear {
+            rebuildPinCaches()
             locations = []   // clear any stale search results from prior session
             modelContext.undoManager = undoManager
             locationManager.requestIfNeeded()
@@ -163,7 +169,14 @@ struct ContentView: View {
             let uuids = allLists.filter { ids.contains($0.persistentModelID) }
                                 .map(\.uuid.uuidString)
             activeListUUIDs = uuids.joined(separator: ",")
+            rebuildPinCaches()
         }
+        // Rebuild pin caches when SwiftData delivers new query results (inserts, deletes,
+        // property changes like hasGPS flipping after timeline backfill).
+        .onChange(of: allPins.count)      { rebuildPinCaches() }
+        .onChange(of: unfiledPins.count)  { rebuildPinCaches() }
+        .onChange(of: allLists.count)     { rebuildPinCaches() }
+        .onChange(of: allProjects.count)  { rebuildPinCaches() }
         .onChange(of: rightPanelTab) { _, _ in
             locations = []
             selectedLocation = nil
@@ -357,7 +370,7 @@ struct ContentView: View {
             scoutMap
             PhotoGridView(
                 locations: locations,
-                pinnedLocations: allProjectPins.filter { !$0.images.isEmpty },
+                pinnedLocations: cachedAllProjectPins.filter { !$0.images.isEmpty },
                 highlightedLocationID: highlightedPinID,
                 onClearSearchResults: clearSearchResults
             )
@@ -423,30 +436,23 @@ struct ContentView: View {
 
     private static let generalPinColor = "#E53935"   // red for unfiled pins
 
-    private var projectPins: [(ScoutLocation, String)] {
+    private func rebuildPinCaches() {
         let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
-        var result = active.flatMap { list in
-            // GPS-less imported photos don't appear on the map (no coordinate).
+        var mapPins: [(ScoutLocation, String)] = active.flatMap { list in
             list.pins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), list.colorHex) }
         }
-        // Project-level imported photos (not inside any list).
         for project in allProjects {
-            result += project.importedPhotos.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
+            mapPins += project.importedPhotos.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
         }
-        // General (unfiled) pins are always visible, with a default color.
-        result += unfiledPins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
-        return result
-    }
+        mapPins += unfiledPins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
+        cachedProjectPins = mapPins
 
-    /// Pins for the Photos grid — visible lists + project-level photos, no GPS filter.
-    private var allProjectPins: [ScoutLocation] {
-        let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
-        var result = active.flatMap { $0.pins }.map { $0.asScoutLocation() }
+        var gridPins: [ScoutLocation] = active.flatMap { $0.pins }.map { $0.asScoutLocation() }
         for project in allProjects {
-            result += project.importedPhotos.map { $0.asScoutLocation() }
+            gridPins += project.importedPhotos.map { $0.asScoutLocation() }
         }
-        result += unfiledPins.map { $0.asScoutLocation() }
-        return result
+        gridPins += unfiledPins.map { $0.asScoutLocation() }
+        cachedAllProjectPins = gridPins
     }
 
     /// Tapping a saved pin in the sidebar selects it on the map and shows its popover —
@@ -471,6 +477,25 @@ struct ContentView: View {
         }
         selectedLocation = location
         mapController.pan(to: location.coordinate, animated: true)
+    }
+
+    /// Double-clicking a sidebar pin: switch to the map if needed, then center AND zoom
+    /// into the pin (unlike single-click selectPin, which preserves the current zoom).
+    private func zoomToPin(_ pin: PinnedLocationData) {
+        guard pin.hasGPS else { return }
+        let location = pin.asScoutLocation()
+        let wasMap = (viewMode == .map)
+        if !wasMap {
+            withAnimation(.spring(duration: 0.3)) { viewMode = .map }
+        }
+        if let listID = pin.list?.persistentModelID {
+            activeListIDs.insert(listID)
+        }
+        selectedLocation = location
+        // Delay the camera move when coming from photo view so the map is laid out first.
+        let zoom = { mapController.center(on: location.coordinate, meters: 800, animated: true) }
+        if wasMap { zoom() }
+        else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { zoom() } }
     }
 
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
@@ -538,7 +563,7 @@ struct ContentView: View {
         ScoutMapView(
             selection: $selectedLocation,
             locations: locations,
-            projectPins: projectPins,
+            projectPins: cachedProjectPins,
             scrollToZoom: scrollToZoom,
             initialRegion: initialRegion,
             controller: mapController,
@@ -551,6 +576,7 @@ struct ContentView: View {
             isDrawingMode: searchArea.isDrawing,
             searchPolygon: searchArea.polygon,
             onPolygonComplete: { coords in searchArea.setPolygon(coords) },
+            onFrameAllPins: frameAllProjectPins,
             mapType: mapStyle.mapType,
             cyclingProvider: cyclingProvider,
             showPhotoAnnotations: showPhotoAnnotations,
@@ -983,6 +1009,14 @@ struct ContentView: View {
 
     private func fitMapToResults() {
         let coords = locations.map(\.coordinate)
+        mapController.fit(coords, animated: true)
+    }
+
+    /// Frames every GPS pin in the open project (active-list pins, project photos, and
+    /// unfiled pins — i.e. everything currently on the map for this project). Bound to "f".
+    private func frameAllProjectPins() {
+        let coords = cachedProjectPins.map { $0.0.coordinate }
+        guard !coords.isEmpty else { return }
         mapController.fit(coords, animated: true)
     }
 

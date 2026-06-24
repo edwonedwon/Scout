@@ -106,7 +106,8 @@ struct PhotoGridView: View {
                         MasonryCell(
                             item: item,
                             width: colWidth,
-                            isHighlighted: highlightedLocationID == item.location.id
+                            isHighlighted: highlightedLocationID == item.location.id,
+                            onTap: { openCarousel(from: item) }
                         )
                         .id(item.id)
                     }
@@ -114,12 +115,29 @@ struct PhotoGridView: View {
             }
         }
     }
+
+    private func openCarousel(from item: PhotoItem) {
+        // Build the full ordered universe: pinned locations first, then search locations.
+        // Deduplicate by id so a location that appears in both doesn't get counted twice.
+        var seen = Set<UUID>()
+        let all = (pinnedItems + searchItems).compactMap { i -> ScoutLocation? in
+            guard seen.insert(i.location.id).inserted else { return nil }
+            return i.location
+        }
+        PhotoViewerState.shared.show(
+            images: item.location.images,
+            startingAt: item.indexInLocation,
+            location: item.location,
+            allLocations: all
+        )
+    }
 }
 
 private struct MasonryCell: View {
     let item: PhotoGridView.PhotoItem
     let width: CGFloat
     var isHighlighted: Bool = false
+    var onTap: (() -> Void)? = nil
     @State private var isHovered = false
 
     var body: some View {
@@ -158,13 +176,7 @@ private struct MasonryCell: View {
             isHovered = inside
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
-        .onTapGesture {
-            PhotoViewerState.shared.show(
-                images: item.location.images,
-                startingAt: item.indexInLocation,
-                location: item.location
-            )
-        }
+        .onTapGesture { onTap?() }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.2), value: isHighlighted)
     }

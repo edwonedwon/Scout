@@ -241,6 +241,33 @@ final class ZoomableMapView: MKMapView {
     }
     var onPolygonComplete: (([CLLocationCoordinate2D]) -> Void)?
     var onBuildAnnotationMenu: ((ScoutLocation) -> NSMenu?)?
+    /// Fired when the user presses "f" with the map focused (frame all project pins).
+    var onFrameAllPins: (() -> Void)?
+
+    // The map accepts key events so "f" works when the map (not a text field) is focused.
+    // When a TextField elsewhere is first responder, this view isn't, so typing "f" there
+    // is unaffected.
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.isEmpty, event.charactersIgnoringModifiers == "f" {
+            onFrameAllPins?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Take key focus so "f" works without a prior click — but never steal focus from
+        // a text field the user is actively editing (NSText is the field editor).
+        guard let w = window, !(w.firstResponder is NSText) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let w = self.window, !(w.firstResponder is NSText) else { return }
+            w.makeFirstResponder(self)
+        }
+    }
 
     private var drawPoints: [CGPoint] = []
     private var drawingLayer: CAShapeLayer?
@@ -444,9 +471,22 @@ final class ZoomableMapView: MKMapView {
     /// Hit-tested against each pin's full on-screen frame, so the whole photo — border
     /// included — is hoverable.
     private func applyHover(at point: CGPoint) {
+        // Query MapKit's spatial index for just the annotations near the cursor instead of
+        // scanning every visible annotation. With thousands of pins this turns an O(visible)
+        // scan on every mouse-move into O(handful). The probe radius covers the largest pin
+        // (a 50pt photo, scaled) plus margin so a pin whose center sits just outside the
+        // cursor still registers.
+        let probeRadius: CGFloat = 60
+        let rect = CGRect(x: point.x - probeRadius, y: point.y - probeRadius,
+                          width: probeRadius * 2, height: probeRadius * 2)
+        let c1 = MKMapPoint(convert(CGPoint(x: rect.minX, y: rect.minY), toCoordinateFrom: self))
+        let c2 = MKMapPoint(convert(CGPoint(x: rect.maxX, y: rect.maxY), toCoordinateFrom: self))
+        let probe = MKMapRect(x: min(c1.x, c2.x), y: min(c1.y, c2.y),
+                              width: abs(c1.x - c2.x), height: abs(c1.y - c2.y))
+
         var best: MKAnnotationView?
         var bestDist = CGFloat.infinity
-        for ann in annotations(in: visibleMapRect).prefix(400) {
+        for ann in annotations(in: probe) {
             guard let mkAnn = ann as? (any MKAnnotation),
                   let av = view(for: mkAnn),
                   av is ScoutDotAnnotationView || av is ScoutPhotoAnnotationView else { continue }
@@ -735,6 +775,7 @@ struct ScoutMapView {
     var isDrawingMode: Bool = false
     var searchPolygon: [CLLocationCoordinate2D]? = nil
     var onPolygonComplete: ([CLLocationCoordinate2D]) -> Void = { _ in }
+    var onFrameAllPins: () -> Void = {}
     var mapType: MKMapType = .standard
     var cyclingProvider: CyclingTileProvider? = nil
     var showPhotoAnnotations: Bool = false
@@ -779,6 +820,7 @@ struct ScoutMapView {
             zoomable.scrollZoomEnabled = scrollToZoom
             zoomable.isDrawingMode = isDrawingMode
             zoomable.onPolygonComplete = onPolygonComplete
+            zoomable.onFrameAllPins = onFrameAllPins
             zoomable.onBuildAnnotationMenu = { [weak coordinator = context.coordinator] location in
                 coordinator?.buildAnnotationMenu(for: location)
             }
@@ -865,16 +907,39 @@ struct ScoutMapView {
         /// against the desired set and swaps them only when they differ. Keyed by
         /// id + tint + first photo URL, so a recolor (moved to another list) or a photo
         /// arriving later (offline backfill) refreshes the pin while stable pins are left alone.
+        // Cheap content signatures (no per-pin string allocation) so the common case —
+        // updateMap fired for an unrelated reason while the pin set is unchanged — bails
+        // out in O(n) hashing instead of O(n) string building + two Set<String> allocations.
+        private var lastSearchSig: Int = 0
+        private var lastProjectSig: Int = 0
+
         func syncAnnotations(_ map: MKMapView, desired: [(ScoutLocation, String?)], projectPins: Bool) {
+            var hasher = Hasher()
+            for (loc, tint) in desired {
+                hasher.combine(loc.id)
+                hasher.combine(tint)
+                hasher.combine(loc.images.first?.url)
+            }
+            let sig = hasher.finalize()
+            if projectPins {
+                if sig == lastProjectSig { return }
+            } else {
+                if sig == lastSearchSig { return }
+            }
+
             func key(_ loc: ScoutLocation, _ tint: String?) -> String {
                 "\(loc.id)|\(tint ?? "")|\(loc.images.first?.url?.absoluteString ?? "")"
             }
             let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { $0.isProjectPin == projectPins }
             let currentKeys = Set(current.map { key($0.location, $0.tintHex) })
             let newKeys = Set(desired.map { key($0.0, $0.1) })
-            guard currentKeys != newKeys else { return }
+            guard currentKeys != newKeys else {
+                if projectPins { lastProjectSig = sig } else { lastSearchSig = sig }
+                return
+            }
             map.removeAnnotations(current)
             map.addAnnotations(desired.map { LocationAnnotation($0.0, isProjectPin: projectPins, tintHex: $0.1) })
+            if projectPins { lastProjectSig = sig } else { lastSearchSig = sig }
         }
 
         func syncSelection(_ map: MKMapView, selection: ScoutLocation?) {
@@ -949,8 +1014,17 @@ struct ScoutMapView {
             }
         }
 
+        private var regionSaveWork: DispatchWorkItem?
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-            parent.onRegionEnd(mapView.region)
+            // Debounce: during scroll-zoom / pan this fires every display frame. Writing
+            // the region straight through hits @AppStorage every frame, which re-renders
+            // ContentView → updateMap → syncAnnotations (O(pins)) on every frame and tanks
+            // the framerate. Coalesce to a single write after the gesture settles.
+            regionSaveWork?.cancel()
+            let region = mapView.region
+            let work = DispatchWorkItem { [weak self] in self?.parent.onRegionEnd(region) }
+            regionSaveWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
 
         #if os(macOS)

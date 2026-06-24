@@ -11,13 +11,30 @@ typealias ScoutImageType = UIImage
 #endif
 
 /// The single loader for every remote photo in the app (sidebar, carousel, grid, and
-/// map pins). One in-memory cache, one request builder.
+/// map pins). One in-memory cache, one request builder, plus a persistent on-disk cache so
+/// each remote photo (notably billable Google Place Photos) is fetched over the network at
+/// most once — ever, across relaunches — instead of being re-billed on every view.
 enum PhotoLoader {
     private static let cache: NSCache<NSURL, ScoutImageType> = {
         let c = NSCache<NSURL, ScoutImageType>()
         c.countLimit = 200
         return c
     }()
+
+    /// On-disk byte cache for remote images. Keyed by a stable hash of the URL.
+    private static let diskCacheDir: URL = {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("ScoutRemotePhotos", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private static func diskURL(for url: URL) -> URL {
+        // FNV-1a hash of the absolute URL → stable filename, no collisions in practice.
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in url.absoluteString.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        return diskCacheDir.appendingPathComponent(String(hash, radix: 16))
+    }
 
     /// Builds the request for a photo URL. For Google Places URLs it strips any baked-in
     /// `?key=` param and sends the key as the `X-Goog-Api-Key` header instead — sending both
@@ -38,11 +55,18 @@ enum PhotoLoader {
 
     static func cached(_ url: URL) -> ScoutImageType? { cache.object(forKey: url as NSURL) }
 
-    /// Raw bytes for a photo URL — local files read directly, remote via `request(for:)`.
+    /// Raw bytes for a photo URL — local files read directly; remote URLs are served from
+    /// the on-disk cache when present, otherwise fetched once and persisted. This is what
+    /// stops repeated/relaunched views of the same Google Place Photo from re-billing.
     static func data(for url: URL) async -> Data? {
         if url.isFileURL { return try? Data(contentsOf: url) }
+
+        let disk = diskURL(for: url)
+        if let cached = try? Data(contentsOf: disk) { return cached }
+
         guard let (data, resp) = try? await URLSession.shared.data(for: request(for: url)),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        try? data.write(to: disk)
         return data
     }
 
@@ -278,7 +302,7 @@ struct PhotoViewerOverlay: View {
                                 .font(.system(size: 36))
                                 .symbolRenderingMode(.hierarchical)
                                 .foregroundStyle(.white)
-                                .opacity(viewer.selectedIndex > 0 ? 1 : 0.2)
+                                .opacity(viewer.hasPrevious ? 1 : 0.2)
                                 .frame(width: 60, height: 60)
                                 .contentShape(Rectangle())
                         }
@@ -291,7 +315,7 @@ struct PhotoViewerOverlay: View {
                                 .font(.system(size: 36))
                                 .symbolRenderingMode(.hierarchical)
                                 .foregroundStyle(.white)
-                                .opacity(viewer.selectedIndex < viewer.images.count - 1 ? 1 : 0.2)
+                                .opacity(viewer.hasNext ? 1 : 0.2)
                                 .frame(width: 60, height: 60)
                                 .contentShape(Rectangle())
                         }

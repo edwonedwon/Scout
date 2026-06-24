@@ -112,6 +112,7 @@ struct ProjectsPanel: View {
     var purgeTrigger: Bool = false
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
     var onSelectPin: ((PinnedLocationData) -> Void)? = nil
+    var onZoomToPin: ((PinnedLocationData) -> Void)? = nil
     var onClearPin: (() -> Void)? = nil
 
     /// Persisted open project (stored as UUID string, resolved to ProjectData on load).
@@ -133,6 +134,7 @@ struct ProjectsPanel: View {
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
                         onSelectPin: onSelectPin,
+                        onZoomToPin: onZoomToPin,
                         onClearPin: onClearPin,
                         onExpandedChanged: { uuids in
                             expandedListUUIDs = uuids.joined(separator: ",")
@@ -241,6 +243,20 @@ struct ProjectsPanel: View {
     }
 }
 
+// MARK: - Sidebar selection model
+
+/// Holds the sidebar's multi-selection as a reference type. The parent owns this via
+/// plain `@State` (NOT `@StateObject`), so mutating the set does NOT re-render the parent
+/// or rebuild the row list. Only the rows themselves observe it via `@ObservedObject`, and
+/// because the List is lazy, only the handful of on-screen rows ever repaint — selecting
+/// thousands of off-screen rows is an O(1) set assignment with no visual work.
+private final class SidebarSelection: ObservableObject {
+    @Published var ids: Set<PersistentIdentifier> = []
+    var anchor: PersistentIdentifier? = nil
+
+    func contains(_ id: PersistentIdentifier) -> Bool { ids.contains(id) }
+}
+
 // MARK: - Sidebar item (unified photo + list)
 
 private enum SidebarItem: Identifiable {
@@ -286,6 +302,7 @@ private struct ProjectDetailView: View {
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onSelectPin: ((PinnedLocationData) -> Void)?
+    var onZoomToPin: ((PinnedLocationData) -> Void)?
     var onClearPin: (() -> Void)?
     var onExpandedChanged: (([String]) -> Void)? = nil
 
@@ -294,13 +311,20 @@ private struct ProjectDetailView: View {
     @State private var newListName = ""
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
     @State private var topLevelDropTargeted = false
-    @State private var selectedItemIDs: Set<PersistentIdentifier> = []
-    @State private var anchorItemID: PersistentIdentifier? = nil
+    @State private var isBackfilling = false
+    // Selection lives in a reference-type model owned via plain @State (not @StateObject),
+    // so changing it never re-renders this view or rebuilds the row list. Only the visible
+    // rows observe it, so shift-selecting thousands of off-screen rows is instant.
+    @State private var selection = SidebarSelection()
+    // Cached sidebar items — rebuilt only when photos/lists actually change,
+    // not on every render triggered by selection or scroll state.
+    @State private var cachedSidebarItems: [SidebarItem] = []
 
-    /// Flat ordered list of all currently visible item IDs, including expanded list pins.
+    /// Flat ordered list of every currently visible row id (including expanded list pins),
+    /// used to resolve a shift-click range.
     private var flatVisibleIDs: [PersistentIdentifier] {
         var result: [PersistentIdentifier] = []
-        for item in sidebarItems {
+        for item in cachedSidebarItems {
             switch item {
             case .photo(let pin):
                 result.append(pin.persistentModelID)
@@ -308,54 +332,72 @@ private struct ProjectDetailView: View {
                 result.append(list.persistentModelID)
                 if expandedListIDs.contains(list.persistentModelID) {
                     result.append(contentsOf:
-                        list.pins.sorted { $0.sortOrder < $1.sortOrder }.map(\.persistentModelID)
-                    )
+                        list.pins.sorted { $0.sortOrder < $1.sortOrder }.map(\.persistentModelID))
                 }
             }
         }
         return result
     }
 
-    /// Central selection handler. Shift-click extends the range from the anchor;
-    /// plain click sets a new single selection and updates the anchor.
-    private func select(_ id: PersistentIdentifier, isShift: Bool,
-                        mapAction: (() -> Void)? = nil) {
-        if isShift, let anchor = anchorItemID {
-            let flat = flatVisibleIDs
-            if let a = flat.firstIndex(of: anchor), let b = flat.firstIndex(of: id) {
-                selectedItemIDs = Set(flat[min(a,b)...max(a,b)])
+    /// Single click selects just this row (and fires the map side effect). Shift-click
+    /// extends the range from the anchor. All in code — only on-screen rows repaint.
+    private func handleTap(_ id: PersistentIdentifier, shift: Bool) {
+        if shift, let anchor = selection.anchor {
+            let order = flatVisibleIDs
+            if let a = order.firstIndex(of: anchor), let b = order.firstIndex(of: id) {
+                selection.ids = Set(order[min(a, b)...max(a, b)])
+            } else {
+                selection.ids = [id]; selection.anchor = id
             }
-            // Range select: don't move map
-        } else {
-            selectedItemIDs = [id]
-            anchorItemID = id
-            mapAction?()
+            return   // range select: no map nav
+        }
+        selection.ids = [id]
+        selection.anchor = id
+        if let pin = findPin(byID: id) {
+            if pin.hasGPS { onSelectPin?(pin) } else { onClearPin?() }
+        } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
+            onClearPin?()
+            onFitToList?(list.pins.filter { $0.hasGPS })
         }
     }
 
-    private var sidebarItems: [SidebarItem] {
+    /// Double-click zooms into a pin (or fits to a list).
+    private func handleDoubleTap(_ id: PersistentIdentifier) {
+        if let pin = findPin(byID: id) {
+            onZoomToPin?(pin)
+        } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
+            onFitToList?(list.pins.filter { $0.hasGPS })
+        }
+    }
+
+    private func rebuildSidebarItems() {
         let photos = project.importedPhotos.map { SidebarItem.photo($0) }
         let lists = project.lists.filter { $0.parentList == nil }.map { SidebarItem.list($0) }
-        // Use createdAt as a stable tiebreaker so equal panelOrder values don't shuffle.
-        return (photos + lists).sorted {
+        cachedSidebarItems = (photos + lists).sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
         }
     }
 
-    /// Assigns sequential panelOrder values based on the current stable sort.
-    /// Call on appear and whenever the item count changes to fix any gaps or duplicates.
+    // Use cachedSidebarItems everywhere the old sidebarItems was used.
+    private var sidebarItems: [SidebarItem] { cachedSidebarItems }
+
+    /// Assigns sequential panelOrder values. Debounced so rapid imports (200 photos)
+    /// don't fire 200 consecutive full-list writes.
     private func normalizeOrder() {
-        for (i, item) in sidebarItems.enumerated() {
+        // Rebuild the display list first so it's current.
+        rebuildSidebarItems()
+        // Normalize panelOrder values — only write when stale to avoid cascading updates.
+        for (i, item) in cachedSidebarItems.enumerated() {
             switch item {
             case .photo(let p): if p.panelOrder != i { p.panelOrder = i }
-            case .list(let l): if l.panelOrder != i { l.panelOrder = i }
+            case .list(let l):  if l.panelOrder != i { l.panelOrder = i }
             }
         }
     }
 
     /// Resolves a drag id ("photo:<uuid>" / "list:<uuid>") to its live SidebarItem.
     private func resolve(_ dragID: String) -> SidebarItem? {
-        sidebarItems.first { $0.dragID == dragID }
+        cachedSidebarItems.first { $0.dragID == dragID }
     }
 
     /// Finds a pin anywhere in the project — top-level or inside any list.
@@ -442,8 +484,8 @@ private struct ProjectDetailView: View {
     private func movePinsToList(_ primaryPin: PinnedLocationData, intoList list: LocationListData, afterPin: PinnedLocationData? = nil) {
         // Collect all pins to move: the primary one plus any other selected pins.
         var allPins: [PinnedLocationData] = [primaryPin]
-        if selectedItemIDs.contains(primaryPin.persistentModelID) {
-            for id in selectedItemIDs where id != primaryPin.persistentModelID {
+        if selection.contains(primaryPin.persistentModelID) {
+            for id in selection.ids where id != primaryPin.persistentModelID {
                 if let pin = findPin(byID: id) { allPins.append(pin) }
             }
         }
@@ -566,7 +608,7 @@ private struct ProjectDetailView: View {
     /// lists, and whole lists alike. Resolves all targets first, then deletes, so we never
     /// re-read a relationship mid-mutation.
     private func deleteSelectedItems() {
-        let ids = selectedItemIDs
+        let ids = selection.ids
         guard !ids.isEmpty else { return }
         var pinsToDelete: [PinnedLocationData] = []
         var listsToDelete: [LocationListData] = []
@@ -589,8 +631,7 @@ private struct ProjectDetailView: View {
             activeListIDs.remove(list.persistentModelID)
             modelContext.delete(list)
         }
-        selectedItemIDs = []
-        anchorItemID = nil
+        selection.ids = []
         normalizeOrder()
         try? modelContext.save()
     }
@@ -598,14 +639,14 @@ private struct ProjectDetailView: View {
     /// True when `id` is part of a multi-item selection (used to switch context-menu
     /// actions and labels between single-item and whole-selection delete).
     private func isInMultiSelection(_ id: PersistentIdentifier) -> Bool {
-        selectedItemIDs.count > 1 && selectedItemIDs.contains(id)
+        selection.ids.count > 1 && selection.ids.contains(id)
     }
 
     /// "Delete Photos (3)" when the selection is all photos/pins, else "Delete Items (3)".
     private var deleteSelectionLabel: String {
-        let allPhotos = selectedItemIDs.allSatisfy { findPin(byID: $0) != nil }
-        return allPhotos ? "Delete Photos (\(selectedItemIDs.count))"
-                         : "Delete Items (\(selectedItemIDs.count))"
+        let allPhotos = selection.ids.allSatisfy { findPin(byID: $0) != nil }
+        return allPhotos ? "Delete Photos (\(selection.ids.count))"
+                         : "Delete Items (\(selection.ids.count))"
     }
 
     var body: some View {
@@ -639,13 +680,9 @@ private struct ProjectDetailView: View {
                 case .photo(let pin):
                     PinRow(
                         pin: pin,
-                        isSelected: selectedItemIDs.contains(pin.persistentModelID),
-                        onSelectPin: { p in
-                            let isShift = NSEvent.modifierFlags.contains(.shift)
-                            select(p.persistentModelID, isShift: isShift, mapAction: {
-                                if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
-                            })
-                        }
+                        selection: selection,
+                        onTap: { shift in handleTap(pin.persistentModelID, shift: shift) },
+                        onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
                     )
                     .contextMenu {
                         let multi = isInMultiSelection(pin.persistentModelID)
@@ -664,18 +701,15 @@ private struct ProjectDetailView: View {
                     ListRow(
                         list: list,
                         isExpanded: isExpanded,
-                        isSelected: selectedItemIDs.contains(list.persistentModelID),
+                        selection: selection,
                         onToggleExpand: {
                             if isExpanded { expandedListIDs.remove(list.persistentModelID) }
                             else { expandedListIDs.insert(list.persistentModelID) }
                         },
-                        onSelect: {
-                            let isShift = NSEvent.modifierFlags.contains(.shift)
-                            select(list.persistentModelID, isShift: isShift, mapAction: { onClearPin?() })
-                        },
+                        onTap: { shift in handleTap(list.persistentModelID, shift: shift) },
+                        onDoubleTap: { handleDoubleTap(list.persistentModelID) },
                         activeListIDs: $activeListIDs,
-                        onFitToList: onFitToList,
-                        onSelectPin: onSelectPin
+                        onFitToList: onFitToList
                     )
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
                     .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
@@ -687,14 +721,10 @@ private struct ProjectDetailView: View {
                         ForEach(pins) { pin in
                             PinRow(
                                 pin: pin,
-                                isSelected: selectedItemIDs.contains(pin.persistentModelID),
+                                selection: selection,
                                 listColor: Color(hexString: list.colorHex),
-                                onSelectPin: { p in
-                                    let isShift = NSEvent.modifierFlags.contains(.shift)
-                                    select(p.persistentModelID, isShift: isShift, mapAction: {
-                                        if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
-                                    })
-                                }
+                                onTap: { shift in handleTap(pin.persistentModelID, shift: shift) },
+                                onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
                             )
                             .padding(.leading, 24)
                             .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
@@ -737,19 +767,17 @@ private struct ProjectDetailView: View {
         // Delete key removes the current selection. A hidden keyboard-shortcut button is
         // used instead of `.onDeleteCommand` because the latter makes the List a focus
         // sink on macOS, which blocks click-to-focus on TextFields elsewhere in the window
-        // (e.g. the Google Maps search box). Disabled when nothing is selected so it never
-        // swallows Backspace; a focused TextField consumes Backspace itself anyway.
+        // (e.g. the Google Maps search box). The actions no-op on an empty selection, and a
+        // focused TextField consumes the key itself, so these never interfere with typing.
         .background {
             Button("", action: deleteSelectedItems)
                 .keyboardShortcut(.delete, modifiers: [])
                 .opacity(0)
                 .allowsHitTesting(false)
-                .disabled(selectedItemIDs.isEmpty)
-            Button("") { selectedItemIDs = [] }
+            Button("") { selection.ids = []; selection.anchor = nil }
                 .keyboardShortcut("a", modifiers: .shift)
                 .opacity(0)
                 .allowsHitTesting(false)
-                .disabled(selectedItemIDs.isEmpty)
         }
         .onChange(of: project.importedPhotos.count) { normalizeOrder() }
         .onChange(of: project.lists.count) { normalizeOrder() }
@@ -773,6 +801,12 @@ private struct ProjectDetailView: View {
                     Button { importPhotos() } label: {
                         Label("Import Photos", systemImage: "photo.badge.plus")
                     }
+                    Divider()
+                    Button { pickTimelineAndBackfill() } label: {
+                        Label(isBackfilling ? "Importing Timeline…" : "Import Google Maps Timeline",
+                              systemImage: "location.circle")
+                    }
+                    .disabled(isBackfilling)
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -805,6 +839,29 @@ private struct ProjectDetailView: View {
         guard panel.runModal() == .OK else { return }
         let urls = panel.urls
         Task { @MainActor in await importImageURLs(urls, into: nil) }
+    }
+
+    /// Picks a Google Maps Timeline JSON export and backfills GPS onto photos that lack it
+    /// by matching their EXIF capture time to the timeline's locations.
+    private func pickTimelineAndBackfill() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Google Maps Timeline JSON"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        isBackfilling = true
+        DebugLogger.shared.log("Timeline import started…", level: .info)
+        let context = modelContext
+        Task {
+            let result = await TimelineGeoService.backfill(timelineURL: url, context: context)
+            isBackfilling = false
+            DebugLogger.shared.log(
+                "Timeline import done — timezone: \(result.detectedTimezone), updated: \(result.updated), skipped: \(result.skipped), failed: \(result.failed)",
+                level: result.failed > 0 ? .warning : .success
+            )
+        }
     }
 
     /// Imports photo files into a list (or top-level when `list` is nil), inserting the
@@ -853,19 +910,22 @@ private struct ProjectDetailView: View {
 private struct ListRow: View {
     let list: LocationListData
     let isExpanded: Bool
-    var isSelected: Bool = false
+    @ObservedObject var selection: SidebarSelection
     let onToggleExpand: () -> Void
-    var onSelect: (() -> Void)? = nil
+    var onTap: ((Bool) -> Void)? = nil
+    var onDoubleTap: (() -> Void)? = nil
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
-    var onSelectPin: ((PinnedLocationData) -> Void)?
     @Environment(\.modelContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
     private var listColor: Color { Color(hexString: list.colorHex) }
+    private var isSelected: Bool { selection.contains(list.persistentModelID) }
 
     var body: some View {
         HStack(spacing: 6) {
+            // Chevron and eye are Buttons so clicking them toggles expand/visibility
+            // without selecting the row.
             Button(action: onToggleExpand) {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption)
@@ -875,27 +935,18 @@ private struct ListRow: View {
             }
             .buttonStyle(.plain)
 
-            Button {
-                onSelect?()
-                onFitToList?(list.pins.filter { $0.hasGPS })
-            } label: {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(listColor)
-                        .frame(width: 10, height: 10)
-                    Text(list.name)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    if !list.pins.isEmpty {
-                        Text("\(list.pins.count)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .contentShape(Rectangle())
+            Circle()
+                .fill(listColor)
+                .frame(width: 10, height: 10)
+            Text(list.name)
+                .font(.body)
+                .foregroundStyle(.primary)
+            Spacer()
+            if !list.pins.isEmpty {
+                Text("\(list.pins.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
             Button {
                 if isActive { activeListIDs.remove(list.persistentModelID) }
                 else { activeListIDs.insert(list.persistentModelID) }
@@ -915,6 +966,8 @@ private struct ListRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
         )
+        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift)) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
         .contextMenu {
             Button {
                 if isActive { activeListIDs.remove(list.persistentModelID) }
@@ -945,40 +998,38 @@ private struct ListRow: View {
 
 private struct PinRow: View {
     let pin: PinnedLocationData
-    var isSelected: Bool = false
+    @ObservedObject var selection: SidebarSelection
     var listColor: Color? = nil
-    var onSelectPin: ((PinnedLocationData) -> Void)?
+    var onTap: ((Bool) -> Void)? = nil
+    var onDoubleTap: (() -> Void)? = nil
+
+    private var isSelected: Bool { selection.contains(pin.persistentModelID) }
 
     var body: some View {
-        Button {
-            onSelectPin?(pin)
-        } label: {
-            HStack(spacing: 10) {
-                thumbnail
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(listColor ?? .clear, lineWidth: 2)
-                    )
-                    .allowsHitTesting(false)
+        HStack(spacing: 10) {
+            thumbnail
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(listColor ?? .clear, lineWidth: 2)
+                )
+                .allowsHitTesting(false)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(pin.name)
-                        .font(.body)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    if !pin.hasGPS {
-                        Label("No GPS", systemImage: "location.slash")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(pin.name)
+                    .font(.body)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                if !pin.hasGPS {
+                    Label("No GPS", systemImage: "location.slash")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
-                Spacer()
             }
-            .contentShape(Rectangle())
+            Spacer()
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .padding(.vertical, 2)
         .background(
             RoundedRectangle(cornerRadius: 8)
@@ -988,29 +1039,27 @@ private struct PinRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
         )
+        // Single click selects (instant); double click zooms. Manual handling — no native
+        // List selection — so selecting thousands is an O(1) set write with no per-row work.
+        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift)) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
     }
 
     @ViewBuilder
     private var thumbnail: some View {
-        if let filename = pin.photoFiles.first {
-            AsyncImage(url: PinPhotoStore.fileURL(filename)) { img in
-                img.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
+        let url: URL? = pin.photoFiles.first.map { PinPhotoStore.fileURL($0) }
+            ?? pin.imageURL.flatMap { URL(string: $0) }
+        if let url {
+            // GooglePhotoImage uses PhotoLoader's shared NSCache — thumbnails are decoded
+            // once and reused on scroll, unlike AsyncImage which has no cache.
+            GooglePhotoImage(url: url) {
                 Color.secondary.opacity(0.2)
             }
-        } else if let urlString = pin.imageURL, let url = URL(string: urlString) {
-            AsyncImage(url: url) { img in
-                img.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Color.secondary.opacity(0.2)
-            }
+            .aspectRatio(contentMode: .fill)
         } else {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.secondary.opacity(0.15))
-                .overlay(
-                    Image(systemName: "mappin")
-                        .foregroundStyle(.secondary)
-                )
+                .overlay(Image(systemName: "mappin").foregroundStyle(.secondary))
         }
     }
 }

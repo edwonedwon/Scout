@@ -7,12 +7,12 @@ struct DebugPanelOverlay: View {
     @State private var isExpanded = false
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
+            toggleButton
             if isExpanded {
                 panel
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            toggleButton
         }
         .animation(.spring(duration: 0.25), value: isExpanded)
     }
@@ -112,6 +112,6 @@ struct DebugPanelOverlay: View {
 #Preview("Debug panel") {
     DebugPanelOverlay()
         .padding()
-        .frame(width: 420, height: 320, alignment: .topLeading)
+        .frame(width: 500, height: 320, alignment: .topLeading)
 }
 #endif

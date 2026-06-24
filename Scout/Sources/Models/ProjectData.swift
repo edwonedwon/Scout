@@ -90,6 +90,10 @@ final class PinnedLocationData {
     // Whether this pin has a real GPS coordinate. False for photos imported without EXIF GPS.
     // GPS-less pins appear in the list sidebar but not on the map.
     var hasGPS: Bool = true
+    // True when this pin's GPS came from a Google Timeline backfill (not the original file's
+    // EXIF). Re-running the timeline import may overwrite these, but never pins whose GPS
+    // came from the original photo file (gpsFromTimeline == false && hasGPS == true).
+    var gpsFromTimeline: Bool = false
     // Capture time from EXIF — reserved for a future Google Timeline sync feature that
     // will derive coordinates for GPS-less imported photos from Timeline movement data.
     var dateTaken: Date? = nil
