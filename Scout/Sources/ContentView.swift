@@ -51,6 +51,7 @@ struct ContentView: View {
     }
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.undoManager) private var undoManager
     @Query(sort: \LocationListData.createdAt) private var allLists: [LocationListData]
     // General pins not attached to any list — always shown on the map.
     // Pins not attached to any list or project — always shown on the map.
@@ -120,6 +121,7 @@ struct ContentView: View {
                 .allowsHitTesting(false)
         }
         .onAppear {
+            modelContext.undoManager = undoManager
             locationManager.requestIfNeeded()
             centerOnUserIfNeeded()
             backfillPhotos()
