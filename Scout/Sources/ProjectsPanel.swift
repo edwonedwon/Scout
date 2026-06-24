@@ -179,6 +179,7 @@ private struct ProjectDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var showAddList = false
     @State private var newListName = ""
+    @State private var expandedListIDs: Set<PersistentIdentifier> = []
 
     private var sidebarItems: [SidebarItem] {
         let photos = project.importedPhotos.map { SidebarItem.photo($0) }
@@ -286,8 +287,14 @@ private struct ProjectDetailView: View {
                             loadDrop(providers, onto: .photo(pin))
                         }
                 case .list(let list):
+                    let isExpanded = expandedListIDs.contains(list.persistentModelID)
                     ListRow(
                         list: list,
+                        isExpanded: isExpanded,
+                        onToggleExpand: {
+                            if isExpanded { expandedListIDs.remove(list.persistentModelID) }
+                            else { expandedListIDs.insert(list.persistentModelID) }
+                        },
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
                         onSelectPin: onSelectPin
@@ -295,6 +302,15 @@ private struct ProjectDetailView: View {
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
                     .onDrop(of: [.text], isTargeted: nil) { providers in
                         loadDrop(providers, onto: .list(list))
+                    }
+
+                    if isExpanded {
+                        let pins = list.pins.sorted { $0.sortOrder < $1.sortOrder }
+                        ForEach(pins) { pin in
+                            PinRow(pin: pin, onSelectPin: onSelectPin)
+                                .padding(.leading, 24)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+                        }
                     }
                 }
             }
@@ -360,10 +376,12 @@ private struct ProjectDetailView: View {
     }
 }
 
-// MARK: - List row (tap to toggle active, navigate to see pins)
+// MARK: - List row (expand in place to see pins)
 
 private struct ListRow: View {
     let list: LocationListData
+    let isExpanded: Bool
+    let onToggleExpand: () -> Void
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onSelectPin: ((PinnedLocationData) -> Void)?
@@ -373,32 +391,37 @@ private struct ListRow: View {
     private var listColor: Color { Color(hexString: list.colorHex) }
 
     var body: some View {
-        NavigationLink {
-            ListDetailView(list: list, onSelectPin: onSelectPin)
-        } label: {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(listColor)
-                    .frame(width: 10, height: 10)
-                Text(list.name)
-                    .font(.body)
-                Spacer()
-                if !list.pins.isEmpty {
-                    Text("\(list.pins.count)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Button {
-                    if isActive { activeListIDs.remove(list.persistentModelID) }
-                    else { activeListIDs.insert(list.persistentModelID) }
-                } label: {
-                    Image(systemName: isActive ? "eye.fill" : "eye")
-                        .foregroundStyle(isActive ? listColor : .secondary)
-                }
-                .buttonStyle(.plain)
+        HStack(spacing: 6) {
+            Button(action: onToggleExpand) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
             }
-            .padding(.vertical, 2)
+            .buttonStyle(.plain)
+
+            Circle()
+                .fill(listColor)
+                .frame(width: 10, height: 10)
+            Text(list.name)
+                .font(.body)
+            Spacer()
+            if !list.pins.isEmpty {
+                Text("\(list.pins.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                if isActive { activeListIDs.remove(list.persistentModelID) }
+                else { activeListIDs.insert(list.persistentModelID) }
+            } label: {
+                Image(systemName: isActive ? "eye.fill" : "eye")
+                    .foregroundStyle(isActive ? listColor : .secondary)
+            }
+            .buttonStyle(.plain)
         }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
         .contextMenu {
             Button {
                 if isActive { activeListIDs.remove(list.persistentModelID) }
@@ -422,39 +445,6 @@ private struct ListRow: View {
                 Label("Delete List", systemImage: "trash")
             }
         }
-    }
-}
-
-// MARK: - List detail (pins within a list)
-
-private struct ListDetailView: View {
-    let list: LocationListData
-    var onSelectPin: ((PinnedLocationData) -> Void)?
-    @Environment(\.modelContext) private var modelContext
-
-    var sorted: [PinnedLocationData] {
-        list.pins.sorted { $0.sortOrder < $1.sortOrder }
-    }
-
-    var body: some View {
-        List {
-            ForEach(sorted) { pin in
-                PinRow(pin: pin, onSelectPin: onSelectPin)
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            modelContext.delete(pin)
-                        } label: {
-                            Label("Remove from List", systemImage: "minus.circle")
-                        }
-                    }
-            }
-            .onMove { indices, newOffset in
-                var arr = sorted
-                arr.move(fromOffsets: indices, toOffset: newOffset)
-                for (i, pin) in arr.enumerated() { pin.sortOrder = i }
-            }
-        }
-        .navigationTitle(list.name)
     }
 }
 
