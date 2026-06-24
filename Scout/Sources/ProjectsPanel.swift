@@ -8,14 +8,10 @@ import UniformTypeIdentifiers
 
 let imageExtensions: Set<String> = ["jpg","jpeg","png","heic","heif","tiff","tif","webp","gif","bmp","raw","arw","cr2","nef","dng"]
 
-/// Extracts file URLs from NSItemProvider items produced by Finder drags.
-/// Uses NSURL (not loadItem) because that's what Finder actually vends.
-/// Returns only image files by extension.
 func loadImageURLs(from providers: [NSItemProvider]) async -> [URL] {
     await withTaskGroup(of: URL?.self) { group in
         for provider in providers {
             group.addTask {
-                // Try NSURL first — this is what Finder drag-and-drop provides.
                 if provider.canLoadObject(ofClass: NSURL.self) {
                     return await withCheckedContinuation { cont in
                         _ = provider.loadObject(ofClass: NSURL.self) { reading, _ in
@@ -28,7 +24,6 @@ func loadImageURLs(from providers: [NSItemProvider]) async -> [URL] {
                         }
                     }
                 }
-                // Fallback: raw loadItem for public.file-url
                 if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                     return await withCheckedContinuation { cont in
                         provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
@@ -55,17 +50,8 @@ func loadImageURLs(from providers: [NSItemProvider]) async -> [URL] {
     }
 }
 
-// MARK: - Shared drag state for moving/reordering saved pins
-//
-// Rather than serialize a pin identity through the pasteboard (which proved
-// unreliable across separate ListCard views), we hold the actual dragged pin
-// in a shared object. The drop reads the exact in-memory reference — no
-// serialization, no UUID lookup, works identically within and across lists.
-
-final class PinDragState: ObservableObject {
-    var draggedPin: PinnedLocationData?
-    var draggedList: LocationListData?
-}
+/// Adjust this to clear the traffic light buttons in the sidebar.
+private let sidebarTopPadding: CGFloat = 35
 
 // MARK: - Projects panel
 
@@ -77,35 +63,21 @@ struct ProjectsPanel: View {
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
     var onSelectPin: ((PinnedLocationData) -> Void)? = nil
 
+    @State private var selectedProject: ProjectData? = nil
     @State private var showAddProject = false
     @State private var newProjectName = ""
-    @State private var addingListTo: ProjectData?
-    @State private var newListName = ""
-    @AppStorage("sidebar.showPinPhotos") private var showPinPhotos = false
-    @StateObject private var dragState = PinDragState()
 
     var body: some View {
-        VStack(spacing: 0) {
-            panelHeader
-            Divider()
-
-            if projects.isEmpty {
-                ContentUnavailableView(
-                    "No Projects",
-                    systemImage: "folder.badge.plus",
-                    description: Text("Create a project to organize your scouting locations.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        ForEach(projects) { project in
-                            projectSection(project)
-                        }
-                    }
-                    .padding(12)
+        NavigationStack {
+            projectList
+                .navigationDestination(for: ProjectData.self) { project in
+                    ProjectDetailView(
+                        project: project,
+                        activeListIDs: $activeListIDs,
+                        onFitToList: onFitToList,
+                        onSelectPin: onSelectPin
+                    )
                 }
-            }
         }
         .sheet(isPresented: $showAddProject) {
             NameEntrySheet(
@@ -119,75 +91,255 @@ struct ProjectsPanel: View {
                 showAddProject = false
             }
         }
-        .sheet(item: $addingListTo) { project in
+    }
+
+    private var projectList: some View {
+        List {
+            Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
+            ForEach(projects) { project in
+                NavigationLink(value: project) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(project.name)
+                            .font(.headline)
+                        let total = project.lists.count + project.importedPhotos.count
+                        if total > 0 {
+                            Text("\(project.lists.count) lists · \(project.importedPhotos.count) photos")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .contextMenu {
+                    Button(role: .destructive) {
+                        modelContext.delete(project)
+                        try? modelContext.save()
+                    } label: {
+                        Label("Delete Project", systemImage: "trash")
+                    }
+                }
+            }
+        }
+        .navigationTitle("Projects")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { showAddProject = true } label: {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Sidebar item (unified photo + list)
+
+private enum SidebarItem: Identifiable {
+    case photo(PinnedLocationData)
+    case list(LocationListData)
+
+    var id: PersistentIdentifier {
+        switch self {
+        case .photo(let p): return p.persistentModelID
+        case .list(let l): return l.persistentModelID
+        }
+    }
+
+    var panelOrder: Int {
+        switch self {
+        case .photo(let p): return p.panelOrder
+        case .list(let l): return l.panelOrder
+        }
+    }
+
+    var createdAt: Date {
+        switch self {
+        case .photo(let p): return p.createdAt
+        case .list(let l): return l.createdAt
+        }
+    }
+
+    /// Stable drag identifier: "photo:<uuid>" or "list:<uuid>". Transferred as a
+    /// plain String, which round-trips through the pasteboard with no UTType setup.
+    var dragID: String {
+        switch self {
+        case .photo(let p): return "photo:\(p.uuid.uuidString)"
+        case .list(let l): return "list:\(l.uuid.uuidString)"
+        }
+    }
+}
+
+// MARK: - Project detail (unified reorderable list)
+
+private struct ProjectDetailView: View {
+    @Bindable var project: ProjectData
+    @Binding var activeListIDs: Set<PersistentIdentifier>
+    var onFitToList: (([PinnedLocationData]) -> Void)?
+    var onSelectPin: ((PinnedLocationData) -> Void)?
+
+    @Environment(\.modelContext) private var modelContext
+    @State private var showAddList = false
+    @State private var newListName = ""
+
+    private var sidebarItems: [SidebarItem] {
+        let photos = project.importedPhotos.map { SidebarItem.photo($0) }
+        let lists = project.lists.filter { $0.parentList == nil }.map { SidebarItem.list($0) }
+        // Use createdAt as a stable tiebreaker so equal panelOrder values don't shuffle.
+        return (photos + lists).sorted {
+            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+        }
+    }
+
+    /// Assigns sequential panelOrder values based on the current stable sort.
+    /// Call on appear and whenever the item count changes to fix any gaps or duplicates.
+    private func normalizeOrder() {
+        for (i, item) in sidebarItems.enumerated() {
+            switch item {
+            case .photo(let p): if p.panelOrder != i { p.panelOrder = i }
+            case .list(let l): if l.panelOrder != i { l.panelOrder = i }
+            }
+        }
+    }
+
+    /// Resolves a drag id ("photo:<uuid>" / "list:<uuid>") to its live SidebarItem.
+    private func resolve(_ dragID: String) -> SidebarItem? {
+        sidebarItems.first { $0.dragID == dragID }
+    }
+
+    /// Loads the dragged String from `providers` (async) and applies the drop on
+    /// the main actor. Using NSItemProvider-based onDrop fires reliably on every
+    /// drop, unlike .dropDestination which only works once inside a List on macOS.
+    private func loadDrop(_ providers: [NSItemProvider], onto target: SidebarItem) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
+        }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let dragID = object as? String else { return }
+            Task { @MainActor in
+                _ = handleDrop([dragID], onto: target)
+            }
+        }
+        return true
+    }
+
+    /// Handles a drop of `ids` onto `target`. Returns true if anything changed.
+    private func handleDrop(_ ids: [String], onto target: SidebarItem) -> Bool {
+        guard let id = ids.first, let dragged = resolve(id) else { return false }
+        // Don't act when dropping an item onto itself.
+        if dragged.id == target.id { return false }
+
+        // Dragging a photo onto a list moves it into that list.
+        if case .photo(let pin) = dragged, case .list(let list) = target {
+            moveIntoList(pin, list)
+            return true
+        }
+
+        // Otherwise reorder: place the dragged item where the target sits.
+        reorder(dragged, before: target)
+        return true
+    }
+
+    /// Moves a project photo into a list and removes it from the top-level sidebar.
+    private func moveIntoList(_ pin: PinnedLocationData, _ list: LocationListData) {
+        project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+        pin.owningProject = nil
+        pin.sortOrder = list.pins.count
+        pin.list = list
+        list.pins.append(pin)
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// Reorders `dragged` to sit at `target`'s current position in the sidebar.
+    private func reorder(_ dragged: SidebarItem, before target: SidebarItem) {
+        var items = sidebarItems
+        guard let from = items.firstIndex(where: { $0.id == dragged.id }) else { return }
+        let moving = items.remove(at: from)
+        guard let to = items.firstIndex(where: { $0.id == target.id }) else { return }
+        items.insert(moving, at: to)
+        for (i, item) in items.enumerated() {
+            switch item {
+            case .photo(let p): p.panelOrder = i
+            case .list(let l): l.panelOrder = i
+            }
+        }
+        try? modelContext.save()
+    }
+
+    var body: some View {
+        List {
+            Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
+            ForEach(sidebarItems) { item in
+                switch item {
+                case .photo(let pin):
+                    PinRow(pin: pin, onSelectPin: onSelectPin)
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+                                modelContext.delete(pin)
+                                try? modelContext.save()
+                            } label: {
+                                Label("Delete Photo", systemImage: "trash")
+                            }
+                        }
+                        .onDrag { NSItemProvider(object: item.dragID as NSString) }
+                        .onDrop(of: [.text], isTargeted: nil) { providers in
+                            loadDrop(providers, onto: .photo(pin))
+                        }
+                case .list(let list):
+                    ListRow(
+                        list: list,
+                        activeListIDs: $activeListIDs,
+                        onFitToList: onFitToList,
+                        onSelectPin: onSelectPin
+                    )
+                    .onDrag { NSItemProvider(object: item.dragID as NSString) }
+                    .onDrop(of: [.text], isTargeted: nil) { providers in
+                        loadDrop(providers, onto: .list(list))
+                    }
+                }
+            }
+        }
+        .onAppear { normalizeOrder() }
+        .onChange(of: project.importedPhotos.count) { normalizeOrder() }
+        .onChange(of: project.lists.count) { normalizeOrder() }
+        .navigationTitle(project.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button {
+                        newListName = ""
+                        showAddList = true
+                    } label: {
+                        Label("New List", systemImage: "list.bullet")
+                    }
+                    Button { importPhotos() } label: {
+                        Label("Import Photos", systemImage: "photo.badge.plus")
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+        .sheet(isPresented: $showAddList) {
             NameEntrySheet(
                 title: "New List in \(project.name)",
                 placeholder: "List name",
                 text: $newListName,
-                onDismiss: { addingListTo = nil }
+                onDismiss: { showAddList = false }
             ) { name in
                 let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
                 let list = LocationListData(name: name, colorHex: colorHex)
-                let topCount = project.lists.filter { $0.parentList == nil }.count
-                list.sortOrder = topCount
+                list.panelOrder = sidebarItems.count
                 modelContext.insert(list)
-                list.project = project   // inverse adds it to project.lists
-                addingListTo = nil
+                list.project = project
+                project.lists.append(list)
+                try? modelContext.save()
+                showAddList = false
             }
         }
     }
 
-    // MARK: - Project section
-
-    private func projectSection(_ project: ProjectData) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            projectHeader(project)
-
-            ImportedPhotosList(project: project, showPhoto: showPinPhotos, onSelectPin: onSelectPin ?? { _ in }, dragState: dragState)
-
-            let topLevel = ordered(project.lists.filter { $0.parentList == nil })
-            ForEach(topLevel) { list in
-                ListCard(list: list, activeListIDs: $activeListIDs, modelContext: modelContext,
-                         showPinPhotos: showPinPhotos, dragState: dragState,
-                         onFitToList: onFitToList, onSelectPin: onSelectPin)
-            }
-
-            // Drop a list here to move it to the end of the top level
-            Color.clear
-                .frame(height: 8)
-                .onDrop(of: [.text], isTargeted: nil) { _ in
-                    guard let dragged = dragState.draggedList else { return false }
-                    moveToTopLevel(dragged, in: project)
-                    dragState.draggedList = nil
-                    return true
-                }
-
-            HStack(spacing: 12) {
-                Button {
-                    newListName = ""
-                    addingListTo = project
-                } label: {
-                    Label("Add List", systemImage: "plus")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    addDummyPhoto(to: project)
-                } label: {
-                    Label("Import Photo", systemImage: "photo.badge.plus")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-        }
-    }
-
-    private func addDummyPhoto(to project: ProjectData) {
+    private func importPhotos() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -196,590 +348,205 @@ struct ProjectsPanel: View {
         let urls = panel.urls
         Task { @MainActor in
             let results = await PhotoImportService.importPhotos(from: urls, into: nil)
+            var nextOrder = sidebarItems.count
             for result in results {
+                result.pin.panelOrder = nextOrder
+                nextOrder += 1
                 modelContext.insert(result.pin)
                 project.importedPhotos.append(result.pin)
             }
             try? modelContext.save()
         }
     }
-
-    private func projectHeader(_ project: ProjectData) -> some View {
-        ProjectHeader(project: project, activeListIDs: $activeListIDs, modelContext: modelContext)
-    }
-
-    private var panelHeader: some View {
-        HStack {
-            Text("Projects")
-                .font(.headline)
-            Spacer()
-            // Photos toggle
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { showPinPhotos.toggle() }
-            } label: {
-                Image(systemName: showPinPhotos ? "photo.fill" : "photo")
-                    .font(.body)
-                    .foregroundStyle(showPinPhotos ? .blue : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help(showPinPhotos ? "Hide photos" : "Show photos")
-
-            Button { showAddProject = true } label: {
-                Image(systemName: "plus").font(.body.weight(.medium))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        #if os(macOS)
-        .padding(.top, 28)
-        #endif
-    }
 }
 
-// MARK: - Project header (own view for @State drop-highlight)
+// MARK: - List row (tap to toggle active, navigate to see pins)
 
-private struct ProjectHeader: View {
-    let project: ProjectData
+private struct ListRow: View {
+    let list: LocationListData
     @Binding var activeListIDs: Set<PersistentIdentifier>
-    let modelContext: ModelContext
+    var onFitToList: (([PinnedLocationData]) -> Void)?
+    var onSelectPin: ((PinnedLocationData) -> Void)?
+    @Environment(\.modelContext) private var modelContext
 
-    @State private var isImageDropTarget = false
-    @State private var importStatusMessage: String? = nil
+    private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
+    private var listColor: Color { Color(hexString: list.colorHex) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(project.name)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(isImageDropTarget ? .blue : .primary)
+        NavigationLink {
+            ListDetailView(list: list, onSelectPin: onSelectPin)
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(listColor)
+                    .frame(width: 10, height: 10)
+                Text(list.name)
+                    .font(.body)
                 Spacer()
-                if let msg = importStatusMessage {
-                    Text(msg)
-                        .font(.caption2)
+                if !list.pins.isEmpty {
+                    Text("\(list.pins.count)")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                        .transition(.opacity)
                 }
                 Button {
-                    for l in project.lists where activeListIDs.contains(l.persistentModelID) {
-                        activeListIDs.remove(l.persistentModelID)
-                    }
-                    modelContext.delete(project)
+                    if isActive { activeListIDs.remove(list.persistentModelID) }
+                    else { activeListIDs.insert(list.persistentModelID) }
                 } label: {
-                    Image(systemName: "trash")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Image(systemName: isActive ? "eye.fill" : "eye")
+                        .foregroundStyle(isActive ? listColor : .secondary)
                 }
                 .buttonStyle(.plain)
             }
             .padding(.vertical, 2)
-            .padding(.horizontal, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(isImageDropTarget ? Color.blue.opacity(0.08) : Color.clear)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .stroke(isImageDropTarget ? Color.blue.opacity(0.4) : Color.clear, lineWidth: 1.5)
-                    )
-            )
-            .animation(.easeInOut(duration: 0.12), value: isImageDropTarget)
         }
-        .onDrop(of: [.fileURL, .image], isTargeted: $isImageDropTarget) { providers in
-            Task {
-                let urls = await loadImageURLs(from: providers)
-                guard !urls.isEmpty else { return }
-                let fmt = DateFormatter()
-                fmt.dateStyle = .medium
-                let listName = "Imported \(fmt.string(from: Date()))"
-                let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
-                let newList = LocationListData(name: listName, colorHex: colorHex)
-                newList.sortOrder = project.lists.filter { $0.parentList == nil }.count
-                modelContext.insert(newList)
-                newList.project = project
-                let results = await PhotoImportService.importPhotos(from: urls, into: newList)
-                var withGPS = 0, withoutGPS = 0
-                for r in results {
-                    modelContext.insert(r.pin)
-                    r.pin.list = newList
-                    if r.hadGPS { withGPS += 1 } else { withoutGPS += 1 }
-                }
-                if results.isEmpty { return }
-                var parts: [String] = []
-                if withGPS > 0 { parts.append("\(withGPS) on map") }
-                if withoutGPS > 0 { parts.append("\(withoutGPS) no GPS") }
-                withAnimation { importStatusMessage = parts.joined(separator: ", ") }
-                try? modelContext.save()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    withAnimation { importStatusMessage = nil }
-                }
-            }
-            return true
-        }
-    }
-}
-
-// MARK: - List card
-
-private struct ListCard: View {
-    let list: LocationListData
-    @Binding var activeListIDs: Set<PersistentIdentifier>
-    let modelContext: ModelContext
-    var showPinPhotos: Bool = false
-    let dragState: PinDragState
-    var onFitToList: (([PinnedLocationData]) -> Void)? = nil
-    var onSelectPin: ((PinnedLocationData) -> Void)? = nil
-
-    @State private var isTargeted = false         // ScoutLocation drop highlight
-    @State private var isPinDropTarget = false    // PinnedPin / nest drop highlight
-    @State private var isPhotoDropTarget = false  // Finder photo drag highlight
-    @State private var isReorderTarget = false    // list-reorder gap highlight
-    @State private var insertBeforeID: PersistentIdentifier? = nil
-    @State private var isExpanded = true
-    @State private var isEditingName = false
-    @State private var editingName = ""
-    @FocusState private var nameFocused: Bool
-    @State private var showImportPicker = false
-    @State private var importStatusMessage: String? = nil
-
-    private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
-    private var listColor: Color { Color(hexString: list.colorHex) }
-    private var isHighlighted: Bool { isTargeted || isPinDropTarget || isPhotoDropTarget }
-
-    private var sortedChildren: [LocationListData] { ordered(list.childLists) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            reorderZone   // drop a list here to place it before this one
-            card
-            if let msg = importStatusMessage {
-                Text(msg)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-            }
-            if isExpanded, !sortedChildren.isEmpty {
-                childListsView
-            }
-        }
-        .fileImporter(
-            isPresented: $showImportPicker,
-            allowedContentTypes: [.image],
-            allowsMultipleSelection: true
-        ) { result in
-            guard case .success(let urls) = result else { return }
-            Task {
-                let results = await PhotoImportService.importPhotos(from: urls, into: list)
-                var withGPS = 0, withoutGPS = 0
-                for r in results {
-                    modelContext.insert(r.pin)
-                    r.pin.list = list
-                    if r.hadGPS { withGPS += 1 } else { withoutGPS += 1 }
-                }
-                if results.isEmpty { return }
-                var parts: [String] = []
-                if withGPS > 0 { parts.append("\(withGPS) placed on map") }
-                if withoutGPS > 0 { parts.append("\(withoutGPS) without GPS (hidden from map)") }
-                importStatusMessage = parts.joined(separator: ", ")
-                try? modelContext.save()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    importStatusMessage = nil
-                }
-            }
-        }
-    }
-
-    /// Thin gap above the card that accepts a dragged list to reorder it before this one.
-    private var reorderZone: some View {
-        RoundedRectangle(cornerRadius: 2)
-            .fill(isReorderTarget ? listColor : Color.clear)
-            .frame(height: isReorderTarget ? 6 : 14)
-            .onDrop(of: [.text], isTargeted: $isReorderTarget) { _ in
-                guard let dragged = dragState.draggedList else { return false }
-                reorderListBefore(dragged, target: list)
-                dragState.draggedList = nil
-                return true
-            }
-    }
-
-    @ViewBuilder
-    private var childListsView: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(sortedChildren) { child in
-                ListCard(list: child, activeListIDs: $activeListIDs, modelContext: modelContext,
-                         showPinPhotos: showPinPhotos, dragState: dragState,
-                         onFitToList: onFitToList, onSelectPin: onSelectPin)
-            }
-            // Drop a list here to append it at the end of this sub-level
-            Color.clear
-                .frame(height: 8)
-                .onDrop(of: [.text], isTargeted: nil) { _ in
-                    guard let dragged = dragState.draggedList else { return false }
-                    nestList(dragged, into: list)
-                    dragState.draggedList = nil
-                    return true
-                }
-        }
-        .padding(.leading, 16)
-        .overlay(alignment: .leading) {
-            // Hierarchy guide line
-            listColor.opacity(0.25).frame(width: 1.5).padding(.vertical, 2)
-        }
-    }
-
-    private var card: some View {
-        VStack(spacing: 0) {
-            cardHeader
-            if isExpanded, !list.pins.isEmpty {
-                Divider()
-                pinnedLocations
-            }
-        }
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(
-                    isHighlighted ? listColor : Color(nsColor: .separatorColor).opacity(0.6),
-                    lineWidth: isHighlighted ? 2 : 1
-                )
-        )
-        .shadow(color: .black.opacity(isHighlighted ? 0.12 : 0.04), radius: isHighlighted ? 6 : 2, y: 1)
-        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
-        // Finder photo drop — must come BEFORE dropDestination so macOS doesn't
-        // let the ScoutLocation handler shadow it for non-matching content types.
-        .onDrop(of: [.fileURL, .image], isTargeted: $isPhotoDropTarget) { providers in
-            Task {
-                let urls = await loadImageURLs(from: providers)
-                guard !urls.isEmpty else { return }
-                let results = await PhotoImportService.importPhotos(from: urls, into: list)
-                var withGPS = 0, withoutGPS = 0
-                for r in results {
-                    modelContext.insert(r.pin)
-                    r.pin.list = list
-                    if r.hadGPS { withGPS += 1 } else { withoutGPS += 1 }
-                }
-                if results.isEmpty { return }
-                var parts: [String] = []
-                if withGPS > 0 { parts.append("\(withGPS) placed on map") }
-                if withoutGPS > 0 { parts.append("\(withoutGPS) without GPS") }
-                importStatusMessage = parts.joined(separator: ", ")
-                try? modelContext.save()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { importStatusMessage = nil }
-            }
-            return true
-        }
-        // Drop search results onto the list card
-        .dropDestination(for: ScoutLocation.self) { items, _ in
-            for loc in items {
-                let pin = PinnedLocationData(from: loc, sortOrder: list.pins.count)
-                modelContext.insert(pin)
-                pin.list = list
-            }
-            return true
-        } isTargeted: { isTargeted = $0 }
         .contextMenu {
-            Button { beginEditing() } label: {
-                Label("Rename", systemImage: "pencil")
+            Button {
+                if isActive { activeListIDs.remove(list.persistentModelID) }
+                else { activeListIDs.insert(list.persistentModelID) }
+            } label: {
+                Label(isActive ? "Hide on Map" : "Show on Map", systemImage: isActive ? "eye.slash" : "eye")
             }
-            Button { showImportPicker = true } label: {
-                Label("Import Photos…", systemImage: "square.and.arrow.down")
-            }
-            if list.parentList != nil {
+            if let onFitToList {
                 Button {
-                    if let project = list.project { moveToTopLevel(list, in: project) }
+                    onFitToList(list.pins.filter { $0.hasGPS })
                 } label: {
-                    Label("Move to Top Level", systemImage: "arrow.up.left")
+                    Label("Fit Map to List", systemImage: "mappin.and.ellipse")
                 }
             }
+            Divider()
             Button(role: .destructive) {
                 activeListIDs.remove(list.persistentModelID)
                 modelContext.delete(list)
+                try? modelContext.save()
             } label: {
                 Label("Delete List", systemImage: "trash")
             }
         }
     }
+}
 
-    private var cardHeader: some View {
-        HStack(spacing: 8) {
-            // Drag handle for reordering / nesting the list itself
-            Image(systemName: "line.3.horizontal")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .onDrag {
-                    dragState.draggedList = list
-                    return NSItemProvider(object: "list:\(list.name)" as NSString)
-                }
+// MARK: - List detail (pins within a list)
 
-            Button {
-                withAnimation(.spring(duration: 0.2)) {
-                    if isActive { activeListIDs.remove(list.persistentModelID) }
-                    else { activeListIDs.insert(list.persistentModelID) }
-                }
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(isActive ? listColor : listColor.opacity(0.15))
-                        .frame(width: 14, height: 14)
-                    Circle()
-                        .strokeBorder(listColor, lineWidth: isActive ? 0 : 1.5)
-                        .frame(width: 14, height: 14)
-                    if isActive {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 7, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
+private struct ListDetailView: View {
+    let list: LocationListData
+    var onSelectPin: ((PinnedLocationData) -> Void)?
+    @Environment(\.modelContext) private var modelContext
 
-            if isEditingName {
-                TextField("List name", text: $editingName)
-                    .font(.subheadline)
-                    .textFieldStyle(.plain)
-                    .focused($nameFocused)
-                    .onSubmit { commitName() }
-                    .onExitCommand { isEditingName = false }
-                    .onChange(of: nameFocused) { _, focused in if !focused { commitName() } }
-                    .onDisappear { commitName() }
-            } else {
-                Text(list.name)
-                    .font(.subheadline)
-                    .lineLimit(1)
-                    .onTapGesture(count: 2) { beginEditing() }
-                    .onTapGesture(count: 1) {
-                        guard !list.pins.isEmpty else { return }
-                        onFitToList?(list.pins)
-                    }
-            }
-
-            Spacer()
-
-            Text("\(list.pins.count)")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-
-            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .opacity(list.pins.isEmpty && sortedChildren.isEmpty ? 0 : 1)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(
-            isEditingName
-                ? listColor.opacity(0.12)
-                : isHighlighted ? listColor.opacity(0.08) : Color.clear
-        )
-        .overlay(alignment: .bottom) {
-            if isEditingName { listColor.frame(height: 1.5) }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard !isEditingName else { return }
-            withAnimation(.easeInOut(duration: 0.18)) { isExpanded.toggle() }
-        }
-        // Drop onto the list title: a pin moves into this list; a list nests inside it.
-        .onDrop(of: [.text], isTargeted: $isPinDropTarget) { _ in
-            if let dragged = dragState.draggedPin {
-                if dragged.list?.persistentModelID != list.persistentModelID {
-                    movePin(dragged, toList: list)
-                } else {
-                    appendPin(dragged, in: sortedPins())
-                }
-                dragState.draggedPin = nil
-                return true
-            }
-            if let draggedList = dragState.draggedList {
-                let ok = nestList(draggedList, into: list)
-                dragState.draggedList = nil
-                return ok
-            }
-            return false
-        }
+    var sorted: [PinnedLocationData] {
+        list.pins.sorted { $0.sortOrder < $1.sortOrder }
     }
 
-    private func beginEditing() {
-        editingName = list.name
-        isEditingName = true
-        DispatchQueue.main.async { nameFocused = true }
-    }
-
-    private func commitName() {
-        let trimmed = editingName.trimmingCharacters(in: .whitespaces)
-        if !trimmed.isEmpty { list.name = trimmed }
-        isEditingName = false
-    }
-
-    // MARK: - Pinned locations (with drag/drop reorder)
-
-    private var pinnedLocations: some View {
-        let sorted = sortedPins()
-        return LazyVStack(spacing: 0) {
+    var body: some View {
+        List {
             ForEach(sorted) { pin in
-                pinRow(pin, in: sorted)
-            }
-
-            // Drop zone at the bottom of the list (append after last pin)
-            Color.clear
-                .frame(height: 8)
-                .onDrop(of: [.text], isTargeted: nil) { _ in
-                    guard let pin = dragState.draggedPin else { return false }
-                    if pin.list?.persistentModelID == list.persistentModelID {
-                        appendPin(pin, in: sorted)
-                    } else {
-                        movePin(pin, toList: list)
+                PinRow(pin: pin, onSelectPin: onSelectPin)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            modelContext.delete(pin)
+                        } label: {
+                            Label("Remove from List", systemImage: "minus.circle")
+                        }
                     }
-                    dragState.draggedPin = nil
-                    return true
-                }
+            }
+            .onMove { indices, newOffset in
+                var arr = sorted
+                arr.move(fromOffsets: indices, toOffset: newOffset)
+                for (i, pin) in arr.enumerated() { pin.sortOrder = i }
+            }
         }
+        .navigationTitle(list.name)
+    }
+}
+
+// MARK: - Pin row (shared by photos and list pins)
+
+private struct PinRow: View {
+    let pin: PinnedLocationData
+    var onSelectPin: ((PinnedLocationData) -> Void)?
+
+    var body: some View {
+        Button {
+            onSelectPin?(pin)
+        } label: {
+            HStack(spacing: 10) {
+                thumbnail
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(pin.name)
+                        .font(.body)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    if !pin.hasGPS {
+                        Label("No GPS", systemImage: "location.slash")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 2)
     }
 
     @ViewBuilder
-    private func pinRow(_ pin: PinnedLocationData, in sorted: [PinnedLocationData]) -> some View {
-        let isInsertTarget = insertBeforeID == pin.persistentModelID
-        VStack(spacing: 0) {
-            // Insert indicator
-            if isInsertTarget {
-                listColor.frame(height: 2).padding(.horizontal, 10)
+    private var thumbnail: some View {
+        if let filename = pin.photoFiles.first {
+            AsyncImage(url: PinPhotoStore.fileURL(filename)) { img in
+                img.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Color.secondary.opacity(0.2)
             }
-
-            HStack(spacing: 8) {
-                // Drag handle
-                Image(systemName: "line.3.horizontal")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 16)
-
-                // Same row view as the sidebar search results.
-                LocationRow(location: pin.asScoutLocation(), showsPhotos: showPinPhotos)
-
-                if !pin.hasGPS {
-                    Image(systemName: "location.slash")
-                        .font(.caption2)
+        } else if let urlString = pin.imageURL, let url = URL(string: urlString) {
+            AsyncImage(url: url) { img in
+                img.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Color.secondary.opacity(0.2)
+            }
+        } else {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.15))
+                .overlay(
+                    Image(systemName: "mappin")
                         .foregroundStyle(.secondary)
-                        .help("No GPS — not shown on map")
-                }
-            }
-            .padding(.horizontal, 10)
-            .contentShape(Rectangle())
-            .onTapGesture { onSelectPin?(pin) }
-            .onDrag {
-                dragState.draggedPin = pin
-                return NSItemProvider(object: pin.uuid.uuidString as NSString)
-            }
-            .onDrop(of: [.text], isTargeted: Binding(
-                get: { insertBeforeID == pin.persistentModelID },
-                set: { targeted in
-                    if targeted { insertBeforeID = pin.persistentModelID }
-                    else if insertBeforeID == pin.persistentModelID { insertBeforeID = nil }
-                }
-            )) { _ in
-                guard let dragged = dragState.draggedPin else { return false }
-                insertBeforeID = nil
-                if dragged.list?.persistentModelID == list.persistentModelID {
-                    reorder(pin: dragged, before: pin, in: sorted)
-                } else {
-                    movePin(dragged, toList: list, before: pin, in: sorted)
-                }
-                dragState.draggedPin = nil
-                return true
-            }
-            .contextMenu {
-                Button(role: .destructive) {
-                    modelContext.delete(pin)
-                } label: {
-                    Label("Remove from List", systemImage: "minus.circle")
-                }
-            }
-
-            if pin.persistentModelID != sorted.last?.persistentModelID {
-                Divider().padding(.leading, 34)
-            }
+                )
         }
     }
+}
 
-    // MARK: - Sort + reorder helpers
+// MARK: - OutlineGroup children helper
 
-    private func sortedPins() -> [PinnedLocationData] { ordered(list.pins) }
-
-    private func reorder(pin dragged: PinnedLocationData, before target: PinnedLocationData, in sorted: [PinnedLocationData]) {
-        guard dragged.persistentModelID != target.persistentModelID else { return }
-        placeInOrder(dragged, before: target, among: sorted)
-    }
-
-    private func appendPin(_ dragged: PinnedLocationData, in sorted: [PinnedLocationData]) {
-        placeInOrder(dragged, before: nil, among: sorted)
-    }
-
-    /// Move `pin` into `target` (the inverse relationship pulls it out of its old list),
-    /// landing before `insertBefore` or at the end.
-    private func movePin(_ pin: PinnedLocationData, toList target: LocationListData,
-                         before insertBefore: PinnedLocationData? = nil,
-                         in sorted: [PinnedLocationData] = []) {
-        pin.list = target
-        placeInOrder(pin, before: insertBefore, among: ordered(target.pins))
-    }
-
-    // MARK: - List move / nest helpers
-
-    /// True if `maybeAncestor` is `node` or any of its ancestors — used to block cycles.
-    private func isAncestor(_ maybeAncestor: LocationListData, of node: LocationListData) -> Bool {
-        var cursor: LocationListData? = node
-        while let c = cursor {
-            if c.persistentModelID == maybeAncestor.persistentModelID { return true }
-            cursor = c.parentList
-        }
-        return false
-    }
-
-    /// Nest `dragged` inside `target` at the end of its children.
-    @discardableResult
-    private func nestList(_ dragged: LocationListData, into target: LocationListData) -> Bool {
-        guard dragged.persistentModelID != target.persistentModelID,
-              !isAncestor(dragged, of: target) else { return false }
-        dragged.parentList = target           // inverse maintains childLists arrays
-        dragged.project = target.project
-        placeInOrder(dragged, before: nil, among: ordered(target.childLists))
-        return true
-    }
-
-    /// Place `dragged` immediately before `target`, as a sibling at target's level.
-    private func reorderListBefore(_ dragged: LocationListData, target: LocationListData) {
-        guard dragged.persistentModelID != target.persistentModelID,
-              !isAncestor(dragged, of: target) else { return }
-        dragged.parentList = target.parentList
-        dragged.project = target.project
-        let level = target.parentList?.childLists
-            ?? target.project?.lists.filter { $0.parentList == nil } ?? []
-        placeInOrder(dragged, before: target, among: ordered(level))
+extension LocationListData {
+    var sortedChildren: [LocationListData]? {
+        let children = childLists.sorted { $0.sortOrder < $1.sortOrder }
+        return children.isEmpty ? nil : children
     }
 }
 
 // MARK: - Name entry sheet
 
-private struct NameEntrySheet: View {
+struct NameEntrySheet: View {
     let title: String
     let placeholder: String
     @Binding var text: String
     let onDismiss: () -> Void
-    let onCreate: (String) -> Void
-
-    private var trimmed: String { text.trimmingCharacters(in: .whitespaces) }
+    let onConfirm: (String) -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 16) {
             Text(title).font(.headline)
-
             TextField(placeholder, text: $text)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { if !trimmed.isEmpty { onCreate(trimmed) } }
-
+                .onSubmit { if !text.isEmpty { onConfirm(text) } }
             HStack {
-                Button("Cancel", action: onDismiss).buttonStyle(.bordered)
-                Button("Create") { onCreate(trimmed) }
+                Button("Cancel", action: onDismiss)
+                Spacer()
+                Button("Create") { onConfirm(text) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(trimmed.isEmpty)
+                    .disabled(text.isEmpty)
             }
         }
         .padding(24)
@@ -787,193 +554,12 @@ private struct NameEntrySheet: View {
     }
 }
 
-// MARK: - Drag reordering
+// MARK: - Previews
 
-/// SwiftData models carrying a manual `sortOrder` that can be reordered by drag/drop.
-protocol Reorderable: AnyObject {
-    var sortOrder: Int { get set }
-    var persistentModelID: PersistentIdentifier { get }
-}
-extension PinnedLocationData: Reorderable {}
-extension LocationListData: Reorderable {}
-
-/// The one routine behind every drag reorder/move/nest: rebuild `siblings` with `moved`
-/// placed just before `target` (appended when `target` is nil or absent), dropping any
-/// existing copy of `moved`, then renumber `sortOrder` to 0..<n.
-private func placeInOrder<T: Reorderable>(_ moved: T, before target: T?, among siblings: [T]) {
-    var arr = siblings.filter { $0.persistentModelID != moved.persistentModelID }
-    if let target, let idx = arr.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) {
-        arr.insert(moved, at: idx)
-    } else {
-        arr.append(moved)
-    }
-    for (i, x) in arr.enumerated() { x.sortOrder = i }
-}
-
-/// Detach `dragged` from any parent and append it to the project's top level.
-/// Free function so both the project section and a list's context menu can call it.
-private func moveToTopLevel(_ dragged: LocationListData, in project: ProjectData) {
-    dragged.parentList = nil
-    dragged.project = project
-    placeInOrder(dragged, before: nil, among: ordered(project.lists.filter { $0.parentList == nil }))
-}
-
-private func ordered(_ pins: [PinnedLocationData]) -> [PinnedLocationData] {
-    pins.sorted { $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder : $0.createdAt < $1.createdAt }
-}
-private func ordered(_ lists: [LocationListData]) -> [LocationListData] {
-    lists.sorted { $0.sortOrder != $1.sortOrder ? $0.sortOrder < $1.sortOrder : $0.createdAt < $1.createdAt }
-}
-
-// MARK: - Imported photo row
-
-private struct ImportedPhotosList: View {
-    let project: ProjectData
-    let showPhoto: Bool
-    let onSelectPin: (PinnedLocationData) -> Void
-    let dragState: PinDragState
-
-    @State private var insertBeforeID: PersistentIdentifier? = nil
-
-    var body: some View {
-        let sorted = project.importedPhotos.sorted { $0.sortOrder < $1.sortOrder }
-        ForEach(sorted) { pin in
-            VStack(spacing: 0) {
-                // Gap above each row — drop here to insert before this pin
-                PhotoReorderGap(
-                    isTargeted: insertBeforeID == pin.persistentModelID,
-                    onDrop: { dropped in
-                        insertBeforeID = nil
-                        placeInOrder(dropped, before: pin, among: sorted)
-                        dragState.draggedPin = nil
-                    },
-                    onTargetChanged: { targeted in
-                        if targeted { insertBeforeID = pin.persistentModelID }
-                        else if insertBeforeID == pin.persistentModelID { insertBeforeID = nil }
-                    },
-                    dragState: dragState
-                )
-                ImportedPhotoRow(
-                    pin: pin,
-                    showPhoto: showPhoto,
-                    onSelectPin: onSelectPin,
-                    onDragStarted: { dragState.draggedPin = pin }
-                )
-            }
-        }
-        // Gap at the end — drop here to append
-        AppendDropZone(dragState: dragState, sorted: sorted)
-    }
-}
-
-private struct PhotoReorderGap: View {
-    let isTargeted: Bool
-    let onDrop: (PinnedLocationData) -> Void
-    let onTargetChanged: (Bool) -> Void
-    let dragState: PinDragState
-
-    var body: some View {
-        Color.accentColor
-            .frame(maxWidth: .infinity)
-            .frame(height: isTargeted ? 2 : 6)
-            .opacity(isTargeted ? 1 : 0.001)
-            .onDrop(of: [.text], isTargeted: Binding(
-                get: { isTargeted },
-                set: { onTargetChanged($0) }
-            )) { _ in
-                guard let pin = dragState.draggedPin else { return false }
-                onDrop(pin)
-                return true
-            }
-    }
-}
-
-private struct AppendDropZone: View {
-    let dragState: PinDragState
-    let sorted: [PinnedLocationData]
-    @State private var isTargeted = false
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 4)
-            .fill(isTargeted ? Color.accentColor.opacity(0.15) : Color.clear)
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(isTargeted ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1.5)
-            )
-            .frame(maxWidth: .infinity)
-            .frame(height: 28)
-            .onDrop(of: [.text], isTargeted: $isTargeted) { _ in
-                guard let pin = dragState.draggedPin else { return false }
-                placeInOrder(pin, before: nil, among: sorted)
-                dragState.draggedPin = nil
-                return true
-            }
-    }
-}
-
-private struct ImportedPhotoRow: View {
-    let pin: PinnedLocationData
-    let showPhoto: Bool
-    let onSelectPin: (PinnedLocationData) -> Void
-    let onDragStarted: () -> Void
-    @Environment(\.modelContext) private var modelContext
-
-    var body: some View {
-        HStack(spacing: 6) {
-                Image(systemName: "line.3.horizontal")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 16)
-
-                if let filename = pin.photoFiles.first {
-                    let url = PinPhotoStore.fileURL(filename)
-                    AsyncImage(url: url) { img in
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        Color.secondary.opacity(0.2)
-                    }
-                    .frame(width: 32, height: 32)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                } else {
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.secondary.opacity(0.2))
-                        .frame(width: 32, height: 32)
-                        .overlay(
-                            Image(systemName: "photo")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        )
-                }
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(pin.name)
-                        .font(.caption)
-                        .lineLimit(1)
-                    if !pin.hasGPS {
-                        Label("No GPS", systemImage: "location.slash")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                Spacer()
-            }
-            .contentShape(Rectangle())
-            .onTapGesture { onSelectPin(pin) }
-            .onDrag {
-                onDragStarted()
-                return NSItemProvider(object: pin.uuid.uuidString as NSString)
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .contextMenu {
-                Button(role: .destructive) {
-                    modelContext.delete(pin)
-                    try? modelContext.save()
-                } label: {
-                    Label("Delete Photo", systemImage: "trash")
-                }
-            }
-    }
+#Preview("Projects list") {
+    ProjectsPanel(activeListIDs: .constant([]))
+        .frame(width: 280, height: 600)
+        .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self], inMemory: true)
 }
 
 // MARK: - Hex color helper
@@ -988,12 +574,3 @@ extension Color {
         self.init(red: r, green: g, blue: b)
     }
 }
-
-#if DEBUG
-#Preview("Projects panel") {
-    @Previewable @State var active: Set<PersistentIdentifier> = []
-    ProjectsPanel(activeListIDs: $active)
-        .frame(width: 240, height: 600)
-        .modelContainer(PreviewData.container)
-}
-#endif

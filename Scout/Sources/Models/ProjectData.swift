@@ -10,7 +10,7 @@ final class ProjectData {
     var name: String
     var notes: String
     var createdAt: Date
-    @Relationship(deleteRule: .cascade) var lists: [LocationListData] = []
+    @Relationship(deleteRule: .cascade, inverse: \LocationListData.project) var lists: [LocationListData] = []
     /// Photos imported directly into this project (not inside any list).
     @Relationship(deleteRule: .cascade, inverse: \PinnedLocationData.owningProject)
     var importedPhotos: [PinnedLocationData] = []
@@ -29,7 +29,10 @@ final class LocationListData {
     var name: String
     var colorHex: String
     var createdAt: Date
+    var uuid: UUID = UUID()
     var sortOrder: Int = 0
+    /// Order within the project panel sidebar (shared namespace with importedPhotos).
+    var panelOrder: Int = 0
     @Relationship(deleteRule: .cascade) var pins: [PinnedLocationData] = []
     var project: ProjectData?
 
@@ -73,6 +76,8 @@ final class PinnedLocationData {
     var createdAt: Date
     var uuid: UUID = UUID()
     var sortOrder: Int = 0
+    /// Order within the project panel sidebar (shared namespace with lists).
+    var panelOrder: Int = 0
     var imageURL: String? = nil
     var googlePlaceId: String? = nil
     // Original source, captured so photos can always be (re)fetched and saved offline.

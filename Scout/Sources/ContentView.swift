@@ -111,30 +111,6 @@ struct ContentView: View {
         }
         .animation(.spring(duration: 0.3), value: showProjectsPanel)
         .animation(.spring(duration: 0.3), value: showRightPanel)
-        .onDrop(of: [.fileURL, .image, .item], isTargeted: nil) { providers in
-            NSLog("🟡 DROP fired. providers=\(providers.count)")
-            for p in providers {
-                NSLog("🟡   provider types: \(p.registeredTypeIdentifiers)")
-            }
-            Task { @MainActor in
-                let urls = await loadImageURLs(from: providers)
-                NSLog("🟡 loadImageURLs returned \(urls.count) urls: \(urls.map(\.lastPathComponent))")
-                guard !urls.isEmpty else { return }
-                let project = allProjects.first ?? {
-                    let p = ProjectData(name: "My Photos")
-                    modelContext.insert(p)
-                    return p
-                }()
-                let results = await PhotoImportService.importPhotos(from: urls, into: nil)
-                NSLog("🟡 imported \(results.count) photos into project \(project.name)")
-                for result in results {
-                    modelContext.insert(result.pin)
-                    result.pin.owningProject = project
-                }
-                try? modelContext.save()
-            }
-            return true
-        }
         .ignoresSafeArea()
         .background {
             // App-wide Escape handler (hidden). Carousel → grid → map → grid…
@@ -147,6 +123,7 @@ struct ContentView: View {
             locationManager.requestIfNeeded()
             centerOnUserIfNeeded()
             backfillPhotos()
+            purgeOrphanedData()
             photoViewer.onViewOnMap = { loc in
                 withAnimation(.spring(duration: 0.3)) { viewMode = .map }
                 selectedLocation = loc
@@ -430,6 +407,7 @@ struct ContentView: View {
     /// exactly as if it were clicked on the map. Activates its list first so it's visible
     /// (unfiled pins are always shown), then centers on it.
     private func selectPin(_ pin: PinnedLocationData) {
+        guard pin.hasGPS else { return }
         let location = pin.asScoutLocation()
         // Toggle: tapping the already-selected pin again closes its popover.
         if selectedLocation?.id == location.id {
@@ -486,6 +464,18 @@ struct ContentView: View {
         for pin in allPins where pin.photoFiles.isEmpty {
             cachePhotos(for: pin, from: pin.asScoutLocation())
         }
+    }
+
+    private func purgeOrphanedData() {
+        // Delete lists with no project and no parent (truly orphaned top-level lists).
+        for list in allLists where list.project == nil && list.parentList == nil {
+            modelContext.delete(list)
+        }
+        // Delete pins with neither a list nor an owning project.
+        for pin in allPins where pin.list == nil && pin.owningProject == nil {
+            modelContext.delete(pin)
+        }
+        try? modelContext.save()
     }
 
     private var scoutMap: some View {
