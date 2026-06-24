@@ -325,7 +325,7 @@ struct ContentView: View {
         // - PhotoGrid: never torn down so scroll position survives "Show on Map" round-trips
         ZStack {
             scoutMap
-            PhotoGridView(locations: locations, pinnedLocations: projectPins.map(\.0).filter { !$0.images.isEmpty })
+            PhotoGridView(locations: locations, pinnedLocations: allProjectPins.filter { !$0.images.isEmpty })
                 .ignoresSafeArea()
                 .opacity(viewMode == .photos ? 1 : 0)
                 .allowsHitTesting(viewMode == .photos)
@@ -351,7 +351,7 @@ struct ContentView: View {
             .padding(.horizontal, 8)
         }
         .overlay {
-            if photoViewer.isVisible && viewMode == .map {
+            if photoViewer.isVisible {
                 PhotoViewerOverlay(availableLists: allLists, onSave: savePinned)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
@@ -403,11 +403,22 @@ struct ContentView: View {
         return result
     }
 
+    /// Pins for the Photos grid — visible lists + project-level photos, no GPS filter.
+    private var allProjectPins: [ScoutLocation] {
+        let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
+        var result = active.flatMap { $0.pins }.map { $0.asScoutLocation() }
+        for project in allProjects {
+            result += project.importedPhotos.map { $0.asScoutLocation() }
+        }
+        result += unfiledPins.map { $0.asScoutLocation() }
+        return result
+    }
+
     /// Tapping a saved pin in the sidebar selects it on the map and shows its popover —
     /// exactly as if it were clicked on the map. Activates its list first so it's visible
     /// (unfiled pins are always shown), then centers on it.
     private func selectPin(_ pin: PinnedLocationData) {
-        guard pin.hasGPS else { return }
+        guard pin.hasGPS, viewMode == .map else { return }
         let location = pin.asScoutLocation()
         // Toggle: tapping the already-selected pin again closes its popover.
         if selectedLocation?.id == location.id {

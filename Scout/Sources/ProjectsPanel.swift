@@ -601,6 +601,7 @@ private struct PinRow: View {
                 thumbnail
                     .frame(width: 56, height: 56)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .allowsHitTesting(false)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(pin.name)
