@@ -96,7 +96,8 @@ struct ContentView: View {
                         guard !coords.isEmpty else { return }
                         mapController.fit(coords, animated: true)
                     },
-                    onSelectPin: selectPin
+                    onSelectPin: selectPin,
+                    onClearPin: { selectedLocation = nil }
                 )
                     .frame(width: 240)
                     .transition(.move(edge: .leading))

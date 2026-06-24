@@ -62,6 +62,7 @@ struct ProjectsPanel: View {
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)? = nil
     var onSelectPin: ((PinnedLocationData) -> Void)? = nil
+    var onClearPin: (() -> Void)? = nil
 
     @State private var selectedProject: ProjectData? = nil
     @State private var showAddProject = false
@@ -75,7 +76,8 @@ struct ProjectsPanel: View {
                         project: project,
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
-                        onSelectPin: onSelectPin
+                        onSelectPin: onSelectPin,
+                        onClearPin: onClearPin
                     )
                 }
         }
@@ -175,12 +177,14 @@ private struct ProjectDetailView: View {
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onSelectPin: ((PinnedLocationData) -> Void)?
+    var onClearPin: (() -> Void)?
 
     @Environment(\.modelContext) private var modelContext
     @State private var showAddList = false
     @State private var newListName = ""
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
     @State private var topLevelDropTargeted = false
+    @State private var selectedItemID: PersistentIdentifier? = nil
 
     private var sidebarItems: [SidebarItem] {
         let photos = project.importedPhotos.map { SidebarItem.photo($0) }
@@ -388,29 +392,38 @@ private struct ProjectDetailView: View {
             ForEach(sidebarItems) { item in
                 switch item {
                 case .photo(let pin):
-                    PinRow(pin: pin, onSelectPin: onSelectPin)
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-                                modelContext.delete(pin)
-                                try? modelContext.save()
-                            } label: {
-                                Label("Delete Photo", systemImage: "trash")
-                            }
+                    PinRow(
+                        pin: pin,
+                        isSelected: selectedItemID == pin.persistentModelID,
+                        onSelectPin: { p in
+                            selectedItemID = p.persistentModelID
+                            if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
                         }
-                        .onDrag { NSItemProvider(object: item.dragID as NSString) }
-                        .onDrop(of: [.text], isTargeted: nil) { providers in
-                            loadDrop(providers, onto: .photo(pin))
+                    )
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+                            modelContext.delete(pin)
+                            try? modelContext.save()
+                        } label: {
+                            Label("Delete Photo", systemImage: "trash")
                         }
+                    }
+                    .onDrag { NSItemProvider(object: item.dragID as NSString) }
+                    .onDrop(of: [.text], isTargeted: nil) { providers in
+                        loadDrop(providers, onto: .photo(pin))
+                    }
                 case .list(let list):
                     let isExpanded = expandedListIDs.contains(list.persistentModelID)
                     ListRow(
                         list: list,
                         isExpanded: isExpanded,
+                        isSelected: selectedItemID == list.persistentModelID,
                         onToggleExpand: {
                             if isExpanded { expandedListIDs.remove(list.persistentModelID) }
                             else { expandedListIDs.insert(list.persistentModelID) }
                         },
+                        onSelect: { selectedItemID = list.persistentModelID; onClearPin?() },
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
                         onSelectPin: onSelectPin
@@ -423,13 +436,20 @@ private struct ProjectDetailView: View {
                     if isExpanded {
                         let pins = list.pins.sorted { $0.sortOrder < $1.sortOrder }
                         ForEach(pins) { pin in
-                            PinRow(pin: pin, onSelectPin: onSelectPin)
-                                .padding(.leading, 24)
-                                .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
-                                .onDrag { NSItemProvider(object: "pin:\(pin.uuid.uuidString)" as NSString) }
-                                .onDrop(of: [.text], isTargeted: nil) { providers in
-                                    loadDropPin(providers, intoList: list, afterPin: pin)
+                            PinRow(
+                                pin: pin,
+                                isSelected: selectedItemID == pin.persistentModelID,
+                                onSelectPin: { p in
+                                    selectedItemID = p.persistentModelID
+                                    if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
                                 }
+                            )
+                            .padding(.leading, 24)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+                            .onDrag { NSItemProvider(object: "pin:\(pin.uuid.uuidString)" as NSString) }
+                            .onDrop(of: [.text], isTargeted: nil) { providers in
+                                loadDropPin(providers, intoList: list, afterPin: pin)
+                            }
                         }
                     }
                 }
@@ -510,7 +530,9 @@ private struct ProjectDetailView: View {
 private struct ListRow: View {
     let list: LocationListData
     let isExpanded: Bool
+    var isSelected: Bool = false
     let onToggleExpand: () -> Void
+    var onSelect: (() -> Void)? = nil
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onSelectPin: ((PinnedLocationData) -> Void)?
@@ -531,6 +553,7 @@ private struct ListRow: View {
             .buttonStyle(.plain)
 
             Button {
+                onSelect?()
                 onFitToList?(list.pins.filter { $0.hasGPS })
             } label: {
                 HStack(spacing: 6) {
@@ -561,6 +584,14 @@ private struct ListRow: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
+        )
         .contextMenu {
             Button {
                 if isActive { activeListIDs.remove(list.persistentModelID) }
@@ -591,6 +622,7 @@ private struct ListRow: View {
 
 private struct PinRow: View {
     let pin: PinnedLocationData
+    var isSelected: Bool = false
     var onSelectPin: ((PinnedLocationData) -> Void)?
 
     var body: some View {
@@ -620,6 +652,14 @@ private struct PinRow: View {
         }
         .buttonStyle(.plain)
         .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
+        )
     }
 
     @ViewBuilder
