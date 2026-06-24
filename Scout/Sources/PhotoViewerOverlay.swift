@@ -232,7 +232,15 @@ struct PhotoViewerOverlay: View {
                     .scrollTargetBehavior(.viewAligned)
                     .scrollPosition(id: Binding(
                         get: { viewer.selectedIndex },
-                        set: { if let v = $0 { viewer.selectedIndex = v } }
+                        // Only write when the index actually changed. Without this guard,
+                        // any re-layout (e.g. the re-render triggered by saving a pin) calls
+                        // the setter with the SAME index, which publishes a @Published change
+                        // mid-view-update — "Publishing changes from within view updates" —
+                        // and crashes.
+                        set: { newValue in
+                            guard let v = newValue, v != viewer.selectedIndex else { return }
+                            viewer.selectedIndex = v
+                        }
                     ))
                     .onChange(of: viewer.selectedIndex) { _, idx in
                         withAnimation(.easeInOut(duration: 0.25)) {
@@ -382,7 +390,9 @@ struct PhotoViewerOverlay: View {
     private func saveMenu(for loc: ScoutLocation, onSave: @escaping (ScoutLocation, LocationListData?) -> Void) -> some View {
         Menu {
             Button {
-                onSave(loc, nil)
+                // Defer the model insert out of the menu's view-update cycle so the
+                // resulting @Query re-render can't publish changes mid-update.
+                DispatchQueue.main.async { onSave(loc, nil) }
                 flashSaved("Pinned")
             } label: {
                 Label("Pin to Map (no list)", systemImage: "mappin")
@@ -393,7 +403,7 @@ struct PhotoViewerOverlay: View {
                 Section("Add to List") {
                     ForEach(availableLists) { list in
                         Button {
-                            onSave(loc, list)
+                            DispatchQueue.main.async { onSave(loc, list) }
                             flashSaved(list.name)
                         } label: {
                             Label(listLabel(list), systemImage: "mappin.circle")
