@@ -82,6 +82,14 @@ struct ContentView: View {
         !savedLat.isNaN && !savedLng.isNaN
     }
 
+    /// Lists scoped to the currently open project, or all lists if no project is open.
+    private var openProjectLists: [LocationListData] {
+        guard !openProjectUUID.isEmpty,
+              let project = allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })
+        else { return [] }
+        return project.lists
+    }
+
     private var initialRegion: MKCoordinateRegion? {
         guard hasSavedRegion else { return nil }
         return MKCoordinateRegion(
@@ -310,7 +318,7 @@ struct ContentView: View {
                     .draggable(location)
                     .tag(location)
                     .contextMenu {
-                        let projectLists = allLists.filter { $0.project != nil }
+                        let projectLists = openProjectLists
                         if !projectLists.isEmpty {
                             Menu {
                                 ForEach(projectLists) { list in
@@ -375,7 +383,7 @@ struct ContentView: View {
         }
         .overlay {
             if photoViewer.isVisible {
-                PhotoViewerOverlay(availableLists: allLists.filter { $0.project != nil }, onSave: savePinned)
+                PhotoViewerOverlay(availableLists: openProjectLists, onSave: savePinned)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
             }
@@ -537,7 +545,7 @@ struct ContentView: View {
             cyclingProvider: cyclingProvider,
             showPhotoAnnotations: showPhotoAnnotations,
             pinScale: pinSize,
-            availableLists: allLists.filter { $0.project != nil },
+            availableLists: openProjectLists,
             onSaveToList: saveToList,
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,
