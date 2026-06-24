@@ -70,9 +70,10 @@ struct ContentView: View {
     @State private var didInitialCenter = false
     @State private var chatMessages: [ChatMessage] = []
     @State private var viewMode: ViewMode = .map
-    @State private var showProjectsPanel = false
-    @State private var showRightPanel = true
+    @AppStorage("ui.showProjectsPanel") private var showProjectsPanel = true
+    @AppStorage("ui.showRightPanel") private var showRightPanel = true
     @State private var activeListIDs: Set<PersistentIdentifier> = []
+    @AppStorage("nav.activeListUUIDs") private var activeListUUIDs: String = ""
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -127,6 +128,12 @@ struct ContentView: View {
             centerOnUserIfNeeded()
             backfillPhotos()
             purgeOrphanedData()
+            // allLists is already populated here (SwiftData @Query delivers synchronously).
+            if !activeListUUIDs.isEmpty {
+                let uuids = Set(activeListUUIDs.split(separator: ",").map(String.init))
+                activeListIDs = Set(allLists.filter { uuids.contains($0.uuid.uuidString) }
+                                            .map(\.persistentModelID))
+            }
             photoViewer.onViewOnMap = { loc in
                 withAnimation(.spring(duration: 0.3)) { viewMode = .map }
                 selectedLocation = loc
@@ -137,6 +144,11 @@ struct ContentView: View {
         }
         .onChange(of: locationManager.currentLocation?.latitude) { _, _ in
             centerOnUserIfNeeded()
+        }
+        .onChange(of: activeListIDs) { _, ids in
+            let uuids = allLists.filter { ids.contains($0.persistentModelID) }
+                                .map(\.uuid.uuidString)
+            activeListUUIDs = uuids.joined(separator: ",")
         }
         .onChange(of: rightPanelTab) { _, _ in
             locations = []
@@ -195,7 +207,7 @@ struct ContentView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(.horizontal, 10)
-            .padding(.top, 10)
+            .padding(.top, 36)
             .padding(.bottom, 8)
 
             Divider()
@@ -295,9 +307,10 @@ struct ContentView: View {
                     .draggable(location)
                     .tag(location)
                     .contextMenu {
-                        if !allLists.isEmpty {
+                        let projectLists = allLists.filter { $0.project != nil }
+                        if !projectLists.isEmpty {
                             Menu {
-                                ForEach(allLists) { list in
+                                ForEach(projectLists) { list in
                                     Button { saveToList(location, list) } label: {
                                         Label(list.name, systemImage: "mappin.circle")
                                     }
@@ -355,7 +368,7 @@ struct ContentView: View {
         }
         .overlay {
             if photoViewer.isVisible {
-                PhotoViewerOverlay(availableLists: allLists, onSave: savePinned)
+                PhotoViewerOverlay(availableLists: allLists.filter { $0.project != nil }, onSave: savePinned)
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
             }
@@ -481,13 +494,19 @@ struct ContentView: View {
     }
 
     private func purgeOrphanedData() {
-        // Delete lists with no project and no parent (truly orphaned top-level lists).
-        for list in allLists where list.project == nil && list.parentList == nil {
-            modelContext.delete(list)
-        }
-        // Delete pins with neither a list nor an owning project.
-        for pin in allPins where pin.list == nil && pin.owningProject == nil {
-            modelContext.delete(pin)
+        // Walk from the projects side (always-valid @Query objects) to collect
+        // UUIDs of lists that legitimately belong to a project. Never touch
+        // list.project directly — if it's a stale FK to a deleted project, any
+        // access causes a SwiftData fatal error.
+        let validListUUIDs = allProjects.flatMap { $0.lists }.map(\.uuid)
+
+        // Use batch delete (operates at SQL level, no in-memory fault firing).
+        if validListUUIDs.isEmpty {
+            try? modelContext.delete(model: LocationListData.self,
+                                     where: #Predicate { $0.parentList == nil })
+        } else {
+            try? modelContext.delete(model: LocationListData.self,
+                                     where: #Predicate { !validListUUIDs.contains($0.uuid) && $0.parentList == nil })
         }
         try? modelContext.save()
     }

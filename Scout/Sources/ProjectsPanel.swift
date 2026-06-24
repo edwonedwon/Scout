@@ -64,22 +64,41 @@ struct ProjectsPanel: View {
     var onSelectPin: ((PinnedLocationData) -> Void)? = nil
     var onClearPin: (() -> Void)? = nil
 
-    @State private var selectedProject: ProjectData? = nil
+    /// Persisted open project (stored as UUID string, resolved to ProjectData on load).
+    @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
+    /// Persisted expanded list UUIDs, comma-separated.
+    @AppStorage("nav.expandedListUUIDs") private var expandedListUUIDs: String = ""
+
+    @State private var navPath: [ProjectData] = []
     @State private var showAddProject = false
     @State private var newProjectName = ""
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navPath) {
             projectList
                 .navigationDestination(for: ProjectData.self) { project in
                     ProjectDetailView(
                         project: project,
+                        initialExpandedUUIDs: storedExpandedUUIDs,
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
                         onSelectPin: onSelectPin,
-                        onClearPin: onClearPin
+                        onClearPin: onClearPin,
+                        onExpandedChanged: { uuids in
+                            expandedListUUIDs = uuids.joined(separator: ",")
+                        }
                     )
                 }
+        }
+        .onAppear {
+            // Restore the previously open project.
+            if !openProjectUUID.isEmpty,
+               let project = projects.first(where: { $0.uuid.uuidString == openProjectUUID }) {
+                navPath = [project]
+            }
+        }
+        .onChange(of: navPath) { _, path in
+            openProjectUUID = path.first?.uuid.uuidString ?? ""
         }
         .sheet(isPresented: $showAddProject) {
             NameEntrySheet(
@@ -93,6 +112,10 @@ struct ProjectsPanel: View {
                 showAddProject = false
             }
         }
+    }
+
+    private var storedExpandedUUIDs: Set<String> {
+        Set(expandedListUUIDs.split(separator: ",").map(String.init))
     }
 
     private var projectList: some View {
@@ -114,6 +137,24 @@ struct ProjectsPanel: View {
                 }
                 .contextMenu {
                     Button(role: .destructive) {
+                        // Pop nav first so NavigationStack doesn't hold a reference
+                        // to the deleted project and crash when SwiftUI re-renders.
+                        if navPath.first?.persistentModelID == project.persistentModelID {
+                            navPath = []
+                            openProjectUUID = ""
+                            expandedListUUIDs = ""
+                        }
+                        // Manually detach children before deleting to avoid cascade failures
+                        // leaving orphaned lists in the store.
+                        for list in project.lists {
+                            list.project = nil
+                            for pin in list.pins { pin.list = nil }
+                            modelContext.delete(list)
+                        }
+                        for pin in project.importedPhotos {
+                            pin.owningProject = nil
+                            modelContext.delete(pin)
+                        }
                         modelContext.delete(project)
                         try? modelContext.save()
                     } label: {
@@ -174,17 +215,56 @@ private enum SidebarItem: Identifiable {
 
 private struct ProjectDetailView: View {
     @Bindable var project: ProjectData
+    var initialExpandedUUIDs: Set<String> = []
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onSelectPin: ((PinnedLocationData) -> Void)?
     var onClearPin: (() -> Void)?
+    var onExpandedChanged: (([String]) -> Void)? = nil
 
     @Environment(\.modelContext) private var modelContext
     @State private var showAddList = false
     @State private var newListName = ""
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
     @State private var topLevelDropTargeted = false
-    @State private var selectedItemID: PersistentIdentifier? = nil
+    @State private var selectedItemIDs: Set<PersistentIdentifier> = []
+    @State private var anchorItemID: PersistentIdentifier? = nil
+
+    /// Flat ordered list of all currently visible item IDs, including expanded list pins.
+    private var flatVisibleIDs: [PersistentIdentifier] {
+        var result: [PersistentIdentifier] = []
+        for item in sidebarItems {
+            switch item {
+            case .photo(let pin):
+                result.append(pin.persistentModelID)
+            case .list(let list):
+                result.append(list.persistentModelID)
+                if expandedListIDs.contains(list.persistentModelID) {
+                    result.append(contentsOf:
+                        list.pins.sorted { $0.sortOrder < $1.sortOrder }.map(\.persistentModelID)
+                    )
+                }
+            }
+        }
+        return result
+    }
+
+    /// Central selection handler. Shift-click extends the range from the anchor;
+    /// plain click sets a new single selection and updates the anchor.
+    private func select(_ id: PersistentIdentifier, isShift: Bool,
+                        mapAction: (() -> Void)? = nil) {
+        if isShift, let anchor = anchorItemID {
+            let flat = flatVisibleIDs
+            if let a = flat.firstIndex(of: anchor), let b = flat.firstIndex(of: id) {
+                selectedItemIDs = Set(flat[min(a,b)...max(a,b)])
+            }
+            // Range select: don't move map
+        } else {
+            selectedItemIDs = [id]
+            anchorItemID = id
+            mapAction?()
+        }
+    }
 
     private var sidebarItems: [SidebarItem] {
         let photos = project.importedPhotos.map { SidebarItem.photo($0) }
@@ -244,7 +324,8 @@ private struct ProjectDetailView: View {
         return true
     }
 
-    /// Moves a list pin to the top-level project. `atTop` places it first, otherwise last.
+    /// Moves a dragged item to the top/bottom of the sidebar.
+    /// Handles list:, photo:, and pin: payloads.
     private func loadDropToTopLevel(_ providers: [NSItemProvider], atTop: Bool) -> Bool {
         guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
             return false
@@ -252,6 +333,26 @@ private struct ProjectDetailView: View {
         _ = provider.loadObject(ofClass: NSString.self) { object, _ in
             guard let dragID = object as? String else { return }
             Task { @MainActor in
+                // List reorder: move to top or bottom.
+                if dragID.hasPrefix("list:") {
+                    let uuid = String(dragID.dropFirst(5))
+                    guard let list = project.lists.first(where: { $0.uuid.uuidString == uuid }) else { return }
+                    list.panelOrder = atTop ? -1 : sidebarItems.count + 1
+                    normalizeOrder()
+                    try? modelContext.save()
+                    return
+                }
+                // Photo reorder: move to top or bottom (when already top-level).
+                if dragID.hasPrefix("photo:") {
+                    let uuid = String(dragID.dropFirst(6))
+                    if let pin = project.importedPhotos.first(where: { $0.uuid.uuidString == uuid }) {
+                        pin.panelOrder = atTop ? -1 : sidebarItems.count + 1
+                        normalizeOrder()
+                        try? modelContext.save()
+                        return
+                    }
+                }
+                // Pin dragged out of a list to top/bottom.
                 let uuid: String
                 if dragID.hasPrefix("pin:") { uuid = String(dragID.dropFirst(4)) }
                 else if dragID.hasPrefix("photo:") { uuid = String(dragID.dropFirst(6)) }
@@ -347,13 +448,16 @@ private struct ProjectDetailView: View {
         return true
     }
 
-    /// Reorders `dragged` to sit at `target`'s current position in the sidebar.
+    /// Reorders `dragged` next to `target`. Inserts before target when moving up,
+    /// after target when moving down, so every slot is reachable.
     private func reorder(_ dragged: SidebarItem, before target: SidebarItem) {
         var items = sidebarItems
         guard let from = items.firstIndex(where: { $0.id == dragged.id }) else { return }
         let moving = items.remove(at: from)
-        guard let to = items.firstIndex(where: { $0.id == target.id }) else { return }
-        items.insert(moving, at: to)
+        guard var to = items.firstIndex(where: { $0.id == target.id }) else { return }
+        // When dragging downward, insert after the target so the item lands below it.
+        if from > to { to += 1 }
+        items.insert(moving, at: min(to, items.count))
         for (i, item) in items.enumerated() {
             switch item {
             case .photo(let p): p.panelOrder = i
@@ -394,10 +498,12 @@ private struct ProjectDetailView: View {
                 case .photo(let pin):
                     PinRow(
                         pin: pin,
-                        isSelected: selectedItemID == pin.persistentModelID,
+                        isSelected: selectedItemIDs.contains(pin.persistentModelID),
                         onSelectPin: { p in
-                            selectedItemID = p.persistentModelID
-                            if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
+                            let isShift = NSEvent.modifierFlags.contains(.shift)
+                            select(p.persistentModelID, isShift: isShift, mapAction: {
+                                if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
+                            })
                         }
                     )
                     .contextMenu {
@@ -418,12 +524,15 @@ private struct ProjectDetailView: View {
                     ListRow(
                         list: list,
                         isExpanded: isExpanded,
-                        isSelected: selectedItemID == list.persistentModelID,
+                        isSelected: selectedItemIDs.contains(list.persistentModelID),
                         onToggleExpand: {
                             if isExpanded { expandedListIDs.remove(list.persistentModelID) }
                             else { expandedListIDs.insert(list.persistentModelID) }
                         },
-                        onSelect: { selectedItemID = list.persistentModelID; onClearPin?() },
+                        onSelect: {
+                            let isShift = NSEvent.modifierFlags.contains(.shift)
+                            select(list.persistentModelID, isShift: isShift, mapAction: { onClearPin?() })
+                        },
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
                         onSelectPin: onSelectPin
@@ -438,10 +547,13 @@ private struct ProjectDetailView: View {
                         ForEach(pins) { pin in
                             PinRow(
                                 pin: pin,
-                                isSelected: selectedItemID == pin.persistentModelID,
+                                isSelected: selectedItemIDs.contains(pin.persistentModelID),
+                                listColor: Color(hexString: list.colorHex),
                                 onSelectPin: { p in
-                                    selectedItemID = p.persistentModelID
-                                    if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
+                                    let isShift = NSEvent.modifierFlags.contains(.shift)
+                                    select(p.persistentModelID, isShift: isShift, mapAction: {
+                                        if p.hasGPS { onSelectPin?(p) } else { onClearPin?() }
+                                    })
                                 }
                             )
                             .padding(.leading, 24)
@@ -464,9 +576,25 @@ private struct ProjectDetailView: View {
                     loadDropToTopLevel(providers, atTop: false)
                 }
         }
-        .onAppear { normalizeOrder() }
+        .onAppear {
+            normalizeOrder()
+            // project.lists is synchronously available here via SwiftData.
+            if !initialExpandedUUIDs.isEmpty {
+                expandedListIDs = Set(
+                    project.lists.filter { initialExpandedUUIDs.contains($0.uuid.uuidString) }
+                                 .map(\.persistentModelID)
+                )
+            }
+        }
         .onChange(of: project.importedPhotos.count) { normalizeOrder() }
         .onChange(of: project.lists.count) { normalizeOrder() }
+        .onChange(of: expandedListIDs) { _, ids in
+            // Persist current expanded state as UUID strings (stable across relaunches).
+            let uuids = project.lists
+                .filter { ids.contains($0.persistentModelID) }
+                .map(\.uuid.uuidString)
+            onExpandedChanged?(uuids)
+        }
         .navigationTitle(project.name)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -623,6 +751,7 @@ private struct ListRow: View {
 private struct PinRow: View {
     let pin: PinnedLocationData
     var isSelected: Bool = false
+    var listColor: Color? = nil
     var onSelectPin: ((PinnedLocationData) -> Void)?
 
     var body: some View {
@@ -633,6 +762,10 @@ private struct PinRow: View {
                 thumbnail
                     .frame(width: 56, height: 56)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(listColor ?? .clear, lineWidth: 2)
+                    )
                     .allowsHitTesting(false)
 
                 VStack(alignment: .leading, spacing: 3) {

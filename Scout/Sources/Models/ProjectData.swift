@@ -10,6 +10,7 @@ final class ProjectData {
     var name: String
     var notes: String
     var createdAt: Date
+    var uuid: UUID = UUID()
     @Relationship(deleteRule: .cascade, inverse: \LocationListData.project) var lists: [LocationListData] = []
     /// Photos imported directly into this project (not inside any list).
     @Relationship(deleteRule: .cascade, inverse: \PinnedLocationData.owningProject)

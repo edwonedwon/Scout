@@ -544,9 +544,13 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     var isHovered: Bool = false {
         didSet { guard oldValue != isHovered else { return }; applyBorder() }
     }
+    var borderColor: NSColor = .white {
+        didSet { guard oldValue != borderColor else { return }; applyBorder() }
+    }
     private func applyBorder() {
         let ratio = bounds.width / Self.baseSize
         layer?.borderWidth = (isHovered ? 5 : 2.5) * ratio
+        layer?.borderColor = borderColor.cgColor
     }
 
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
@@ -558,7 +562,7 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
 
         layer?.cornerRadius = 8
         layer?.borderWidth = 2.5
-        layer?.borderColor = NSColor.white.cgColor
+        layer?.borderColor = NSColor.white.cgColor  // overridden by borderColor setter
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.35
         layer?.shadowRadius = 4
@@ -1067,6 +1071,7 @@ struct ScoutMapView {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutPhotoAnnotationView.reuseID) as? ScoutPhotoAnnotationView)
                         ?? ScoutPhotoAnnotationView(annotation: annotation, reuseIdentifier: ScoutPhotoAnnotationView.reuseID)
                     view.annotation = annotation
+                    view.borderColor = ann.tintColor
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url)
                     return view
