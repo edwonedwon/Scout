@@ -76,6 +76,9 @@ struct ContentView: View {
     @AppStorage("ui.showProjectsPanel") private var showProjectsPanel = true
     @AppStorage("ui.showRightPanel") private var showRightPanel = true
     @State private var activeListIDs: Set<PersistentIdentifier> = []
+    // Projects whose uncategorized (loose) photos are hidden from map + grid.
+    // Empty = all visible (default). Toggled by the sidebar "Uncategorized" eye.
+    @State private var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier> = []
     @AppStorage("nav.activeListUUIDs") private var activeListUUIDs: String = ""
     @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
     // Flipped by the debug "Clear Old Lists" button to drive the purge inside ProjectsPanel.
@@ -171,6 +174,7 @@ struct ContentView: View {
                 activeListUUIDs = uuids.joined(separator: ",")
                 rebuildPinCaches()
             }
+            .onChange(of: hiddenUncategorizedProjectIDs) { _, _ in rebuildPinCaches() }
     }
 
     @ViewBuilder private var rootLayout: some View {
@@ -178,6 +182,7 @@ struct ContentView: View {
             if showProjectsPanel {
                 ProjectsPanel(
                     activeListIDs: $activeListIDs,
+                    hiddenUncategorizedProjectIDs: $hiddenUncategorizedProjectIDs,
                     purgeTrigger: purgeTrigger,
                     onFitToList: { pins in
                         let coords = pins.map(\.coordinate)
@@ -549,6 +554,8 @@ struct ContentView: View {
             list.pins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), list.colorHex) }
         }
         for project in allProjects {
+            // Skip uncategorized pins for projects whose "Uncategorized" eye is off.
+            guard !hiddenUncategorizedProjectIDs.contains(project.persistentModelID) else { continue }
             var seenStacks: Set<UUID> = []
             // Pre-group expanded stack members so we can index them for radial spread.
             let expandedMembers: [UUID: [PinnedLocationData]] = {
@@ -601,8 +608,10 @@ struct ContentView: View {
         // Sectioned grid matching sidebar order: lists inside projects, then unfiled.
         var sections: [PhotoGridView.Section] = []
         for project in allProjects.sorted(by: { $0.createdAt < $1.createdAt }) {
-            // Lists inside this project (sidebar panel order).
-            let sortedLists = project.lists.sorted { $0.panelOrder < $1.panelOrder }
+            // Lists inside this project (sidebar panel order). Only visible lists (eye on).
+            let sortedLists = project.lists
+                .filter { activeListIDs.contains($0.persistentModelID) }
+                .sorted { $0.panelOrder < $1.panelOrder }
             for list in sortedLists {
                 let locs = list.pins
                     .sorted { $0.sortOrder < $1.sortOrder }
@@ -617,8 +626,11 @@ struct ContentView: View {
                 }
             }
             // Directly-imported photos (no list). Deduplicate stacks — show only lead pin.
+            // Skipped entirely when this project's "Uncategorized" eye is off.
             var seenStacksGrid: Set<UUID> = []
-            let imported = project.importedPhotos
+            let imported = hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
+                ? []
+                : project.importedPhotos
                 .sorted { $0.sortOrder < $1.sortOrder }
                 .filter { pin in
                     if let sid = pin.stackID {

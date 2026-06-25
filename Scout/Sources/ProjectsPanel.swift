@@ -107,6 +107,8 @@ struct ProjectsPanel: View {
     @Query(sort: \ProjectData.createdAt) private var projects: [ProjectData]
 
     @Binding var activeListIDs: Set<PersistentIdentifier>
+    /// Projects whose uncategorized (loose) photos are hidden from map + grid.
+    @Binding var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier>
     /// Toggled by the debug "Clear Old Lists" button. Flipping it runs the full purge
     /// here (where navPath lives) so nav-pop + delete happen in one atomic transaction.
     var purgeTrigger: Bool = false
@@ -140,6 +142,7 @@ struct ProjectsPanel: View {
                         project: project,
                         initialExpandedUUIDs: storedExpandedUUIDs,
                         activeListIDs: $activeListIDs,
+                        hiddenUncategorizedProjectIDs: $hiddenUncategorizedProjectIDs,
                         onFitToList: onFitToList,
                         onSelectPin: onSelectPin,
                         onZoomToPin: onZoomToPin,
@@ -337,6 +340,7 @@ private struct ProjectDetailView: View {
     @Bindable var project: ProjectData
     var initialExpandedUUIDs: Set<String> = []
     @Binding var activeListIDs: Set<PersistentIdentifier>
+    @Binding var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onSelectPin: ((PinnedLocationData) -> Void)?
     var onZoomToPin: ((PinnedLocationData) -> Void)?
@@ -436,6 +440,24 @@ private struct ProjectDetailView: View {
             }
         } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
             onFitToList?(list.pins.filter { $0.hasGPS })
+        }
+    }
+
+    /// Whether this project's uncategorized (loose) photos are shown on map + grid.
+    private var uncategorizedVisible: Bool {
+        !hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
+    }
+
+    /// Toggles every list AND the uncategorized photos in this project on/off at once.
+    /// Used by Option-clicking any eye.
+    private func setProjectVisibility(_ visible: Bool) {
+        let pid = project.persistentModelID
+        if visible {
+            project.lists.forEach { activeListIDs.insert($0.persistentModelID) }
+            hiddenUncategorizedProjectIDs.remove(pid)
+        } else {
+            project.lists.forEach { activeListIDs.remove($0.persistentModelID) }
+            hiddenUncategorizedProjectIDs.insert(pid)
         }
     }
 
@@ -858,6 +880,40 @@ private struct ProjectDetailView: View {
                 tryImportDrop(providers, into: nil) || loadDropToTopLevel(providers, atTop: true)
             }
 
+            // Visibility toggle for this project's uncategorized (loose) photos.
+            if !project.importedPhotos.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "tray.full")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28)
+                    Text("Uncategorized")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        let pid = project.persistentModelID
+                        if NSEvent.modifierFlags.contains(.option) {
+                            setProjectVisibility(!uncategorizedVisible)
+                        } else if uncategorizedVisible {
+                            hiddenUncategorizedProjectIDs.insert(pid)
+                        } else {
+                            hiddenUncategorizedProjectIDs.remove(pid)
+                        }
+                    } label: {
+                        Image(systemName: uncategorizedVisible ? "eye.fill" : "eye")
+                            .font(.caption)
+                            .foregroundStyle(uncategorizedVisible ? Color.accentColor : .secondary)
+                            .frame(width: 28, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show/hide uncategorized photos on the map and grid (⌥ toggles everything)")
+                }
+                .padding(.horizontal, 4)
+                .listRowBackground(Color.clear)
+            }
+
             ForEach(sidebarItems) { item in
                 switch item {
                 case .photo(let pin):
@@ -933,11 +989,7 @@ private struct ProjectDetailView: View {
                             renamingList = list
                         },
                         onToggleAllVisibility: { makeAllActive in
-                            if makeAllActive {
-                                project.lists.forEach { activeListIDs.insert($0.persistentModelID) }
-                            } else {
-                                project.lists.forEach { activeListIDs.remove($0.persistentModelID) }
-                            }
+                            setProjectVisibility(makeAllActive)
                         },
                         dragProvider: { NSItemProvider(object: item.dragID as NSString) }
                     )
@@ -1712,7 +1764,7 @@ private struct MoveToListSheet: View {
 // MARK: - Previews
 
 #Preview("Projects list") {
-    ProjectsPanel(activeListIDs: .constant([]), externalMoveUUIDs: .constant([]))
+    ProjectsPanel(activeListIDs: .constant([]), hiddenUncategorizedProjectIDs: .constant([]), externalMoveUUIDs: .constant([]))
         .frame(width: 280, height: 600)
         .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self], inMemory: true)
 }
