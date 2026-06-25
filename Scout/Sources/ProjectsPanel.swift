@@ -561,7 +561,22 @@ private struct ProjectDetailView: View {
                     activeListIDs.insert(n.persistentModelID)
                     node = n.parentList
                 }
+                // Uncategorized is a top-level list too — hide it when soloing a real list.
+                hiddenUncategorizedProjectIDs.insert(project.persistentModelID)
             }
+        }
+    }
+
+    /// Double-click on the Uncategorized row: toggle its visibility, soloing it (hide every
+    /// top-level list) when turning on — exactly how double-clicking a normal list behaves.
+    private func handleUncategorizedDoubleTap() {
+        if uncategorizedVisible {
+            hiddenUncategorizedProjectIDs.insert(project.persistentModelID)
+        } else {
+            for top in project.lists where top.parentList == nil {
+                activeListIDs.remove(top.persistentModelID)
+            }
+            hiddenUncategorizedProjectIDs.remove(project.persistentModelID)
         }
     }
 
@@ -1295,11 +1310,20 @@ private struct ProjectDetailView: View {
                     .frame(width: 28, height: 32).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            Image(systemName: "tray.full")
-                .font(.caption).foregroundStyle(.secondary).frame(width: 14)
-            Text("Uncategorized").font(.callout)
-            Spacer()
-            Text("\(loosePhotos.count)").font(.caption).foregroundStyle(.secondary)
+
+            // Drag handle: only this region starts a reorder drag (matches ListRow).
+            HStack(spacing: 6) {
+                Image(systemName: "tray.full")
+                    .font(.caption).foregroundStyle(.secondary).frame(width: 10)
+                Text("Uncategorized").font(.body).foregroundStyle(.primary)
+                Spacer()
+                if !loosePhotos.isEmpty {
+                    Text("\(loosePhotos.count)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+            .onDrag { NSItemProvider(object: "uncategorized" as NSString) }
+
             Button {
                 let pid = proj.persistentModelID
                 if currentModifierFlags().option {
@@ -1311,23 +1335,21 @@ private struct ProjectDetailView: View {
                 }
             } label: {
                 Image(systemName: uncategorizedVisible ? "eye.fill" : "eye")
-                    .font(.caption)
                     .foregroundStyle(uncategorizedVisible ? Color.accentColor : .secondary)
-                    .frame(width: 28, height: 32).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Show/hide uncategorized photos on the map and grid (⌥ toggles everything)")
         }
-        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
         .contentShape(Rectangle())
         .onTapGesture {
             searchFieldFocused = false
             onClearPin?()
             onFitToList?(loosePhotos.filter { $0.hasGPS })
         }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { handleUncategorizedDoubleTap() })
         .background { rowHeightReader(itemID) }
         .overlay { dropIndicator(for: itemID) }
-        .onDrag { NSItemProvider(object: "uncategorized" as NSString) }
         .onDrop(of: [.text, .fileURL, .image],
                 delegate: SidebarRowDropDelegate(
                     targetID: itemID,
