@@ -21,25 +21,29 @@ struct PhotoGridView: View {
         let image: ScoutImage
         let location: ScoutLocation
         let indexInLocation: Int
+        /// True for saved pins — enables drag-to-sidebar. False for search results.
+        var isPinned: Bool = false
     }
 
-    private func makeItems(from locs: [ScoutLocation], startID: Int = 0) -> [PhotoItem] {
+    private func makeItems(from locs: [ScoutLocation], startID: Int = 0,
+                           isPinned: Bool = false) -> [PhotoItem] {
         var result: [PhotoItem] = []
         var counter = startID
         for loc in locs {
             guard let img = loc.images.first else { counter += 1; continue }
-            result.append(PhotoItem(id: counter, image: img, location: loc, indexInLocation: 0))
+            result.append(PhotoItem(id: counter, image: img, location: loc,
+                                    indexInLocation: 0, isPinned: isPinned))
             counter += 1
         }
         return result
     }
 
-    private var searchItems: [PhotoItem] { makeItems(from: locations) }
+    private var searchItems: [PhotoItem] { makeItems(from: locations, startID: 2_000_000) }
     // Build section items with non-overlapping IDs (sections use 0-based, search uses 2M+).
     private var sectionItems: [(title: String, items: [PhotoItem])] {
         var counter = 0
         return pinnedSections.map { section in
-            let items = makeItems(from: section.locations, startID: counter)
+            let items = makeItems(from: section.locations, startID: counter, isPinned: true)
             counter += section.locations.count + 1
             return (section.title, items)
         }
@@ -198,8 +202,17 @@ private struct MasonryCell: View {
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
         .onTapGesture { onTap?() }
+        .if(item.isPinned) { $0.onDrag {
+            NSItemProvider(object: "pin:\(item.location.id.uuidString)" as NSString)
+        }}
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.2), value: isHighlighted)
+    }
+}
+
+private extension View {
+    @ViewBuilder func `if`<T: View>(_ condition: Bool, transform: (Self) -> T) -> some View {
+        if condition { transform(self) } else { self }
     }
 }
 

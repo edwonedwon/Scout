@@ -528,7 +528,8 @@ struct ContentView: View {
     /// (unfiled pins are always shown), then centers on it.
     private func selectPin(_ pin: PinnedLocationData) {
         if viewMode == .photos {
-            // In photo view, scroll the grid to this pin's photos and highlight them.
+            // If the carousel is open, close it first so the grid is visible.
+            if photoViewer.isVisible { photoViewer.dismiss() }
             let id = pin.uuid
             highlightedPinID = (highlightedPinID == id) ? nil : id
             return
@@ -615,8 +616,8 @@ struct ContentView: View {
         pin.sortOrder = list.pins.count
         list.pins.append(pin)
         pin.list = list
-        // Keep owningProject if the target list belongs to the same project.
-        if let project = list.project { pin.owningProject = project }
+        // owningProject must stay nil for list pins — it's the inverse of importedPhotos,
+        // so setting it would add the pin back to the project top-level as a duplicate.
         try? modelContext.save()
     }
 
