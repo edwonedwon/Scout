@@ -291,6 +291,10 @@ struct ContentView: View {
     private func setupOnAppear() {
         rebuildPinCaches()
         loadSavedRegions()   // restore this project's region filters
+        // Always launch with the left projects panel open and the right search panel closed,
+        // regardless of how they were left last session.
+        showProjectsPanel = true
+        showRightPanel = false
         locations = []
         modelContext.undoManager = undoManager
         locationManager.requestIfNeeded()
@@ -564,7 +568,8 @@ struct ContentView: View {
                     fitAllPinsButton
                     locationTrackingButton
                     panelToggleButton(
-                        icon: showRightPanel ? "sidebar.right" : "rectangle.rightthird.inset.filled",
+                        icon: "magnifyingglass",
+                        circle: true,
                         action: { showRightPanel.toggle() }
                     )
                 }
@@ -601,12 +606,12 @@ struct ContentView: View {
         #endif
     }
 
-    private func panelToggleButton(icon: String, action: @escaping () -> Void) -> some View {
+    private func panelToggleButton(icon: String, circle: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.primary)
-                .mapControlChrome(diameter: 32, circle: false)
+                .mapControlChrome(diameter: 32, circle: circle)
         }
         .buttonStyle(.plain)
     }
