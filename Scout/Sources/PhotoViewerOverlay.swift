@@ -512,8 +512,12 @@ struct PhotoViewerOverlay: View {
                 Section("Add to List") {
                     ForEach(availableLists) { list in
                         Button {
-                            DispatchQueue.main.async { onSave(loc, list) }
-                            flashSaved(list.name)
+                            // Save into the list, then close the carousel — once a photo
+                            // is filed there's nothing left to do in the full-screen view.
+                            DispatchQueue.main.async {
+                                onSave(loc, list)
+                                viewer.dismiss()
+                            }
                         } label: {
                             Label(listLabel(list), systemImage: "mappin.circle")
                         }

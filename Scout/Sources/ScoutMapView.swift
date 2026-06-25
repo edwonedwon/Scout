@@ -281,6 +281,8 @@ final class ZoomableMapView: MKMapView {
     var onBuildAnnotationMenu: ((ScoutLocation) -> NSMenu?)?
     /// Fired when the user presses "f" with the map focused (frame all project pins).
     var onFrameAllPins: (() -> Void)?
+    /// Fired on double-click of a pin that has photos — opens the full-screen carousel.
+    var onPinDoubleClicked: ((ScoutLocation) -> Void)?
 
     // MARK: - Option-click multi-selection
     /// Location IDs currently in the multi-selection (mirrors ContentView's binding).
@@ -356,6 +358,15 @@ final class ZoomableMapView: MKMapView {
             applyHover(at: pt)
             let optionHeld = event.modifierFlags.contains(.option)
             if let ann = pinUnderCursor?.annotation as? LocationAnnotation {
+                // Double-click on a pin that has photos opens the full-screen carousel.
+                // (The first click of the pair opens the popover; this closes it and
+                // takes over.) Single click still just opens the popover.
+                if event.clickCount == 2, !optionHeld, !ann.location.images.isEmpty {
+                    clearMultiSelection()
+                    if let sel = selectedAnnotations.first { deselectAnnotation(sel, animated: false) }
+                    onPinDoubleClicked?(ann.location)
+                    return
+                }
                 // Option-click builds a multi-selection (no popover); plain click opens the popover.
                 if optionHeld {
                     if let sel = selectedAnnotations.first { deselectAnnotation(sel, animated: false) }
@@ -930,6 +941,8 @@ struct ScoutMapView {
     var onStackTapped: ((UUID) -> Void)? = nil
     /// Called when the map is clicked on empty space (deselect) so stacks can collapse.
     var onMapDeselect: (() -> Void)? = nil
+    /// Called on double-click of a pin that has photos — opens the full-screen carousel.
+    var onPinDoubleClicked: ((ScoutLocation) -> Void)? = nil
     var mapType: MKMapType = .standard
     var cyclingProvider: CyclingTileProvider? = nil
     var showPhotoAnnotations: Bool = false
@@ -983,6 +996,7 @@ struct ScoutMapView {
             zoomable.isDrawingMode = isDrawingMode
             zoomable.onPolygonComplete = onPolygonComplete
             zoomable.onFrameAllPins = onFrameAllPins
+            zoomable.onPinDoubleClicked = onPinDoubleClicked
             zoomable.onBuildAnnotationMenu = { [weak coordinator = context.coordinator] location in
                 coordinator?.buildAnnotationMenu(for: location)
             }

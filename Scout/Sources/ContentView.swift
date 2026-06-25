@@ -108,7 +108,11 @@ struct ContentView: View {
         guard !openProjectUUID.isEmpty,
               let project = allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })
         else { return [] }
-        return project.lists
+        // Match the sidebar order (panelOrder, then createdAt) so the Save / map
+        // callout menus list lists in the same order the user arranged them.
+        return project.lists.sorted {
+            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+        }
     }
 
     private var initialRegion: MKCoordinateRegion? {
@@ -481,6 +485,9 @@ struct ContentView: View {
                 if !uuids.isEmpty { externalMoveUUIDs = uuids }
             }
             .keyboardShortcut("m", modifiers: [])
+            // Disable while the sheet is open so typing "m" into its search field
+            // can't re-fire this shortcut and reset the sheet's state.
+            .disabled(showExternalMoveSheet)
             .opacity(0)
             .allowsHitTesting(false)
         }
@@ -1007,6 +1014,16 @@ struct ContentView: View {
                 if expandedStackID != nil {
                     expandedStackID = nil
                     rebuildPinCaches()
+                }
+            },
+            onPinDoubleClicked: { loc in
+                // Saved pin → reuse the full grid-ordered carousel; otherwise (search
+                // result) open the carousel with just this location's photos.
+                if let pin = allPins.first(where: { $0.uuid == loc.id }) {
+                    openInCarousel(pin)
+                } else if !loc.images.isEmpty {
+                    let imgs = loc.fullResImages.isEmpty ? loc.images : loc.fullResImages
+                    PhotoViewerState.shared.show(images: imgs, startingAt: 0, location: loc)
                 }
             },
             mapType: mapStyle.mapType,

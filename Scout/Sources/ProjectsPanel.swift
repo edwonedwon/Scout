@@ -1210,6 +1210,9 @@ private struct ProjectDetailView: View {
                 if hasPins { showMovePopup = true }
             }
             .keyboardShortcut("m", modifiers: [])
+            // Disable while the popup is open so typing "m" into its search field
+            // can't re-fire this shortcut and reset the popup's state.
+            .disabled(showMovePopup)
             .opacity(0)
             .allowsHitTesting(false)
         }
@@ -1729,13 +1732,13 @@ struct MoveToListSheet: View {
     @State private var query = ""
     @State private var highlighted = 0
     @FocusState private var fieldFocused: Bool
-    // Use @Query to fetch lists directly from the store so we always see the
-    // live data — reading via project.lists inside a computed property can miss
-    // updates if SwiftData's relationship observation doesn't re-fire on query changes.
-    @Query private var allLists: [LocationListData]
 
     private var projectLists: [LocationListData] {
-        allLists.filter { $0.project?.persistentModelID == project.persistentModelID }
+        // Use the project.lists forward relationship — the exact same source the
+        // sidebar uses — sorted to match sidebar order (panelOrder, then createdAt).
+        project.lists.sorted {
+            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+        }
     }
 
     private var filtered: [LocationListData] {
