@@ -696,10 +696,12 @@ struct ContentView: View {
         // Sectioned grid matching sidebar order: lists inside projects, then unfiled.
         var sections: [PhotoGridView.Section] = []
         for project in allProjects.sorted(by: { $0.createdAt < $1.createdAt }) {
-            // Lists inside this project (sidebar panel order). Only visible lists (eye on).
-            let sortedLists = project.lists
+            // Lists inside this project in exact sidebar order: top-level lists/folders by
+            // panelOrder, and each folder immediately followed by its child lists (also by
+            // panelOrder). Nested lists have a panelOrder relative to their folder, so a flat
+            // sort would scramble them — we must walk the hierarchy. Only visible lists shown.
+            let sortedLists = orderedListsForGrid(project)
                 .filter { isEffectivelyActive($0) }
-                .sorted { $0.panelOrder < $1.panelOrder }
             for list in sortedLists {
                 let locs = proximityOrdered(list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder })
                     .map { $0.asScoutLocation() }
@@ -744,6 +746,22 @@ struct ContentView: View {
         // They have no sidebar entry and no visibility toggle, so exclude from the grid —
         // the grid must show nothing when no list/uncategorized is visible.
         cachedGridSections = sections
+    }
+
+    /// Flattens a project's lists into sidebar display order: each top-level list/folder by
+    /// panelOrder, with a folder immediately followed by its child lists (also by panelOrder).
+    private func orderedListsForGrid(_ project: ProjectData) -> [LocationListData] {
+        var result: [LocationListData] = []
+        let topLevel = project.lists
+            .filter { $0.parentList == nil }
+            .sorted { $0.panelOrder < $1.panelOrder }
+        for list in topLevel {
+            result.append(list)
+            if !list.childLists.isEmpty {
+                result.append(contentsOf: list.childLists.sorted { $0.panelOrder < $1.panelOrder })
+            }
+        }
+        return result
     }
 
     /// The grid location closest to the map's current center — used to scroll the grid to
