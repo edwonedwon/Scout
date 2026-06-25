@@ -106,8 +106,9 @@ final class PinnedLocationData {
     // Capture time from EXIF — reserved for a future Google Timeline sync feature that
     // will derive coordinates for GPS-less imported photos from Timeline movement data.
     var dateTaken: Date? = nil
-    /// When set, this pin is part of a stack. All pins sharing a stackID form one visual unit.
-    var stackID: UUID? = nil
+    /// When set, this pin is in the Trash. It's hidden from all normal views and lives only
+    /// in the Trash section until restored, manually emptied, or auto-purged after 30 days.
+    var deletedAt: Date? = nil
     /// Counter-clockwise 90° rotation steps applied when displaying this photo (0–3).
     /// Set by the "R" rotate command; baked into every ScoutImage this pin produces.
     var rotationQuarterTurns: Int = 0
@@ -179,7 +180,6 @@ final class PinnedLocationData {
             name: name,
             description: notes,
             coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
-            groupID: stackID,   // lets the map know this pin is part of a stack
             sourceURL: sourceURLString.flatMap { URL(string: $0) },
             images: images,
             fullResImages: fullResImages,

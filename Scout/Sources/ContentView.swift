@@ -85,13 +85,13 @@ struct ContentView: View {
     @State private var purgeTrigger = false
     // Pin highlighted via list-view tap — used to scroll+highlight in the photo grid.
     @State private var highlightedPinID: UUID? = nil
+    /// Set when switching to the grid so it scrolls to the photo nearest the map's location.
+    @State private var gridScrollTargetID: UUID? = nil
     // Cached pin arrays so asScoutLocation() isn't called on every ContentView body render.
     // Rebuilt only when the underlying SwiftData queries or activeListIDs actually change.
     @State private var cachedProjectPins: [(ScoutLocation, String)] = []
     @State private var cachedAllProjectPins: [ScoutLocation] = []
     @State private var cachedGridSections: [PhotoGridView.Section] = []
-    /// When non-nil, this stackID is expanded on the map — all member pins are shown individually.
-    @State private var expandedStackID: UUID? = nil
     /// UUIDs to move when the move sheet is triggered from the grid or M key outside sidebar.
     @State private var externalMoveUUIDs: [UUID] = []
     /// Option-click multi-selection of map pins (location IDs).
@@ -148,10 +148,20 @@ struct ContentView: View {
                     photoViewer.restoreOnPhotoMode = false
                     photoViewer.isVisible = true
                 }
-                if newMode == .map { highlightedPinID = nil }
+                if newMode == .map {
+                    highlightedPinID = nil
+                    // Reset so a later switch to .photos re-triggers the scroll even if it
+                    // resolves to the same nearest photo as before.
+                    gridScrollTargetID = nil
+                }
                 if newMode == .photos {
                     selectedLocation = nil
                     mapController.dismissPopover()
+                    // Scroll the grid to the photo in/nearest the map's zoomed-in area.
+                    if let id = gridLocationNearestMapCenter() {
+                        gridScrollTargetID = id
+                        highlightedPinID = id
+                    }
                 }
             }
             .onChange(of: photoViewer.isVisible) { _, visible in
@@ -441,20 +451,13 @@ struct ContentView: View {
                 locations: locations,
                 pinnedSections: cachedGridSections,
                 highlightedLocationID: highlightedPinID,
+                scrollTargetID: gridScrollTargetID,
                 onClearSearchResults: clearSearchResults,
                 onSelectLocation: { id in highlightedPinID = id },
                 onDoubleSelectLocation: { id in
                     if let pin = allPins.first(where: { $0.uuid == id }) {
                         openInCarousel(pin)
                     }
-                },
-                onMakeStackFromGrid: { uuids in
-                    let pins = uuids.compactMap { id in allPins.first(where: { $0.uuid == id }) }
-                    guard pins.count >= 2 else { return }
-                    let stackID = UUID()
-                    for pin in pins { pin.stackID = stackID }
-                    try? modelContext.save()
-                    rebuildPinCaches()
                 },
                 onMoveToList: { uuids in externalMoveUUIDs = uuids },
                 onRotate: { uuids in rotatePins(uuids) },
@@ -629,47 +632,13 @@ struct ContentView: View {
     private func rebuildPinCaches() {
         let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
         var mapPins: [(ScoutLocation, String)] = active.flatMap { list in
-            list.pins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), list.colorHex) }
+            list.pins.filter { $0.hasGPS && $0.deletedAt == nil }.map { ($0.asScoutLocation(), list.colorHex) }
         }
         for project in allProjects {
             // Skip uncategorized pins for projects whose "Uncategorized" eye is off.
             guard !hiddenUncategorizedProjectIDs.contains(project.persistentModelID) else { continue }
-            var seenStacks: Set<UUID> = []
-            // Pre-group expanded stack members so we can index them for radial spread.
-            let expandedMembers: [UUID: [PinnedLocationData]] = {
-                guard let sid = expandedStackID else { return [:] }
-                let members = project.importedPhotos.filter { $0.stackID == sid && $0.hasGPS }
-                    .sorted { $0.sortOrder < $1.sortOrder }
-                return members.isEmpty ? [:] : [sid: members]
-            }()
-            for pin in project.importedPhotos where pin.hasGPS {
-                if let sid = pin.stackID {
-                    if sid == expandedStackID, let members = expandedMembers[sid] {
-                        // Spread members in a small circle so pins don't stack on one point.
-                        let idx = members.firstIndex(where: { $0.uuid == pin.uuid }) ?? 0
-                        let count = members.count
-                        let spreadMeters: Double = count > 1 ? 8.0 : 0
-                        let angle = (2 * Double.pi / Double(count)) * Double(idx)
-                        let dLat = (spreadMeters / 111_000) * cos(angle)
-                        let dLng = (spreadMeters / (111_000 * cos(pin.latitude * .pi / 180))) * sin(angle)
-                        var loc = pin.asScoutLocation()
-                        let coord = CLLocationCoordinate2D(latitude: loc.coordinate.latitude + dLat,
-                                                           longitude: loc.coordinate.longitude + dLng)
-                        loc = ScoutLocation(id: loc.id, name: loc.name, description: loc.description,
-                                            coordinate: coord, groupID: loc.groupID,
-                                            sourceURL: loc.sourceURL, images: loc.images,
-                                            fullResImages: loc.fullResImages,
-                                            googleMapsURL: loc.googleMapsURL,
-                                            googlePlaceId: loc.googlePlaceId)
-                        mapPins.append((loc, Self.generalPinColor))
-                    } else {
-                        // Stack is collapsed — only show the lead pin once.
-                        guard seenStacks.insert(sid).inserted else { continue }
-                        mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
-                    }
-                } else {
-                    mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
-                }
+            for pin in project.importedPhotos where pin.hasGPS && pin.deletedAt == nil {
+                mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
             }
         }
         // unfiledPins (list==nil, owningProject==nil) are orphaned data from old builds.
@@ -677,11 +646,12 @@ struct ContentView: View {
         cachedProjectPins = mapPins
 
         // Flat list kept for places that still need it (annotation building etc.)
-        var gridPins: [ScoutLocation] = active.flatMap { $0.pins }.map { $0.asScoutLocation() }
+        var gridPins: [ScoutLocation] = active.flatMap { $0.pins }
+            .filter { $0.deletedAt == nil }.map { $0.asScoutLocation() }
         for project in allProjects {
-            gridPins += project.importedPhotos.map { $0.asScoutLocation() }
+            gridPins += project.importedPhotos.filter { $0.deletedAt == nil }.map { $0.asScoutLocation() }
         }
-        gridPins += unfiledPins.map { $0.asScoutLocation() }
+        gridPins += unfiledPins.filter { $0.deletedAt == nil }.map { $0.asScoutLocation() }
         cachedAllProjectPins = gridPins
 
         // Sectioned grid matching sidebar order: lists inside projects, then unfiled.
@@ -692,7 +662,7 @@ struct ContentView: View {
                 .filter { activeListIDs.contains($0.persistentModelID) }
                 .sorted { $0.panelOrder < $1.panelOrder }
             for list in sortedLists {
-                let locs = proximityOrdered(list.pins.sorted { $0.sortOrder < $1.sortOrder })
+                let locs = proximityOrdered(list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder })
                     .map { $0.asScoutLocation() }
                     .filter { !$0.images.isEmpty }
                 if !locs.isEmpty {
@@ -703,19 +673,13 @@ struct ContentView: View {
                     ))
                 }
             }
-            // Directly-imported photos (no list). Deduplicate stacks — show only lead pin.
+            // Directly-imported photos (no list).
             // Skipped entirely when this project's "Uncategorized" eye is off.
-            var seenStacksGrid: Set<UUID> = []
             let importedPins = hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
                 ? []
                 : project.importedPhotos
+                .filter { $0.deletedAt == nil }
                 .sorted { $0.sortOrder < $1.sortOrder }
-                .filter { pin in
-                    if let sid = pin.stackID {
-                        return seenStacksGrid.insert(sid).inserted
-                    }
-                    return true
-                }
             let imported = proximityOrdered(importedPins)
                 .map { $0.asScoutLocation() }
                 .filter { !$0.images.isEmpty }
@@ -726,7 +690,7 @@ struct ContentView: View {
         }
         // Active standalone lists not belonging to any project.
         for list in active.filter({ $0.project == nil }).sorted(by: { $0.createdAt < $1.createdAt }) {
-            let locs = proximityOrdered(list.pins.sorted { $0.sortOrder < $1.sortOrder })
+            let locs = proximityOrdered(list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder })
                 .map { $0.asScoutLocation() }
                 .filter { !$0.images.isEmpty }
             if !locs.isEmpty {
@@ -741,6 +705,22 @@ struct ContentView: View {
         // They have no sidebar entry and no visibility toggle, so exclude from the grid —
         // the grid must show nothing when no list/uncategorized is visible.
         cachedGridSections = sections
+    }
+
+    /// The grid location closest to the map's current center — used to scroll the grid to
+    /// the photos in/nearest the zoomed-in map area. Skips photos with no real coordinate.
+    private func gridLocationNearestMapCenter() -> UUID? {
+        guard let center = mapController.mapView?.region.center else { return nil }
+        let locs = cachedGridSections.flatMap(\.locations)
+            .filter { $0.coordinate.latitude != 0 || $0.coordinate.longitude != 0 }
+        guard !locs.isEmpty else { return nil }
+        let cosLat = cos(center.latitude * .pi / 180)
+        func sqDist(_ c: CLLocationCoordinate2D) -> Double {
+            let dLat = c.latitude - center.latitude
+            let dLng = (c.longitude - center.longitude) * cosLat
+            return dLat * dLat + dLng * dLng
+        }
+        return locs.min { sqDist($0.coordinate) < sqDist($1.coordinate) }?.id
     }
 
     /// Orders pins within a grid section so geographically close photos sit next to each
@@ -819,23 +799,7 @@ struct ContentView: View {
     /// Opens a pin in the carousel with all pinned locations as the navigation universe,
     /// in sidebar order (matching cachedGridSections). Used for double-clicking no-GPS pins.
     private func openInCarousel(_ pin: PinnedLocationData) {
-        // If this pin belongs to a stack, gather all stack members' images into one location.
-        let location: ScoutLocation
-        if let stackID = pin.stackID {
-            let members = allPins.filter { $0.stackID == stackID }
-                .sorted { $0.sortOrder < $1.sortOrder }
-            let allImages = members.flatMap { m -> [ScoutImage] in
-                let loc = m.asScoutLocation()
-                return loc.fullResImages.isEmpty ? loc.images : loc.fullResImages
-            }
-            let base = pin.asScoutLocation()
-            location = ScoutLocation(id: base.id, name: base.name, description: base.description,
-                                     coordinate: base.coordinate, sourceURL: base.sourceURL,
-                                     images: allImages, googleMapsURL: base.googleMapsURL,
-                                     googlePlaceId: base.googlePlaceId)
-        } else {
-            location = pin.asScoutLocation()
-        }
+        let location = pin.asScoutLocation()
         // Build ordered universe from the grid sections (sidebar order).
         var seen = Set<UUID>()
         let allLocs = cachedGridSections.flatMap(\.locations).filter { seen.insert($0.id).inserted }
@@ -884,17 +848,13 @@ struct ContentView: View {
         }
     }
 
-    /// Deletes the pin backing the carousel's current location, then refreshes caches.
+    /// Moves the pin backing the carousel's current location to the Trash, then refreshes
+    /// caches. Soft-delete (not a hard SwiftData delete) keeps the photo recoverable and
+    /// avoids the crash that hard-deleting a pin the grid/map still referenced could cause.
     /// The carousel has already dismissed itself by the time this runs.
     private func deletePinFromCarousel(_ loc: ScoutLocation) {
         guard let pin = allPins.first(where: { $0.uuid == loc.id }) else { return }
-        if let list = pin.list {
-            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
-        }
-        if let project = pin.owningProject {
-            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-        }
-        modelContext.delete(pin)
+        pin.deletedAt = Date()
         try? modelContext.save()
         rebuildPinCaches()
     }
@@ -1047,20 +1007,6 @@ struct ContentView: View {
             searchPolygon: searchArea.polygon,
             onPolygonComplete: { coords in searchArea.setPolygon(coords) },
             onFrameAllPins: frameAllProjectPins,
-            onStackTapped: { stackID in
-                if expandedStackID == stackID {
-                    expandedStackID = nil
-                } else {
-                    expandedStackID = stackID
-                }
-                rebuildPinCaches()
-            },
-            onMapDeselect: {
-                if expandedStackID != nil {
-                    expandedStackID = nil
-                    rebuildPinCaches()
-                }
-            },
             onPinDoubleClicked: { loc in
                 // Saved pin → reuse the full grid-ordered carousel; otherwise (search
                 // result) open the carousel with just this location's photos.

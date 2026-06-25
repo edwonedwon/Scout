@@ -298,14 +298,11 @@ private final class SidebarSelection: ObservableObject {
 private enum SidebarItem: Identifiable {
     case photo(PinnedLocationData)
     case list(LocationListData)
-    /// A group of photos that share a stackID — shown as one row with a count badge.
-    case stack(lead: PinnedLocationData, members: [PinnedLocationData])
 
     var id: PersistentIdentifier {
         switch self {
         case .photo(let p): return p.persistentModelID
         case .list(let l): return l.persistentModelID
-        case .stack(let lead, _): return lead.persistentModelID
         }
     }
 
@@ -313,7 +310,6 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return p.panelOrder
         case .list(let l): return l.panelOrder
-        case .stack(let lead, _): return lead.panelOrder
         }
     }
 
@@ -321,7 +317,6 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return p.createdAt
         case .list(let l): return l.createdAt
-        case .stack(let lead, _): return lead.createdAt
         }
     }
 
@@ -329,7 +324,6 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return "photo:\(p.uuid.uuidString)"
         case .list(let l): return "list:\(l.uuid.uuidString)"
-        case .stack(let lead, _): return "photo:\(lead.uuid.uuidString)"
         }
     }
 }
@@ -376,6 +370,13 @@ private struct ProjectDetailView: View {
     @State private var cachedSidebarItems: [SidebarItem] = []
     // Held so moveSelection can scroll without needing to be inside the ScrollViewReader body.
     @State private var listProxyHolder: ScrollViewProxy? = nil
+    // Undo stack of trashed-photo batches (each batch = the persistent ids trashed together).
+    // ⌘Z pops the last batch and restores those photos.
+    @State private var trashUndoStack: [[PersistentIdentifier]] = []
+    @State private var expandedTrash = false
+    // Top-level row currently under a reorder drag — a blue insertion line is drawn at its
+    // top edge to preview where the dragged item will land (it inserts before this row).
+    @State private var dropTargetID: PersistentIdentifier? = nil
 
     /// Flat ordered list of every currently visible row id (including expanded list pins),
     /// used to resolve a shift-click range.
@@ -391,8 +392,6 @@ private struct ProjectDetailView: View {
                     result.append(contentsOf:
                         list.pins.sorted { $0.sortOrder < $1.sortOrder }.map(\.persistentModelID))
                 }
-            case .stack(let lead, _):
-                result.append(lead.persistentModelID)
             }
         }
         return result
@@ -504,22 +503,11 @@ private struct ProjectDetailView: View {
     }
 
     private func rebuildSidebarItems() {
-        // Group imported photos by stackID; unstacked photos become individual .photo items.
-        var stackGroups: [UUID: [PinnedLocationData]] = [:]
-        var unstackedPhotos: [PinnedLocationData] = []
-        for pin in project.importedPhotos {
-            if let sid = pin.stackID {
-                stackGroups[sid, default: []].append(pin)
-            } else {
-                unstackedPhotos.append(pin)
-            }
-        }
-        var photoItems: [SidebarItem] = unstackedPhotos.map { .photo($0) }
-        for (_, members) in stackGroups {
-            let sorted = members.sorted { $0.sortOrder < $1.sortOrder }
-            guard let lead = sorted.first else { continue }
-            photoItems.append(.stack(lead: lead, members: sorted))
-        }
+        // Each imported photo is its own row (trashed photos are excluded — they live
+        // only in the Trash section at the bottom).
+        let photoItems: [SidebarItem] = project.importedPhotos
+            .filter { $0.deletedAt == nil }
+            .map { .photo($0) }
         let lists = project.lists.filter { $0.parentList == nil }.map { SidebarItem.list($0) }
         cachedSidebarItems = (photoItems + lists).sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
@@ -539,7 +527,6 @@ private struct ProjectDetailView: View {
             switch item {
             case .photo(let p):          if p.panelOrder != i { p.panelOrder = i }
             case .list(let l):           if l.panelOrder != i { l.panelOrder = i }
-            case .stack(let lead, _):    if lead.panelOrder != i { lead.panelOrder = i }
             }
         }
     }
@@ -733,13 +720,6 @@ private struct ProjectDetailView: View {
                 project.importedPhotos.append(pin)
                 normalizeOrder()
                 try? modelContext.save()
-            case .stack(let lead, _):
-                detach(pin)
-                pin.owningProject = project
-                pin.panelOrder = lead.panelOrder
-                project.importedPhotos.append(pin)
-                normalizeOrder()
-                try? modelContext.save()
             }
             return true
         }
@@ -765,61 +745,119 @@ private struct ProjectDetailView: View {
         var items = sidebarItems
         guard let from = items.firstIndex(where: { $0.id == dragged.id }) else { return }
         let moving = items.remove(at: from)
-        guard var to = items.firstIndex(where: { $0.id == target.id }) else { return }
-        // When dragging downward, insert after the target so the item lands below it.
-        if from > to { to += 1 }
-        items.insert(moving, at: min(to, items.count))
+        // Insert immediately BEFORE the target in visual order — matches the blue insertion
+        // line drawn at the target row's top edge, so the drop lands exactly where shown.
+        guard let to = items.firstIndex(where: { $0.id == target.id }) else { return }
+        items.insert(moving, at: to)
         for (i, item) in items.enumerated() {
             switch item {
             case .photo(let p):       p.panelOrder = i
             case .list(let l):        l.panelOrder = i
-            case .stack(let lead, _): lead.panelOrder = i
             }
         }
         try? modelContext.save()
     }
 
-    /// Deletes a single pin, whether it's a top-level photo or lives inside a list.
+    /// Soft-deletes a photo by moving it to the Trash (keeps its list/project membership so
+    /// it can be restored in place). Pushes an undo batch so ⌘Z brings it back.
     private func deletePin(_ pin: PinnedLocationData) {
-        if let list = pin.list {
-            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
-        } else {
-            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+        trashPins([pin])
+    }
+
+    /// Moves photos to the Trash and records an undo batch. Lists are never trashed —
+    /// they're not photos — so this only touches pins.
+    private func trashPins(_ pins: [PinnedLocationData]) {
+        let live = pins.filter { $0.deletedAt == nil }
+        guard !live.isEmpty else { return }
+        let now = Date()
+        for pin in live {
+            pin.deletedAt = now
+            selection.ids.remove(pin.persistentModelID)
         }
-        modelContext.delete(pin)
+        trashUndoStack.append(live.map { $0.persistentModelID })
         normalizeOrder()
         try? modelContext.save()
     }
 
-    /// Deletes every currently-selected sidebar item — top-level photos, pins inside
-    /// lists, and whole lists alike. Resolves all targets first, then deletes, so we never
+    /// Deletes every currently-selected sidebar item. Photos go to the Trash (soft-delete,
+    /// undoable); whole lists are removed outright. Resolves all targets first so we never
     /// re-read a relationship mid-mutation.
     private func deleteSelectedItems() {
         let ids = selection.ids
         guard !ids.isEmpty else { return }
-        var pinsToDelete: [PinnedLocationData] = []
+        var pinsToTrash: [PinnedLocationData] = []
         var listsToDelete: [LocationListData] = []
         for id in ids {
             if let pin = findPin(byID: id) {
-                pinsToDelete.append(pin)
+                pinsToTrash.append(pin)
             } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
                 listsToDelete.append(list)
             }
-        }
-        for pin in pinsToDelete {
-            if let list = pin.list {
-                list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
-            } else {
-                project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-            }
-            modelContext.delete(pin)
         }
         for list in listsToDelete {
             activeListIDs.remove(list.persistentModelID)
             modelContext.delete(list)
         }
         selection.ids = []
+        trashPins(pinsToTrash)   // saves + normalizes
+        if pinsToTrash.isEmpty { normalizeOrder(); try? modelContext.save() }
+    }
+
+    // MARK: - Trash
+
+    /// All trashed photos in this project (top-level or inside any list), newest first.
+    private var trashedPins: [PinnedLocationData] {
+        var pins = project.importedPhotos.filter { $0.deletedAt != nil }
+        for list in project.lists { pins += list.pins.filter { $0.deletedAt != nil } }
+        return pins.sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
+    }
+
+    /// Restores a trashed photo back to wherever it lived.
+    private func restoreFromTrash(_ pin: PinnedLocationData) {
+        pin.deletedAt = nil
         normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// ⌘Z — restores the most recent batch of trashed photos. Falls back to the single
+    /// newest trashed photo so deletes made elsewhere (e.g. the carousel) are also undoable.
+    private func undoLastTrash() {
+        if let batch = trashUndoStack.popLast() {
+            for id in batch {
+                if let pin = findPin(byID: id) { pin.deletedAt = nil }
+            }
+        } else if let latest = trashedPins.first {   // trashedPins is sorted newest-first
+            latest.deletedAt = nil
+        } else {
+            return
+        }
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// Permanently deletes a single trashed photo (right-click → Delete Permanently).
+    private func purgePin(_ pin: PinnedLocationData) {
+        if let list = pin.list {
+            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
+        } else {
+            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+        }
+        modelContext.delete(pin)
+        try? modelContext.save()
+    }
+
+    /// Empties the Trash — permanently deletes every trashed photo in this project.
+    private func emptyTrash() {
+        for pin in trashedPins { purgePin(pin) }
+        try? modelContext.save()
+    }
+
+    /// Purges photos that have been in the Trash longer than 30 days. Called on appear.
+    private func purgeExpiredTrash() {
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        let expired = trashedPins.filter { ($0.deletedAt ?? .distantFuture) < cutoff }
+        guard !expired.isEmpty else { return }
+        for pin in expired { purgePin(pin) }
         try? modelContext.save()
     }
 
@@ -836,27 +874,6 @@ private struct ProjectDetailView: View {
                          : "Delete Items (\(selection.ids.count))"
     }
 
-    private var selectedPhotoCount: Int {
-        selection.ids.filter { findPin(byID: $0) != nil }.count
-    }
-
-    /// Groups selected top-level photos into a stack (shared stackID).
-    private func makeStack(from ids: Set<PersistentIdentifier>) {
-        let pins = ids.compactMap { findPin(byID: $0) }
-        guard pins.count >= 2 else { return }
-        let stackID = UUID()
-        for pin in pins { pin.stackID = stackID }
-        selection.ids = []
-        normalizeOrder()
-        try? modelContext.save()
-    }
-
-    /// Removes all pins from their stack (clears stackID).
-    private func unstackPins(_ pins: [PinnedLocationData]) {
-        for pin in pins { pin.stackID = nil }
-        normalizeOrder()
-        try? modelContext.save()
-    }
 
     /// Trimmed search query; empty means no filtering.
     private var trimmedSearch: String { searchText.trimmingCharacters(in: .whitespaces) }
@@ -871,8 +888,6 @@ private struct ProjectDetailView: View {
             switch item {
             case .photo(let p):
                 return nameMatches(p.name) ? item : nil
-            case .stack(_, let members):
-                return members.contains { nameMatches($0.name) } ? item : nil
             case .list(let list):
                 if nameMatches(list.name) { return item }
                 return list.pins.contains { nameMatches($0.name) } ? item : nil
@@ -902,6 +917,30 @@ private struct ProjectDetailView: View {
         .padding(.horizontal, 8)
         .padding(.top, sidebarTopPadding)
         .padding(.bottom, 6)
+    }
+
+    /// `isTargeted` binding for a top-level row that records which row the drag is over,
+    /// so a blue insertion line can be drawn at its top edge.
+    private func dropTargetBinding(_ id: PersistentIdentifier) -> Binding<Bool> {
+        Binding(
+            get: { dropTargetID == id },
+            set: { inside in
+                if inside { dropTargetID = id }
+                else if dropTargetID == id { dropTargetID = nil }
+            }
+        )
+    }
+
+    /// The blue insertion line, shown at the top of the row the drag is currently over.
+    @ViewBuilder
+    private func dropLine(for id: PersistentIdentifier) -> some View {
+        if dropTargetID == id {
+            Rectangle()
+                .fill(Color.accentColor)
+                .frame(height: 2)
+                .padding(.horizontal, 4)
+                .transition(.opacity)
+        }
     }
 
     var body: some View {
@@ -977,12 +1016,6 @@ private struct ProjectDetailView: View {
                     )
                     .contextMenu {
                         let multi = isInMultiSelection(pin.persistentModelID)
-                        if multi && selectedPhotoCount >= 2 {
-                            Button { makeStack(from: selection.ids) } label: {
-                                Label("Make Stack", systemImage: "square.3.layers.3d")
-                            }
-                            Divider()
-                        }
                         if let path = pin.originalFilePath {
                             Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
                                 Label("Reveal in Finder", systemImage: "folder")
@@ -995,32 +1028,12 @@ private struct ProjectDetailView: View {
                             Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
                         }
                     }
+                    .overlay(alignment: .top) { dropLine(for: item.id) }
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
-                    .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
-                        tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .photo(pin))
-                    }
-                case .stack(let lead, let members):
-                    StackRow(
-                        lead: lead,
-                        members: members,
-                        selection: selection,
-                        onTap: { shift, option in handleTap(lead.persistentModelID, shift: shift, option: option) },
-                        onDoubleTap: { onOpenCarousel?(lead) }
-                    )
-                    .contextMenu {
-                        Button { unstackPins(members) } label: {
-                            Label("Unstack", systemImage: "square.3.layers.3d.slash")
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            members.forEach { deletePin($0) }
-                        } label: {
-                            Label("Delete Stack", systemImage: "trash")
-                        }
-                    }
-                    .onDrag { NSItemProvider(object: item.dragID as NSString) }
-                    .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
-                        tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .stack(lead: lead, members: members))
+                    .onDrop(of: [.text, .fileURL, .image], isTargeted: dropTargetBinding(item.id)) { providers in
+                        let handled = tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .photo(pin))
+                        dropTargetID = nil
+                        return handled
                     }
                 case .list(let list):
                     // While searching, force lists open so matching photos are visible.
@@ -1047,12 +1060,16 @@ private struct ProjectDetailView: View {
                         },
                         dragProvider: { NSItemProvider(object: item.dragID as NSString) }
                     )
-                    .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
-                        tryImportDrop(providers, into: list) || loadDrop(providers, onto: .list(list))
+                    .overlay(alignment: .top) { dropLine(for: item.id) }
+                    .onDrop(of: [.text, .fileURL, .image], isTargeted: dropTargetBinding(item.id)) { providers in
+                        let handled = tryImportDrop(providers, into: list) || loadDrop(providers, onto: .list(list))
+                        dropTargetID = nil
+                        return handled
                     }
 
                     if isExpanded {
                         let pins = list.pins
+                            .filter { $0.deletedAt == nil }
                             .sorted { $0.sortOrder < $1.sortOrder }
                             .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
                         ForEach(pins) { pin in
@@ -1067,12 +1084,6 @@ private struct ProjectDetailView: View {
                             .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
                             .contextMenu {
                                 let multi = isInMultiSelection(pin.persistentModelID)
-                                if multi && selectedPhotoCount >= 2 {
-                                    Button { makeStack(from: selection.ids) } label: {
-                                        Label("Make Stack", systemImage: "square.3.layers.3d")
-                                    }
-                                    Divider()
-                                }
                                 Button(role: .destructive) {
                                     if multi { deleteSelectedItems() } else { deletePin(pin) }
                                 } label: {
@@ -1082,6 +1093,64 @@ private struct ProjectDetailView: View {
                             .onDrag { NSItemProvider(object: "pin:\(pin.uuid.uuidString)" as NSString) }
                             .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
                                 tryImportDrop(providers, into: list) || loadDropPin(providers, intoList: list, afterPin: pin)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Trash — soft-deleted photos. Pinned to the bottom of the sidebar.
+            let trashed = trashedPins
+            if !trashed.isEmpty {
+                HStack(spacing: 6) {
+                    Button {
+                        expandedTrash.toggle()
+                    } label: {
+                        Image(systemName: expandedTrash ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Image(systemName: "trash")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Trash")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(trashed.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 4)
+                .listRowBackground(Color.clear)
+                .contextMenu {
+                    Button(role: .destructive) { emptyTrash() } label: {
+                        Label("Empty Trash", systemImage: "trash.slash")
+                    }
+                }
+                .help("Photos here are deleted automatically after 30 days")
+
+                if expandedTrash {
+                    ForEach(trashed, id: \.persistentModelID) { pin in
+                        PinRow(
+                            pin: pin,
+                            selection: selection,
+                            onTap: { _, _ in },
+                            onDoubleTap: {}
+                        )
+                        .padding(.leading, 24)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+                        .opacity(0.6)
+                        .contextMenu {
+                            Button { restoreFromTrash(pin) } label: {
+                                Label("Put Back", systemImage: "arrow.uturn.backward")
+                            }
+                            Divider()
+                            Button(role: .destructive) { purgePin(pin) } label: {
+                                Label("Delete Permanently", systemImage: "trash")
                             }
                         }
                     }
@@ -1102,6 +1171,7 @@ private struct ProjectDetailView: View {
         .background(ScrollerGutterReserver(width: 14))
         .onAppear {
             normalizeOrder()
+            purgeExpiredTrash()   // remove photos trashed > 30 days ago
             // project.lists is synchronously available here via SwiftData.
             if !initialExpandedUUIDs.isEmpty {
                 expandedListIDs = Set(
@@ -1124,9 +1194,18 @@ private struct ProjectDetailView: View {
                 .keyboardShortcut("a", modifiers: .shift)
                 .opacity(0)
                 .allowsHitTesting(false)
+            // ⌘Z restores the most recently trashed batch of photos.
+            Button("", action: undoLastTrash)
+                .keyboardShortcut("z", modifiers: .command)
+                .opacity(0)
+                .allowsHitTesting(false)
         }
         .onChange(of: project.importedPhotos.count) { normalizeOrder() }
         .onChange(of: project.lists.count) { normalizeOrder() }
+        // Rebuild when photos are trashed/restored elsewhere (e.g. the carousel's delete)
+        // — soft-delete doesn't change the relationship counts above, so this watches the
+        // trashed count to keep the sidebar and Trash section in sync.
+        .onChange(of: trashedPins.count) { normalizeOrder() }
         .onChange(of: expandedListIDs) { _, ids in
             // Persist current expanded state as UUID strings (stable across relaunches).
             let uuids = project.lists
@@ -1540,80 +1619,6 @@ private struct PinRow: View {
     }
 }
 
-// MARK: - Stack row
-
-private struct StackRow: View {
-    let lead: PinnedLocationData
-    let members: [PinnedLocationData]
-    @ObservedObject var selection: SidebarSelection
-    var onTap: ((Bool, Bool) -> Void)? = nil
-    var onDoubleTap: (() -> Void)? = nil
-
-    private var isSelected: Bool { selection.contains(lead.persistentModelID) }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            ZStack(alignment: .bottomTrailing) {
-                thumbnailImage(for: lead)
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                // Stacked layers badge
-                ZStack {
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(.ultraThinMaterial)
-                    Text("\(members.count)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
-                }
-                .frame(width: 20, height: 16)
-                .offset(x: 4, y: 4)
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(lead.name)
-                    .font(.body)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Image(systemName: "square.3.layers.3d")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("\(members.count) photos")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-        }
-        .contentShape(Rectangle())
-        .padding(.vertical, 2)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
-        )
-        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift), NSEvent.modifierFlags.contains(.option)) }
-        .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
-    }
-
-    @ViewBuilder
-    private func thumbnailImage(for pin: PinnedLocationData) -> some View {
-        let url: URL? = pin.thumbnailImages.first?.url
-            ?? pin.photoFiles.first.map { PinPhotoStore.fileURL($0) }
-            ?? pin.imageURL.flatMap { URL(string: $0) }
-        if let url {
-            GooglePhotoImage(url: url, rotationQuarterTurns: pin.rotationQuarterTurns) { Color.secondary.opacity(0.2) }
-                .aspectRatio(contentMode: .fill)
-        } else {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.15))
-                .overlay(Image(systemName: "square.3.layers.3d").foregroundStyle(.secondary))
-        }
-    }
-}
-
 // MARK: - OutlineGroup children helper
 
 extension LocationListData {
@@ -1747,6 +1752,12 @@ struct MoveToListSheet: View {
         return projectLists.filter { $0.name.localizedCaseInsensitiveContains(q) }
     }
 
+    /// The currently highlighted list (clamped), or nil when there are no results.
+    private var highlightedList: LocationListData? {
+        guard !filtered.isEmpty else { return nil }
+        return filtered[min(max(highlighted, 0), filtered.count - 1)]
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Search field
@@ -1774,7 +1785,12 @@ struct MoveToListSheet: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 2) {
-                            ForEach(Array(filtered.enumerated()), id: \.element.persistentModelID) { idx, list in
+                            // Identity is the list's persistentModelID ONLY. A previous
+                            // version also set .id(idx), which conflicted with the ForEach
+                            // identity and made SwiftUI keep showing a stale row's content
+                            // when the filter narrowed — that was the M-menu search bug.
+                            ForEach(filtered, id: \.persistentModelID) { list in
+                                let isHi = highlightedList?.persistentModelID == list.persistentModelID
                                 HStack(spacing: 8) {
                                     Circle()
                                         .fill(Color(hexString: list.colorHex))
@@ -1782,7 +1798,7 @@ struct MoveToListSheet: View {
                                     Text(list.name)
                                         .font(.subheadline)
                                     Spacer()
-                                    if idx == highlighted {
+                                    if isHi {
                                         Image(systemName: "return")
                                             .font(.caption2)
                                             .foregroundStyle(.secondary)
@@ -1790,17 +1806,19 @@ struct MoveToListSheet: View {
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 7)
-                                .background(idx == highlighted ? Color.accentColor.opacity(0.15) : Color.clear,
+                                .background(isHi ? Color.accentColor.opacity(0.15) : Color.clear,
                                             in: RoundedRectangle(cornerRadius: 6))
                                 .contentShape(Rectangle())
                                 .onTapGesture { onMove(list) }
-                                .id(idx)
+                                .id(list.persistentModelID)
                             }
                         }
                         .padding(.vertical, 6)
                     }
-                    .onChange(of: highlighted) { _, idx in
-                        withAnimation { proxy.scrollTo(idx, anchor: .center) }
+                    .onChange(of: highlighted) { _, _ in
+                        if let hl = highlightedList {
+                            withAnimation { proxy.scrollTo(hl.persistentModelID, anchor: .center) }
+                        }
                     }
                 }
             }

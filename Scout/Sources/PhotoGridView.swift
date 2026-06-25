@@ -24,13 +24,14 @@ struct PhotoGridView: View {
     var pinnedSections: [Section] = []
     /// UUID of the location (== PinnedLocationData.uuid) to scroll to and highlight.
     var highlightedLocationID: UUID? = nil
+    /// When set, the grid scrolls this location to the top. Used to jump to the photos
+    /// nearest the map's current location when switching from map to grid.
+    var scrollTargetID: UUID? = nil
     var onClearSearchResults: (() -> Void)? = nil
     /// Called with the location UUID when the user taps a cell (before the carousel opens).
     var onSelectLocation: ((UUID) -> Void)? = nil
-    /// Called on double-tap. ContentView uses this to open the carousel with stack-aware logic.
+    /// Called on double-tap. ContentView uses this to open the carousel.
     var onDoubleSelectLocation: ((UUID) -> Void)? = nil
-    /// Called with selected UUIDs when "Make Stack" is chosen from the grid context menu.
-    var onMakeStackFromGrid: (([UUID]) -> Void)? = nil
     /// Called with selected UUIDs when "Add to List" is chosen from the grid context menu.
     var onMoveToList: (([UUID]) -> Void)? = nil
     /// Called with selected UUIDs when "R" is pressed — rotate 90° counter-clockwise.
@@ -117,6 +118,12 @@ struct PhotoGridView: View {
                 .overlay(alignment: .bottom) {
                     GridSizeSlider(columns: $columns)
                 }
+                // Jump to a requested location (e.g. nearest the map's zoomed area). Deferred
+                // so the grid — often just made visible — has laid out before we scroll.
+                .onChange(of: scrollTargetID) { _, id in
+                    guard let id else { return }
+                    DispatchQueue.main.async { scrollPositionID = id }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.black)
@@ -173,7 +180,6 @@ struct PhotoGridView: View {
                             onTap: { selectItem(item, allItems: allItems) },
                             onDoubleTap: { openCarousel(from: item, universe: allItems) },
                             originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil,
-                            onMakeStack: onMakeStackFromGrid,
                             onMoveToList: onMoveToList
                         )
                         .id(item.id)
@@ -237,7 +243,6 @@ private struct MasonryCell: View {
     var onTap: (() -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
     var originalFilePath: String? = nil
-    var onMakeStack: (([UUID]) -> Void)? = nil
     var onMoveToList: (([UUID]) -> Void)? = nil
     @State private var isHovered = false
 
@@ -315,13 +320,6 @@ private struct MasonryCell: View {
             if item.isPinned, let onMoveToList {
                 Button { onMoveToList(actionIDs()) } label: {
                     Label("Add to List…", systemImage: "arrow.right.square")
-                }
-            }
-            // Make Stack only when 2+ photos including this one are selected.
-            if item.isPinned, let onMakeStack,
-               selection.contains(item.location.id), selection.ids.count >= 2 {
-                Button { onMakeStack(Array(selection.ids)) } label: {
-                    Label("Make Stack", systemImage: "square.3.layers.3d")
                 }
             }
             if item.isPinned { Divider() }

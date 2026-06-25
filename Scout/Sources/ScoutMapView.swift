@@ -299,6 +299,14 @@ final class ZoomableMapView: MKMapView {
         onMultiSelectionChanged?(multiSelectedIDs)
     }
 
+    /// Adds a pin to the multi-selection (no-op if already present) and rings it.
+    private func addToMultiSelect(_ ann: LocationAnnotation) {
+        guard !multiSelectedIDs.contains(ann.location.id) else { return }
+        multiSelectedIDs.insert(ann.location.id)
+        applySelectionRing(to: ann, selected: true)
+        onMultiSelectionChanged?(multiSelectedIDs)
+    }
+
     /// Clears the whole multi-selection and removes every selection ring.
     func clearMultiSelection() {
         guard !multiSelectedIDs.isEmpty else { return }
@@ -369,7 +377,12 @@ final class ZoomableMapView: MKMapView {
                 }
                 // Option-click builds a multi-selection (no popover); plain click opens the popover.
                 if optionHeld {
-                    if let sel = selectedAnnotations.first { deselectAnnotation(sel, animated: false) }
+                    // Fold the currently-open popover pin into the multi-selection so the
+                    // first plain-clicked pin isn't lost when the user starts option-clicking.
+                    if let sel = selectedAnnotations.first as? LocationAnnotation {
+                        deselectAnnotation(sel, animated: false)   // closes the overlay
+                        addToMultiSelect(sel)
+                    }
                     toggleMultiSelect(ann)
                     return
                 }
@@ -936,10 +949,7 @@ struct ScoutMapView {
     var searchPolygon: [CLLocationCoordinate2D]? = nil
     var onPolygonComplete: ([CLLocationCoordinate2D]) -> Void = { _ in }
     var onFrameAllPins: () -> Void = {}
-    /// Called when a stack annotation is tapped, with the stack's groupID.
-    /// ContentView toggles expandedStackID so member pins appear/disappear on the map.
-    var onStackTapped: ((UUID) -> Void)? = nil
-    /// Called when the map is clicked on empty space (deselect) so stacks can collapse.
+    /// Called when the map is clicked on empty space (deselect).
     var onMapDeselect: (() -> Void)? = nil
     /// Called on double-click of a pin that has photos — opens the full-screen carousel.
     var onPinDoubleClicked: ((ScoutLocation) -> Void)? = nil
@@ -1315,9 +1325,6 @@ struct ScoutMapView {
             }
             DispatchQueue.main.async {
                 self.parent.selection = ann.location
-                if let groupID = ann.location.groupID {
-                    self.parent.onStackTapped?(groupID)
-                }
             }
             #if os(macOS)
             showPopover(for: ann.location, from: view, in: mapView)
