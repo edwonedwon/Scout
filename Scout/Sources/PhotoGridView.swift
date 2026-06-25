@@ -19,10 +19,11 @@ struct PhotoGridView: View {
         var result: [PhotoItem] = []
         var counter = startID
         for loc in locs {
-            for (i, img) in loc.images.enumerated() {
-                result.append(PhotoItem(id: counter, image: img, location: loc, indexInLocation: i))
-                counter += 1
-            }
+            // Only show the first photo per location in the grid. The rest are loaded
+            // lazily in the carousel when the user opens it.
+            guard let img = loc.images.first else { counter += 1; continue }
+            result.append(PhotoItem(id: counter, image: img, location: loc, indexInLocation: 0))
+            counter += 1
         }
         return result
     }

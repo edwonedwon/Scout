@@ -40,6 +40,16 @@ struct SettingsView: View {
 
             Section {
                 APIKeyField(
+                    placeholder: "fsq3…",
+                    isSet: apiKeyState.foursquareKeyIsSet,
+                    onSave: { try apiKeyState.saveFoursquareKey($0) }
+                )
+            } header: {
+                KeySectionHeader("Foursquare", help: .foursquare)
+            }
+
+            Section {
+                APIKeyField(
                     placeholder: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
                     isSet: apiKeyState.flickrKeyIsSet,
                     onSave: { try apiKeyState.saveFlickrKey($0) }
@@ -178,6 +188,18 @@ struct KeyHelp {
             .init(text: "Photos are free to use under Creative Commons licenses"),
         ],
         url: URL(string: "https://commons.wikimedia.org")
+    )
+
+    static let foursquare = KeyHelp(
+        title: "Foursquare API Key",
+        required: false,
+        summary: "Powers Foursquare place search — 100k free calls/month, good place photos.",
+        steps: [
+            .init(text: "Go to foursquare.com/developers and sign up"),
+            .init(text: "Create a new project"),
+            .init(text: "Copy the API Key — it starts with \"fsq3\""),
+        ],
+        url: URL(string: "https://foursquare.com/developers/home")
     )
 
     static let flickr = KeyHelp(

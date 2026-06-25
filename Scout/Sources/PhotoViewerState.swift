@@ -36,6 +36,30 @@ final class PhotoViewerState: ObservableObject {
         } else {
             self.globalLocationIndex = 0
         }
+
+        // If this location only has 1 photo (from search) but has a placeId,
+        // fetch the rest in the background so the carousel can show them.
+        if let placeId = location?.googlePlaceId, images.count <= 1 {
+            fetchRemainingPhotos(placeId: placeId, alreadyLoaded: images)
+        }
+    }
+
+    private func fetchRemainingPhotos(placeId: String, alreadyLoaded: [ScoutImage]) {
+        Task {
+            guard let fetched = try? await GooglePlacesService.shared.fetchPhotos(for: placeId),
+                  !fetched.isEmpty else { return }
+            // Merge: keep already-loaded first, append any new URLs not already present.
+            let existingURLs = Set(alreadyLoaded.compactMap { $0.url?.absoluteString })
+            let newImages = fetched.filter { img in
+                guard let u = img.url?.absoluteString else { return false }
+                return !existingURLs.contains(u)
+            }
+            guard !newImages.isEmpty else { return }
+            // Only update if we're still showing the same location.
+            if self.location?.googlePlaceId == placeId {
+                self.images = alreadyLoaded + newImages
+            }
+        }
     }
 
     func dismiss() { isVisible = false }
@@ -65,6 +89,17 @@ final class PhotoViewerState: ObservableObject {
 
     var hasPrevious: Bool {
         selectedIndex > 0 || globalLocationIndex > 0
+    }
+
+    /// Warm the disk/memory cache for the photo immediately after `index` so it's
+    /// ready before the user taps the next arrow. Called from `onAppear` on each
+    /// photo cell (LazyHStack fires this only when the cell becomes visible).
+    func prefetchNext(after index: Int) {
+        let next = index + 1
+        guard images.indices.contains(next), let url = images[next].url else { return }
+        Task.detached(priority: .background) {
+            _ = await PhotoLoader.data(for: url)
+        }
     }
 
     private func advanceLocation(by delta: Int) {

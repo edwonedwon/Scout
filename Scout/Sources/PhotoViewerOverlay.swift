@@ -237,7 +237,7 @@ struct PhotoViewerOverlay: View {
                 // Photo strip — paging scroll
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 0) {
+                        LazyHStack(spacing: 0) {
                             ForEach(Array(viewer.images.enumerated()), id: \.offset) { idx, img in
                                 GooglePhotoImage(url: img.url) {
                                     ProgressView().tint(.white)
@@ -249,6 +249,7 @@ struct PhotoViewerOverlay: View {
                                 // Prevent taps on the photo from dismissing the backdrop
                                 .contentShape(Rectangle())
                                 .onTapGesture {}
+                                .onAppear { viewer.prefetchNext(after: idx) }
                             }
                         }
                         .scrollTargetLayout()

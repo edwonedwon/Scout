@@ -11,10 +11,11 @@ struct LocationCalloutView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Photos
             if !location.images.isEmpty {
-                let images = Array(location.images.prefix(8))
+                // Show 1 thumbnail in the callout. Opening the carousel lazy-loads more.
+                let allImages = location.images
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 3) {
-                        ForEach(Array(images.enumerated()), id: \.offset) { idx, img in
+                    LazyHStack(spacing: 3) {
+                        ForEach(Array(allImages.prefix(1).enumerated()), id: \.offset) { idx, img in
                             GooglePhotoImage(url: img.url) {
                                 Rectangle().fill(.quaternary)
                                     .overlay(ProgressView().controlSize(.small))
@@ -25,7 +26,7 @@ struct LocationCalloutView: View {
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 PhotoViewerState.shared.openedFromMap = true
-                                PhotoViewerState.shared.show(images: images, startingAt: idx, location: location)
+                                PhotoViewerState.shared.show(images: allImages, startingAt: idx, location: location)
                             }
                             .cursor(.pointingHand)
                         }

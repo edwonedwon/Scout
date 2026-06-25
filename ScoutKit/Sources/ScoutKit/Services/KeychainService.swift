@@ -87,4 +87,5 @@ public enum KeychainService {
     public static let anthropicAdminKey = "anthropic_admin_key"
     public static let googleMapsAPIKey = "google_maps_api_key"
     public static let flickrAPIKey = "flickr_api_key"
+    public static let foursquareAPIKey = "foursquare_api_key"
 }

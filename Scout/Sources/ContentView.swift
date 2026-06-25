@@ -23,7 +23,8 @@ struct ContentView: View {
     @AppStorage("map.cyclingProvider") private var cyclingProviderRaw: String = ""
     @AppStorage("map.style") private var mapStyle: MapStyle = .explore
     @AppStorage("wikimedia.limit") private var wikiLimit: Double = 50
-    @AppStorage("flickr.limit") private var flickrLimit: Double = 50
+    @AppStorage("flickr.limit")       private var flickrLimit:       Double = 50
+    @AppStorage("foursquare.limit")   private var foursquareLimit:   Double = 50
     @State private var showLayersPopover = false
     @AppStorage("map.showPhotoAnnotations") private var showPhotoAnnotations = false
     @AppStorage("map.pinSize") private var pinSize: Double = 1.0
@@ -264,23 +265,23 @@ struct ContentView: View {
                 TextField(rightPanelTab.placeholder, text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit {
-                        let canBrowse = rightPanelTab == .wikimedia || rightPanelTab == .flickr
+                        let canBrowse = rightPanelTab == .wikimedia || rightPanelTab == .flickr || rightPanelTab == .foursquare
                         if canBrowse || !searchText.isEmpty { Task { await runSearch() } }
                     }
                 Button { Task { await runSearch() } } label: {
                     Image(systemName: "magnifyingglass")
                 }
-                .disabled((searchText.isEmpty && rightPanelTab != .wikimedia && rightPanelTab != .flickr) || isSearching)
+                .disabled((searchText.isEmpty && rightPanelTab != .wikimedia && rightPanelTab != .flickr && rightPanelTab != .foursquare) || isSearching)
             }
             .padding(.horizontal, 10)
             .padding(.top, 8)
-            .padding(.bottom, (rightPanelTab == .wikimedia || rightPanelTab == .flickr) ? 4 : 8)
+            .padding(.bottom, (rightPanelTab == .wikimedia || rightPanelTab == .flickr || rightPanelTab == .foursquare) ? 4 : 8)
 
-            if rightPanelTab == .wikimedia || rightPanelTab == .flickr {
+            if rightPanelTab == .wikimedia || rightPanelTab == .flickr || rightPanelTab == .foursquare {
                 Button {
                     Task { await runSearch() }
                 } label: {
-                    Label("Browse photos in this area", systemImage: "photo.on.rectangle.angled")
+                    Label("Browse in this area", systemImage: "photo.on.rectangle.angled")
                         .font(.caption)
                         .frame(maxWidth: .infinity)
                 }
@@ -295,10 +296,10 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Slider(
-                        value: rightPanelTab == .flickr ? $flickrLimit : $wikiLimit,
-                        in: 10...500, step: 10
+                        value: rightPanelTab == .flickr ? $flickrLimit : rightPanelTab == .foursquare ? $foursquareLimit : $wikiLimit,
+                        in: 10...(rightPanelTab == .foursquare ? 50 : 500), step: 10
                     )
-                    Text("\(Int(rightPanelTab == .flickr ? flickrLimit : wikiLimit))")
+                    Text("\(Int(rightPanelTab == .flickr ? flickrLimit : rightPanelTab == .foursquare ? foursquareLimit : wikiLimit))")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .frame(width: 30, alignment: .trailing)
@@ -544,19 +545,16 @@ struct ContentView: View {
     }
 
     /// AGGRESSIVE manual cleanup (Debug "Clear Old Lists" button): deletes every project,
-    /// list, and pin in the store. When the projects panel is open, the delete MUST happen
-    /// inside ProjectsPanel so the NavigationStack pop and the deletion share one atomic
-    /// transaction (otherwise the @Bindable detail view renders against a deleted project
-    /// mid-animation and crashes). When the panel is closed, no detail view holds a
-    /// project reference, so we can purge directly here.
-    private func clearOldProjectsAndLists() {
-        if showProjectsPanel {
-            purgeTrigger.toggle()   // ProjectsPanel.onChange runs purgeAllProjects atomically
-        } else {
-            activeListIDs = []
-            openProjectUUID = ""
-            purgeAllProjects(modelContext)
-        }
+    /// Deletes every project (cascade removes all lists and pins) and resets nav state.
+    /// Safe to call at any time — closes the panel first so no @Bindable view holds a
+    /// reference to a model that's about to be deleted.
+    func deleteAllData() {
+        showProjectsPanel = false
+        activeListIDs = []
+        openProjectUUID = ""
+        let all = (try? modelContext.fetch(FetchDescriptor<ProjectData>())) ?? []
+        for project in all { modelContext.delete(project) }
+        try? modelContext.save()
     }
 
     private var scoutMap: some View {
@@ -598,7 +596,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            DebugPanelOverlay(onPurgeOrphanedLists: clearOldProjectsAndLists)
+            DebugPanelOverlay(onDeleteAllData: deleteAllData)
                 .padding(.top, 58)
                 .padding(.leading, 16)
         }
@@ -933,7 +931,8 @@ struct ContentView: View {
     @MainActor
     private func runSearch() async {
         guard rightPanelTab != .ai else { return }
-        if rightPanelTab == .google && searchText.isEmpty { return }
+        let requiresQuery: Bool = rightPanelTab == .google
+        if requiresQuery && searchText.isEmpty { return }
 
         isSearching = true
         searchError = nil
@@ -946,6 +945,8 @@ struct ContentView: View {
             switch rightPanelTab {
             case .google:
                 results = try await GooglePlacesService.shared.search(query: searchText, region: searchRegion)
+            case .foursquare:
+                results = try await FoursquareService.shared.search(query: searchText.isEmpty ? nil : searchText, region: searchRegion, limit: Int(foursquareLimit))
             case .flickr:
                 results = try await FlickrService.shared.search(query: searchText.isEmpty ? nil : searchText, region: searchRegion, limit: Int(flickrLimit))
             case .wikimedia:
@@ -1121,43 +1122,47 @@ extension LocationStatus {
 // MARK: - Right panel tabs
 
 enum RightPanelTab: String, CaseIterable, Identifiable {
-    case ai, google, flickr, wikimedia
+    case ai, google, foursquare, flickr, wikimedia
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .ai:        "AI"
-        case .google:    "Google"
-        case .flickr:    "Flickr"
-        case .wikimedia: "Wiki"
+        case .ai:          "AI"
+        case .google:      "Google"
+        case .foursquare:  "4Square"
+        case .flickr:      "Flickr"
+        case .wikimedia:   "Wiki"
         }
     }
 
     var icon: String {
         switch self {
-        case .ai:        "sparkles"
-        case .google:    "map"
-        case .flickr:    "camera"
-        case .wikimedia: "globe"
+        case .ai:          "sparkles"
+        case .google:      "map"
+        case .foursquare:  "mappin.and.ellipse"
+        case .flickr:      "camera"
+        case .wikimedia:   "globe"
         }
     }
 
     var placeholder: String {
         switch self {
-        case .ai:        ""
-        case .google:    "Search Google Maps…"
-        case .flickr:    "Search Flickr photos…"
-        case .wikimedia: "Search Wikimedia Commons…"
+        case .ai:          ""
+        case .google:      "Search Google Maps…"
+        case .foursquare:  "Search Foursquare…"
+        case .flickr:      "Search Flickr photos…"
+        case .wikimedia:   "Search Wikimedia Commons…"
         }
     }
 
     var emptyHint: String {
         switch self {
-        case .ai:        "Ask AI Scout for locations"
-        case .google:    "Search Google Maps above"
-        case .flickr:    "Search for geotagged Flickr photos"
-        case .wikimedia: "Search for geotagged Commons photos"
+        case .ai:          "Ask AI Scout for locations"
+        case .google:      "Search Google Maps above"
+        case .foursquare:  "Search Foursquare above"
+        case .flickr:      "Search for geotagged Flickr photos"
+        case .wikimedia:   "Search for geotagged Commons photos"
         }
     }
 

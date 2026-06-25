@@ -2,9 +2,10 @@ import SwiftUI
 import ScoutKit
 
 struct DebugPanelOverlay: View {
-    var onPurgeOrphanedLists: (() -> Void)? = nil
+    var onDeleteAllData: (() -> Void)? = nil
     @ObservedObject private var logger = DebugLogger.shared
     @State private var isExpanded = false
+    @State private var showDeleteConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -43,20 +44,26 @@ struct DebugPanelOverlay: View {
                 Text("Debug Log")
                     .font(.caption.bold())
                 Spacer()
-                if let purge = onPurgeOrphanedLists {
+                if let deleteAll = onDeleteAllData {
                     Button {
-                        purge()
+                        showDeleteConfirm = true
                     } label: {
-                        Text("Clear Old Lists")
+                        Text("Delete All Data")
                             .font(.caption)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.red)
+                    .confirmationDialog("Delete all projects, lists, and pins?",
+                                        isPresented: $showDeleteConfirm,
+                                        titleVisibility: .visible) {
+                        Button("Delete All Data", role: .destructive) { deleteAll() }
+                        Button("Cancel", role: .cancel) {}
+                    }
                 }
                 Button {
                     logger.clear()
                 } label: {
-                    Text("Clear")
+                    Text("Clear Log")
                         .font(.caption)
                 }
                 .buttonStyle(.plain)
@@ -110,7 +117,7 @@ struct DebugPanelOverlay: View {
 
 #if DEBUG
 #Preview("Debug panel") {
-    DebugPanelOverlay()
+    DebugPanelOverlay(onDeleteAllData: {})
         .padding()
         .frame(width: 500, height: 320, alignment: .topLeading)
 }

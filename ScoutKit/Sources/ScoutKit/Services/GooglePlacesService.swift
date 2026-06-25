@@ -14,6 +14,72 @@ public actor GooglePlacesService {
         KeychainService.load(forKey: KeychainService.googleMapsAPIKey)
     }
 
+    // MARK: - Search result cache
+
+    private struct CacheKey: Hashable {
+        let query: String       // lowercased + trimmed
+        let latBucket: Int      // center lat rounded to ~1 km (2 decimal places × 100)
+        let lngBucket: Int
+        let latSpan: Int        // region size bucket (rounded to 1 decimal place × 10)
+        let lngSpan: Int
+
+        init(query: String, region: MapRegion?) {
+            self.query = query.lowercased().trimmingCharacters(in: .whitespaces)
+            if let r = region {
+                latBucket = Int((r.centerLat * 100).rounded())
+                lngBucket = Int((r.centerLng * 100).rounded())
+                latSpan   = Int((r.latDelta   * 10).rounded())
+                lngSpan   = Int((r.lngDelta   * 10).rounded())
+            } else {
+                latBucket = 0; lngBucket = 0; latSpan = 0; lngSpan = 0
+            }
+        }
+
+        /// Stable filename derived from all fields — same approach as photo cache.
+        var diskFilename: String {
+            var hash: UInt64 = 0xcbf29ce484222325
+            for byte in "\(query)|\(latBucket)|\(lngBucket)|\(latSpan)|\(lngSpan)".utf8 {
+                hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+            }
+            return String(hash, radix: 16)
+        }
+    }
+
+    private struct CacheEntry: Codable {
+        let results: [ScoutLocation]
+        let date: Date
+    }
+
+    private static let diskCacheDir: URL = {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let dir = base.appendingPathComponent("ScoutSearchResults", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    // 1 year TTL — scouted locations don't change often, and re-billing the same
+    // query in the same area is pure waste.
+    private let cacheTTL: TimeInterval = 365 * 24 * 60 * 60
+
+    // Hot in-memory layer so repeated searches within a session are instant.
+    private var memoryCache: [CacheKey: CacheEntry] = [:]
+
+    private func cachedEntry(for key: CacheKey) -> CacheEntry? {
+        if let hit = memoryCache[key], Date().timeIntervalSince(hit.date) < cacheTTL { return hit }
+        let url = Self.diskCacheDir.appendingPathComponent(key.diskFilename)
+        guard let data = try? Data(contentsOf: url),
+              let entry = try? JSONDecoder().decode(CacheEntry.self, from: data),
+              Date().timeIntervalSince(entry.date) < cacheTTL else { return nil }
+        memoryCache[key] = entry   // warm the memory layer
+        return entry
+    }
+
+    private func persist(_ entry: CacheEntry, for key: CacheKey) {
+        memoryCache[key] = entry
+        let url = Self.diskCacheDir.appendingPathComponent(key.diskFilename)
+        try? JSONEncoder().encode(entry).write(to: url)
+    }
+
     public struct MapRegion {
         public let centerLat: Double
         public let centerLng: Double
@@ -32,6 +98,12 @@ public actor GooglePlacesService {
         guard let apiKey else {
             dlog("No Google Maps API key set", level: .error, tag: "Places")
             throw PlacesError.missingAPIKey
+        }
+
+        let key = CacheKey(query: query, region: region)
+        if let hit = cachedEntry(for: key) {
+            dlog("Search cache hit: \"\(query)\" → \(hit.results.count) results (no API call)", level: .info, tag: "Places")
+            return hit.results
         }
 
         if let region {
@@ -77,6 +149,7 @@ public actor GooglePlacesService {
 
         let locations = places.compactMap { parsePlace($0, apiKey: apiKey) }
         dlog("Found \(locations.count) locations", level: .success, tag: "Places")
+        persist(CacheEntry(results: locations, date: Date()), for: key)
         return locations
     }
 
@@ -97,7 +170,9 @@ public actor GooglePlacesService {
         // at load time (same as the search request) to avoid key-config failures with
         // bare URL+key query param loading.
         let photoRefs = place["photos"] as? [[String: Any]] ?? []
-        let images: [ScoutImage] = photoRefs.prefix(5).compactMap { photo in
+        // One photo per search result. The carousel fetches the rest on demand via
+        // fetchPhotos(for:placeId) only when the user opens it.
+        let images: [ScoutImage] = photoRefs.prefix(1).compactMap { photo in
             guard let name = photo["name"] as? String else { return nil }
             let urlStr = "https://places.googleapis.com/v1/\(name)/media?maxWidthPx=800"
             return URL(string: urlStr).map { ScoutImage(url: $0, source: .googleMaps) }

@@ -10,17 +10,20 @@ public final class APIKeyState: ObservableObject {
     @Published public var anthropicAdminKey: String = ""
     @Published public var googleMapsKey: String = ""
     @Published public var flickrKey: String = ""
+    @Published public var foursquareKey: String = ""
 
     public var anthropicKeyIsSet: Bool { !anthropicKey.isEmpty }
     public var anthropicAdminKeyIsSet: Bool { !anthropicAdminKey.isEmpty }
     public var googleMapsKeyIsSet: Bool { !googleMapsKey.isEmpty }
     public var flickrKeyIsSet: Bool { !flickrKey.isEmpty }
+    public var foursquareKeyIsSet: Bool { !foursquareKey.isEmpty }
 
     private init() {
         anthropicKey = KeychainService.load(forKey: KeychainService.anthropicAPIKey) ?? ""
         anthropicAdminKey = KeychainService.load(forKey: KeychainService.anthropicAdminKey) ?? ""
         googleMapsKey = KeychainService.load(forKey: KeychainService.googleMapsAPIKey) ?? ""
         flickrKey = KeychainService.load(forKey: KeychainService.flickrAPIKey) ?? ""
+        foursquareKey = KeychainService.load(forKey: KeychainService.foursquareAPIKey) ?? ""
     }
 
     public func saveAnthropicKey(_ key: String) throws {
@@ -67,14 +70,27 @@ public final class APIKeyState: ObservableObject {
         }
     }
 
+    public func saveFoursquareKey(_ key: String) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            KeychainService.delete(forKey: KeychainService.foursquareAPIKey)
+            foursquareKey = ""
+        } else {
+            try KeychainService.save(trimmed, forKey: KeychainService.foursquareAPIKey)
+            foursquareKey = trimmed
+        }
+    }
+
     public func clearAll() {
         KeychainService.delete(forKey: KeychainService.anthropicAPIKey)
         KeychainService.delete(forKey: KeychainService.anthropicAdminKey)
         KeychainService.delete(forKey: KeychainService.googleMapsAPIKey)
         KeychainService.delete(forKey: KeychainService.flickrAPIKey)
+        KeychainService.delete(forKey: KeychainService.foursquareAPIKey)
         anthropicKey = ""
         anthropicAdminKey = ""
         googleMapsKey = ""
         flickrKey = ""
+        foursquareKey = ""
     }
 }
