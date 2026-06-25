@@ -109,8 +109,6 @@ private struct BackupSection: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button("Export Backup…") { Task { await doExport() } }
-                .disabled(isBusy)
             Button("Import Backup…") { Task { await doImport() } }
                 .disabled(isBusy)
             Button("Relink Originals…") { Task { await doRelink() } }
@@ -122,23 +120,6 @@ private struct BackupSection: View {
         }
         if let err = errorMessage {
             Text(err).font(.caption).foregroundStyle(.red)
-        }
-    }
-
-    private func doExport() async {
-        isBusy = true; statusMessage = nil; errorMessage = nil
-        defer { isBusy = false }
-        do {
-            let zipURL = try await BackupService.export(context: modelContext)
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = zipURL.lastPathComponent
-            panel.allowedContentTypes = [.zip]
-            guard panel.runModal() == .OK, let dest = panel.url else { return }
-            try FileManager.default.copyItem(at: zipURL, to: dest)
-            try? FileManager.default.removeItem(at: zipURL)
-            statusMessage = "Exported to \(dest.lastPathComponent)"
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 

@@ -1167,12 +1167,11 @@ struct ScoutMapView {
             pop.behavior = .applicationDefined
             pop.animates = false   // appear instantly on click instead of fading in
 
-            // Anchor just above the pin's coordinate. For small dot pins (14pt) the naive
-            // midY - offset goes negative (outside bounds), which silently prevents the
-            // popover from appearing. Clamp to bounds.minY so it always stays inside the view.
-            let annotationPopoverOffset: CGFloat = 10
-            let anchorY = max(annotationView.bounds.minY,
-                              annotationView.bounds.midY - annotationPopoverOffset)
+            // Anchor at the top edge of the annotation view so the popover arrow points
+            // directly at the pin/photo regardless of scale. In AppKit coordinates Y goes
+            // up, so maxY is the top of the view. .minY preferred edge means the popover
+            // appears above (north of) the anchor rect.
+            let anchorY = annotationView.bounds.maxY - 1
             let anchor = NSRect(x: annotationView.bounds.midX - 0.5,
                                 y: anchorY, width: 1, height: 1)
             pop.show(relativeTo: anchor, of: annotationView, preferredEdge: .minY)

@@ -68,6 +68,8 @@ struct ContentView: View {
     @State private var locations: [ScoutLocation] = []
     @State private var selectedLocation: ScoutLocation?
     @State private var searchError: String?
+    @State private var backupStatusMessage: String? = nil
+    @State private var isBackupBusy = false
     @State private var didInitialCenter = false
     @State private var chatMessages: [ChatMessage] = []
     @State private var viewMode: ViewMode = .map
@@ -111,20 +113,21 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var rootLayoutWithObservers: some View {
-        rootLayoutWithSetup
+        rootLayoutWithModeObservers
             .onChange(of: allPins.count)         { rebuildPinCaches() }
             .onChange(of: unfiledPins.count)     { rebuildPinCaches() }
             .onChange(of: allLists.count)        { rebuildPinCaches() }
             .onChange(of: allProjects.count)     { rebuildPinCaches() }
             .onChange(of: pinListAssignmentHash) { rebuildPinCaches() }
-            .onChange(of: selectedLocation) { _, loc in
-                guard viewMode == .map, let loc else { return }
-                highlightedPinID = loc.id
-            }
-            .onChange(of: rightPanelTab) { _, _ in
-                locations = []
-                selectedLocation = nil
-            }
+            #if os(macOS)
+            .onReceive(NotificationCenter.default.publisher(for: .scoutExportBackup))    { _ in Task { await handleExport() } }
+            .onReceive(NotificationCenter.default.publisher(for: .scoutImportBackup))    { _ in Task { await handleImport() } }
+            .onReceive(NotificationCenter.default.publisher(for: .scoutRelinkOriginals)) { _ in Task { await handleRelink() } }
+            #endif
+    }
+
+    @ViewBuilder private var rootLayoutWithModeObservers: some View {
+        rootLayoutWithSelectionObservers
             .onChange(of: viewMode) { _, newMode in
                 if newMode == .photos && photoViewer.restoreOnPhotoMode {
                     photoViewer.restoreOnPhotoMode = false
@@ -135,6 +138,18 @@ struct ContentView: View {
                     selectedLocation = nil
                     mapController.dismissPopover()
                 }
+            }
+    }
+
+    @ViewBuilder private var rootLayoutWithSelectionObservers: some View {
+        rootLayoutWithSetup
+            .onChange(of: selectedLocation) { _, loc in
+                guard viewMode == .map, let loc else { return }
+                highlightedPinID = loc.id
+            }
+            .onChange(of: rightPanelTab) { _, _ in
+                locations = []
+                selectedLocation = nil
             }
     }
 
@@ -403,7 +418,8 @@ struct ContentView: View {
                 pinnedSections: cachedGridSections,
                 highlightedLocationID: highlightedPinID,
                 onClearSearchResults: clearSearchResults,
-                onSelectLocation: { id in highlightedPinID = id }
+                onSelectLocation: { id in highlightedPinID = id },
+                originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
                 .ignoresSafeArea()
                 .opacity(viewMode == .photos ? 1 : 0)
@@ -663,6 +679,74 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Backup / restore (File menu handlers)
+
+    #if os(macOS)
+    @MainActor
+    private func handleExport() async {
+        guard !isBackupBusy else { return }
+        guard !openProjectUUID.isEmpty,
+              let project = allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })
+        else { backupStatusMessage = "Open a project first to export it."; return }
+        isBackupBusy = true
+        backupStatusMessage = nil
+        do {
+            let zipURL = try await BackupService.export(project: project)
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = zipURL.lastPathComponent
+            panel.allowedContentTypes = [.zip]
+            guard panel.runModal() == .OK, let dest = panel.url else {
+                try? FileManager.default.removeItem(at: zipURL)
+                isBackupBusy = false
+                return
+            }
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.copyItem(at: zipURL, to: dest)
+            try? FileManager.default.removeItem(at: zipURL)
+            backupStatusMessage = "Exported \"\(project.name)\" to \(dest.lastPathComponent)"
+        } catch {
+            backupStatusMessage = "Export failed: \(error.localizedDescription)"
+        }
+        isBackupBusy = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { backupStatusMessage = nil }
+    }
+
+    @MainActor
+    private func handleImport() async {
+        guard !isBackupBusy else { return }
+        isBackupBusy = true
+        backupStatusMessage = nil
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.zip]
+        panel.message = "Select a Scout backup archive"
+        guard panel.runModal() == .OK, let url = panel.url else { isBackupBusy = false; return }
+        do {
+            let s = try await BackupService.importBackup(from: url, context: modelContext)
+            backupStatusMessage = "Imported \(s.projectsAdded) projects, \(s.listsAdded) lists, \(s.pinsAdded) pins. Skipped \(s.skippedDuplicates) duplicates."
+        } catch {
+            backupStatusMessage = "Import failed: \(error.localizedDescription)"
+        }
+        isBackupBusy = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { backupStatusMessage = nil }
+    }
+
+    @MainActor
+    private func handleRelink() async {
+        guard !isBackupBusy else { return }
+        isBackupBusy = true
+        backupStatusMessage = nil
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.message = "Select folder containing your original photo files"
+        guard panel.runModal() == .OK, let url = panel.url else { isBackupBusy = false; return }
+        let result = await BackupService.relinkOriginals(folder: url, context: modelContext)
+        backupStatusMessage = "Relinked \(result.linked) files. \(result.notFound) not found."
+        isBackupBusy = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { backupStatusMessage = nil }
+    }
+    #endif
+
     /// One-time pass over existing pins that have no offline photos yet, fetching them
     /// from their original source (stored URLs, Google place ID, or a name+area search).
     private func backfillPhotos() {
@@ -716,12 +800,24 @@ struct ContentView: View {
         )
         .ignoresSafeArea()
         .overlay(alignment: .topTrailing) {
-            if let error = searchError {
-                Text(error)
+            VStack(alignment: .trailing, spacing: 6) {
+                if let msg = backupStatusMessage {
+                    HStack(spacing: 6) {
+                        if isBackupBusy { ProgressView().controlSize(.small) }
+                        Text(msg)
+                    }
                     .padding(8)
                     .background(.regularMaterial, in: .rect(cornerRadius: 8))
-                    .padding()
+                    .transition(.opacity)
+                }
+                if let error = searchError {
+                    Text(error)
+                        .padding(8)
+                        .background(.regularMaterial, in: .rect(cornerRadius: 8))
+                }
             }
+            .padding()
+            .animation(.easeInOut(duration: 0.2), value: backupStatusMessage != nil)
         }
         .overlay(alignment: .topLeading) {
             DebugPanelOverlay(onDeleteAllData: deleteAllData)
@@ -735,6 +831,7 @@ struct ContentView: View {
                 boundaryButton
                 lassoControls
                 regionSearchOverlay
+                pinSizeSlider
                 if cyclingProvider == .cyclOSM {
                     cyclOSMLegend
                         .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .bottomLeading)))
@@ -743,6 +840,24 @@ struct ContentView: View {
             .padding(16)
             .animation(.easeInOut(duration: 0.2), value: cyclingProvider == .cyclOSM)
         }
+    }
+
+    private var pinSizeSlider: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "circle.fill")
+                .font(.system(size: 7))
+                .foregroundStyle(.secondary)
+            Slider(value: $pinSize, in: 0.4...2.5)
+                .frame(width: 80)
+                .controlSize(.mini)
+            Image(systemName: "circle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
     }
 
     private var regionSearchOverlay: some View {

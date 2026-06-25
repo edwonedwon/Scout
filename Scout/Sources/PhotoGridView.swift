@@ -15,6 +15,8 @@ struct PhotoGridView: View {
     var onClearSearchResults: (() -> Void)? = nil
     /// Called with the location UUID when the user taps a cell (before the carousel opens).
     var onSelectLocation: ((UUID) -> Void)? = nil
+    /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
+    var originalFilePath: ((UUID) -> String?)? = nil
 
     struct PhotoItem: Identifiable {
         let id: Int
@@ -135,7 +137,8 @@ struct PhotoGridView: View {
                             item: item,
                             width: colWidth,
                             isHighlighted: highlightedLocationID == item.location.id,
-                            onTap: { openCarousel(from: item, universe: allItems) }
+                            onTap: { openCarousel(from: item, universe: allItems) },
+                            originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil
                         )
                         .id(item.id)
                     }
@@ -166,6 +169,7 @@ private struct MasonryCell: View {
     let width: CGFloat
     var isHighlighted: Bool = false
     var onTap: (() -> Void)? = nil
+    var originalFilePath: String? = nil
     @State private var isHovered = false
 
     var body: some View {
@@ -214,6 +218,13 @@ private struct MasonryCell: View {
                 Color.gray.opacity(0.25).frame(width: 72, height: 72)
             }
         }) }
+        .contextMenu {
+            if let path = originalFilePath {
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+                }
+            }
+        }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.2), value: isHighlighted)
     }

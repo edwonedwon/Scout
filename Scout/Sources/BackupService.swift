@@ -64,9 +64,8 @@ enum BackupService {
 
     // MARK: - Export
 
-    /// Serialises all SwiftData records plus compressed photo files into a zip archive
-    /// at the URL chosen by the user. Original large files are referenced by basename only.
-    static func export(context: ModelContext) async throws -> URL {
+    /// Exports a single project to a zip archive and returns the temp URL.
+    static func export(project: ProjectData) async throws -> URL {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("ScoutBackup-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -74,12 +73,10 @@ enum BackupService {
         try fm.createDirectory(at: photosDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: tmp) }
 
-        // --- Fetch all models ---
-        let projects = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
-        let allLists = (try? context.fetch(FetchDescriptor<LocationListData>())) ?? []
-        let allPins  = (try? context.fetch(FetchDescriptor<PinnedLocationData>())) ?? []
+        // --- Collect all pins for this project ---
+        let allPins = project.lists.flatMap(\.pins) + project.importedPhotos
 
-        // --- Copy referenced photo files ---
+        // --- Copy photo files ---
         var copiedFiles: Set<String> = []
         for pin in allPins {
             for f in pin.photoFiles + pin.thumbnailFiles where !copiedFiles.contains(f) {
@@ -91,32 +88,23 @@ enum BackupService {
             }
         }
 
-        // --- Build manifest ---
+        // --- Build manifest with just this project ---
         var manifest = BackupManifest(exportedAt: Date())
-
-        for project in projects.sorted(by: { $0.createdAt < $1.createdAt }) {
-            var bp = BackupProject(
-                uuid: project.uuid,
-                name: project.name,
-                notes: project.notes,
-                createdAt: project.createdAt,
-                lists: [],
-                importedPhotos: []
-            )
-            for list in project.lists.sorted(by: { $0.panelOrder < $1.panelOrder }) {
-                bp.lists.append(backupList(list))
-            }
-            for pin in project.importedPhotos.sorted(by: { $0.panelOrder < $1.panelOrder }) {
-                bp.importedPhotos.append(backupPin(pin))
-            }
-            manifest.projects.append(bp)
+        var bp = BackupProject(
+            uuid: project.uuid,
+            name: project.name,
+            notes: project.notes,
+            createdAt: project.createdAt,
+            lists: [],
+            importedPhotos: []
+        )
+        for list in project.lists.sorted(by: { $0.panelOrder < $1.panelOrder }) {
+            bp.lists.append(backupList(list))
         }
-
-        let orphanLists = allLists.filter { $0.project == nil }.sorted { $0.createdAt < $1.createdAt }
-        for list in orphanLists { manifest.standaloneLists.append(backupList(list)) }
-
-        let orphanPins = allPins.filter { $0.list == nil && $0.owningProject == nil }
-        for pin in orphanPins { manifest.unfiledPins.append(backupPin(pin)) }
+        for pin in project.importedPhotos.sorted(by: { $0.panelOrder < $1.panelOrder }) {
+            bp.importedPhotos.append(backupPin(pin))
+        }
+        manifest.projects.append(bp)
 
         // --- Write JSON ---
         let enc = JSONEncoder()
@@ -126,7 +114,8 @@ enum BackupService {
         try json.write(to: tmp.appendingPathComponent("backup.json"))
 
         // --- Zip ---
-        let destZip = fm.temporaryDirectory.appendingPathComponent("ScoutBackup-\(dateStamp()).zip")
+        let safeName = project.name.replacingOccurrences(of: "/", with: "-")
+        let destZip = fm.temporaryDirectory.appendingPathComponent("Scout-\(safeName)-\(dateStamp()).zip")
         try? fm.removeItem(at: destZip)
         try zip(sourceDir: tmp, to: destZip)
         return destZip
@@ -143,7 +132,8 @@ enum BackupService {
     }
 
     /// Unzips a backup archive and merges its contents into `context`.
-    /// Models with matching UUIDs are skipped (non-destructive merge).
+    /// Imports a backup zip as a brand-new project. If a project with the same name already
+    /// exists, appends " 2", " 3", etc. All UUIDs are regenerated so there are never conflicts.
     static func importBackup(from url: URL, context: ModelContext) async throws -> ImportSummary {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("ScoutRestore-\(UUID().uuidString)", isDirectory: true)
@@ -158,15 +148,19 @@ enum BackupService {
         dec.dateDecodingStrategy = .iso8601
         let manifest = try dec.decode(BackupManifest.self, from: data)
 
-        // Build UUID sets of existing records for dedup.
-        let existingProjects = Set((try? context.fetch(FetchDescriptor<ProjectData>()))?.map(\.uuid) ?? [])
-        let existingLists    = Set((try? context.fetch(FetchDescriptor<LocationListData>()))?.map(\.uuid) ?? [])
-        let existingPins     = Set((try? context.fetch(FetchDescriptor<PinnedLocationData>()))?.map(\.uuid) ?? [])
-
         var summary = ImportSummary()
         let photosDir = tmp.appendingPathComponent("photos")
 
-        // Helper: copy photo files from the archive.
+        // Existing project names for collision detection.
+        let existingNames = Set((try? context.fetch(FetchDescriptor<ProjectData>()))?.map(\.name) ?? [])
+
+        func uniqueName(_ base: String) -> String {
+            guard existingNames.contains(base) else { return base }
+            var n = 2
+            while existingNames.contains("\(base) \(n)") { n += 1 }
+            return "\(base) \(n)"
+        }
+
         func copyPhotos(_ files: [String]) {
             for f in files {
                 let src = photosDir.appendingPathComponent(f)
@@ -179,9 +173,10 @@ enum BackupService {
         }
 
         func insertPin(_ bp: BackupPin, list: LocationListData?, project: ProjectData?) {
-            guard !existingPins.contains(bp.uuid) else { summary.skippedDuplicates += 1; return }
-            copyPhotos(bp.photoFiles + bp.thumbnailFiles)
-            let pin = PinnedLocationData.fromBackup(bp)
+            // Always use a fresh UUID so re-importing the same backup creates a new copy.
+            var fresh = bp; fresh.uuid = UUID()
+            copyPhotos(fresh.photoFiles + fresh.thumbnailFiles)
+            let pin = PinnedLocationData.fromBackup(fresh)
             context.insert(pin)
             if let list {
                 pin.list = list
@@ -192,9 +187,9 @@ enum BackupService {
             summary.pinsAdded += 1
         }
 
-        func insertList(_ bl: BackupList, project: ProjectData?) -> LocationListData? {
-            guard !existingLists.contains(bl.uuid) else { summary.skippedDuplicates += 1; return nil }
-            let list = LocationListData.fromBackup(bl)
+        func insertList(_ bl: BackupList, project: ProjectData?) -> LocationListData {
+            var fresh = bl; fresh.uuid = UUID()
+            let list = LocationListData.fromBackup(fresh)
             context.insert(list)
             list.project = project
             summary.listsAdded += 1
@@ -203,19 +198,24 @@ enum BackupService {
         }
 
         for bp in manifest.projects {
-            if !existingProjects.contains(bp.uuid) {
-                let project = ProjectData.fromBackup(bp)
-                context.insert(project)
-                summary.projectsAdded += 1
-                for bl in bp.lists   { _ = insertList(bl, project: project) }
-                for pin in bp.importedPhotos { insertPin(pin, list: nil, project: project) }
-            } else {
-                summary.skippedDuplicates += 1
-            }
+            var fresh = bp; fresh.uuid = UUID()
+            fresh.name = uniqueName(bp.name)
+            let project = ProjectData.fromBackup(fresh)
+            context.insert(project)
+            summary.projectsAdded += 1
+            for bl in bp.lists           { _ = insertList(bl, project: project) }
+            for pin in bp.importedPhotos { insertPin(pin, list: nil, project: project) }
         }
 
-        for bl in manifest.standaloneLists { _ = insertList(bl, project: nil) }
-        for bp in manifest.unfiledPins     { insertPin(bp, list: nil, project: nil) }
+        // Standalone lists and unfiled pins (edge cases — wrap in a project named after the file)
+        if !manifest.standaloneLists.isEmpty || !manifest.unfiledPins.isEmpty {
+            let wrapperName = uniqueName("Imported")
+            let wrapper = ProjectData(name: wrapperName, notes: "")
+            context.insert(wrapper)
+            summary.projectsAdded += 1
+            for bl in manifest.standaloneLists { _ = insertList(bl, project: wrapper) }
+            for bp in manifest.unfiledPins     { insertPin(bp, list: nil, project: wrapper) }
+        }
 
         try? context.save()
         return summary
