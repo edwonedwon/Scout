@@ -363,6 +363,7 @@ private struct ProjectDetailView: View {
     @State private var renameListText = ""
     @State private var isBackfilling = false
     @State private var showMovePopup = false
+    @State private var searchText = ""
     @State private var importProgress: (current: Int, total: Int)? = nil
     @State private var timelineProgress: (current: Int, total: Int, name: String)? = nil
     // Selection lives in a reference-type model owned via plain @State (NOT @StateObject),
@@ -857,12 +858,58 @@ private struct ProjectDetailView: View {
         try? modelContext.save()
     }
 
+    /// Trimmed search query; empty means no filtering.
+    private var trimmedSearch: String { searchText.trimmingCharacters(in: .whitespaces) }
+    private func nameMatches(_ s: String) -> Bool {
+        trimmedSearch.isEmpty || s.localizedCaseInsensitiveContains(trimmedSearch)
+    }
+    /// Sidebar items filtered by the search query (matches photo names; keeps lists that
+    /// match by name or contain a matching photo).
+    private var displayedItems: [SidebarItem] {
+        guard !trimmedSearch.isEmpty else { return sidebarItems }
+        return sidebarItems.compactMap { item in
+            switch item {
+            case .photo(let p):
+                return nameMatches(p.name) ? item : nil
+            case .stack(_, let members):
+                return members.contains { nameMatches($0.name) } ? item : nil
+            case .list(let list):
+                if nameMatches(list.name) { return item }
+                return list.pins.contains { nameMatches($0.name) } ? item : nil
+            }
+        }
+    }
+
+    private var sidebarSearchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Search photos…", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.callout)
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 8)
+        .padding(.top, sidebarTopPadding)
+        .padding(.bottom, 6)
+    }
+
     var body: some View {
         ScrollViewReader { listProxy in
         let _ = { listProxyHolder = listProxy }()
+        VStack(spacing: 0) {
+        sidebarSearchField
         List {
-            Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
-
             // Drop zone: drag any list pin here to move it to the top-level project.
             HStack(spacing: 6) {
                 Image(systemName: "tray.and.arrow.up")
@@ -919,7 +966,7 @@ private struct ProjectDetailView: View {
                 .listRowBackground(Color.clear)
             }
 
-            ForEach(sidebarItems) { item in
+            ForEach(displayedItems) { item in
                 switch item {
                 case .photo(let pin):
                     PinRow(
@@ -976,7 +1023,9 @@ private struct ProjectDetailView: View {
                         tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .stack(lead: lead, members: members))
                     }
                 case .list(let list):
-                    let isExpanded = expandedListIDs.contains(list.persistentModelID)
+                    // While searching, force lists open so matching photos are visible.
+                    let searching = !trimmedSearch.isEmpty
+                    let isExpanded = searching || expandedListIDs.contains(list.persistentModelID)
                     ListRow(
                         list: list,
                         isExpanded: isExpanded,
@@ -1003,7 +1052,9 @@ private struct ProjectDetailView: View {
                     }
 
                     if isExpanded {
-                        let pins = list.pins.sorted { $0.sortOrder < $1.sortOrder }
+                        let pins = list.pins
+                            .sorted { $0.sortOrder < $1.sortOrder }
+                            .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
                         ForEach(pins) { pin in
                             PinRow(
                                 pin: pin,
@@ -1148,6 +1199,7 @@ private struct ProjectDetailView: View {
             selection.ids = [pin.persistentModelID]
             selection.anchor = pin.persistentModelID
         }
+        } // VStack
         } // ScrollViewReader
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
         .onKeyPress(.upArrow)   { moveSelection(-1); return .handled }
