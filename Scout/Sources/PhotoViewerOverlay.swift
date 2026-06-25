@@ -17,7 +17,9 @@ typealias ScoutImageType = UIImage
 enum PhotoLoader {
     private static let cache: NSCache<NSURL, ScoutImageType> = {
         let c = NSCache<NSURL, ScoutImageType>()
-        c.countLimit = 200
+        // No hard count limit — let memory pressure drive eviction instead.
+        // Thumbnails are ~20-50 KB each; 1000 cached = ~50 MB, well within macOS norms.
+        c.totalCostLimit = 150 * 1024 * 1024   // 150 MB ceiling
         return c
     }()
 
@@ -59,10 +61,15 @@ enum PhotoLoader {
     /// the on-disk cache when present, otherwise fetched once and persisted. This is what
     /// stops repeated/relaunched views of the same Google Place Photo from re-billing.
     static func data(for url: URL) async -> Data? {
-        if url.isFileURL { return try? Data(contentsOf: url) }
+        if url.isFileURL {
+            // File reads are blocking — run them off the cooperative thread pool.
+            return await Task.detached(priority: .utility) { try? Data(contentsOf: url) }.value
+        }
 
         let disk = diskURL(for: url)
-        if let cached = try? Data(contentsOf: disk) { return cached }
+        if let cached = await Task.detached(priority: .utility, operation: { try? Data(contentsOf: disk) }).value {
+            return cached
+        }
 
         guard let (data, resp) = try? await URLSession.shared.data(for: request(for: url)),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
@@ -73,16 +80,18 @@ enum PhotoLoader {
     static func load(_ url: URL) async -> ScoutImageType? {
         if let c = cached(url) { return c }
         guard let data = await data(for: url) else { return nil }
-        // NSImage(data:) cannot decode RAW/HEIF formats. Use CGImageSource for file URLs
-        // so CR2/NEF/ARW/HEIC all decode correctly, then fall back to NSImage for remote data.
-        let img: ScoutImageType?
-        if url.isFileURL {
-            img = decodeImage(from: data)
-        } else {
-            img = ScoutImageType(data: data) ?? decodeImage(from: data)
-        }
+        // Decode off the cooperative thread pool so heavy JPEG/HEIC work
+        // doesn't starve other async tasks on the main executor.
+        let isFile = url.isFileURL
+        let img = await Task.detached(priority: .utility) { () -> ScoutImageType? in
+            if isFile {
+                return decodeImage(from: data)
+            } else {
+                return ScoutImageType(data: data) ?? decodeImage(from: data)
+            }
+        }.value
         guard let img else { return nil }
-        cache.setObject(img, forKey: url as NSURL)
+        cache.setObject(img, forKey: url as NSURL, cost: data.count)
         return img
     }
 

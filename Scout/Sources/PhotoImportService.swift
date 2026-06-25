@@ -30,7 +30,8 @@ enum PhotoImportService {
     ///  3. Same date-taken (±1 s) AND same display name (for GPS-less photos).
     static func importPhotos(from urls: [URL],
                              into list: LocationListData?,
-                             existingPins: [PinnedLocationData] = []) async -> [ImportResult] {
+                             existingPins: [PinnedLocationData] = [],
+                             onProgress: (@MainActor (Int, Int) -> Void)? = nil) async -> [ImportResult] {
         // Build dedup indexes once — O(n) for n existing pins.
         var existingFilenames: Set<String> = []
         var existingDateGPS:   Set<String> = []  // "timestamp|lat4|lng4"
@@ -52,7 +53,9 @@ enum PhotoImportService {
         }
 
         var results: [ImportResult] = []
+        let total = urls.count
         for (order, url) in urls.enumerated() {
+            await onProgress?(order, total)
             // Fast filename check before touching the file.
             if existingFilenames.contains(url.lastPathComponent) { continue }
 

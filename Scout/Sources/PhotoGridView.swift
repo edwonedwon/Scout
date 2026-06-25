@@ -6,6 +6,7 @@ struct PhotoGridView: View {
     struct Section {
         let title: String
         let locations: [ScoutLocation]
+        var color: Color? = nil
     }
 
     let locations: [ScoutLocation]
@@ -42,18 +43,20 @@ struct PhotoGridView: View {
 
     private var searchItems: [PhotoItem] { makeItems(from: locations, startID: 2_000_000) }
     // Build section items with non-overlapping IDs (sections use 0-based, search uses 2M+).
-    private var sectionItems: [(title: String, items: [PhotoItem])] {
+    private var sectionItems: [(title: String, color: Color?, items: [PhotoItem])] {
         var counter = 0
         return pinnedSections.map { section in
             let items = makeItems(from: section.locations, startID: counter, isPinned: true)
             counter += section.locations.count + 1
-            return (section.title, items)
+            return (section.title, section.color, items)
         }
     }
     private var allPinnedItems: [PhotoItem] { sectionItems.flatMap(\.items) }
     private var hasAny: Bool { !searchItems.isEmpty || !allPinnedItems.isEmpty }
 
     @State private var columns = 3
+    @State private var selectedIDs: Set<UUID> = []
+    @State private var anchorID: UUID? = nil
     private let gap: CGFloat = 2
 
     var body: some View {
@@ -68,44 +71,34 @@ struct PhotoGridView: View {
         } else {
             GeometryReader { geo in
                 let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(sectionItems.enumerated()), id: \.offset) { _, pair in
-                                if !pair.items.isEmpty {
-                                    sectionHeader(pair.title)
-                                    masonryGrid(items: pair.items, colWidth: colWidth,
-                                                allItems: allPinnedItems + searchItems)
-                                }
-                            }
-                            if !searchItems.isEmpty {
-                                HStack {
-                                    sectionHeader("Search Results")
-                                    Spacer()
-                                    if let onClearSearchResults {
-                                        Button(action: onClearSearchResults) {
-                                            Label("Clear", systemImage: "xmark.circle.fill")
-                                                .font(.caption)
-                                                .foregroundStyle(.white.opacity(0.55))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .padding(.trailing, 10)
-                                    }
-                                }
-                                masonryGrid(items: searchItems, colWidth: colWidth,
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(sectionItems.enumerated()), id: \.offset) { _, pair in
+                            if !pair.items.isEmpty {
+                                sectionHeader(pair.title, color: pair.color)
+                                masonryGrid(items: pair.items, colWidth: colWidth,
                                             allItems: allPinnedItems + searchItems)
                             }
                         }
-                        .padding(.bottom, 44)
-                    }
-                    .onChange(of: highlightedLocationID) { _, id in
-                        guard let id,
-                              let first = (allPinnedItems + searchItems).first(where: { $0.location.id == id })
-                        else { return }
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            proxy.scrollTo(first.id, anchor: .center)
+                        if !searchItems.isEmpty {
+                            HStack {
+                                sectionHeader("Search Results")
+                                Spacer()
+                                if let onClearSearchResults {
+                                    Button(action: onClearSearchResults) {
+                                        Label("Clear", systemImage: "xmark.circle.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.white.opacity(0.55))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.trailing, 10)
+                                }
+                            }
+                            masonryGrid(items: searchItems, colWidth: colWidth,
+                                        allItems: allPinnedItems + searchItems)
                         }
                     }
+                    .padding(.bottom, 44)
                 }
                 .overlay(alignment: .bottom) {
                     GridSizeSlider(columns: $columns)
@@ -116,28 +109,54 @@ struct PhotoGridView: View {
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.white.opacity(0.55))
-            .textCase(.uppercase)
-            .padding(.horizontal, 10)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
+    private func sectionHeader(_ title: String, color: Color? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .textCase(.uppercase)
+                .padding(.horizontal, 10)
+            if let color {
+                color
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 2)
+                    .opacity(0.6)
+            }
+        }
+        .padding(.top, 18)
+        .padding(.bottom, 8)
+    }
+
+    /// Split items into column buckets once so LazyVStack bodies never re-filter on scroll.
+    private func columnBuckets(_ items: [PhotoItem]) -> [[PhotoItem]] {
+        var buckets = Array(repeating: [PhotoItem](), count: max(columns, 1))
+        for (i, item) in items.enumerated() { buckets[i % columns].append(item) }
+        return buckets
     }
 
     private func masonryGrid(items: [PhotoItem], colWidth: CGFloat,
                               allItems: [PhotoItem]) -> some View {
-        HStack(alignment: .top, spacing: gap) {
+        let buckets = columnBuckets(items)
+        return HStack(alignment: .top, spacing: gap) {
             ForEach(0..<columns, id: \.self) { col in
                 LazyVStack(spacing: gap) {
-                    ForEach(items.indices.filter { $0 % columns == col }, id: \.self) { idx in
-                        let item = items[idx]
+                    ForEach(buckets[col]) { item in
                         MasonryCell(
                             item: item,
                             width: colWidth,
                             isHighlighted: highlightedLocationID == item.location.id,
-                            onTap: { openCarousel(from: item, universe: allItems) },
+                            isSelected: selectedIDs.contains(item.location.id),
+                            onTap: { selectItem(item, allItems: allItems) },
+                            onDoubleTap: { openCarousel(from: item, universe: allItems) },
+                            dragPayload: item.isPinned ? {
+                                let ids = selectedIDs.contains(item.location.id) && selectedIDs.count > 1
+                                    ? Array(selectedIDs)
+                                    : [item.location.id]
+                                let payload = ids.count == 1
+                                    ? "photo:\(ids[0].uuidString)"
+                                    : "photos:\(ids.map(\.uuidString).joined(separator: ","))"
+                                return NSItemProvider(object: payload as NSString)
+                            } : nil,
                             originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil
                         )
                         .id(item.id)
@@ -145,6 +164,30 @@ struct PhotoGridView: View {
                 }
             }
         }
+    }
+
+    private func selectItem(_ item: PhotoItem, allItems: [PhotoItem]) {
+        let id = item.location.id
+        let shift = NSEvent.modifierFlags.contains(.shift)
+        let option = NSEvent.modifierFlags.contains(.option)
+
+        if option {
+            // Option: toggle this item in/out of a disparate selection.
+            if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
+            anchorID = id
+        } else if shift, let anchor = anchorID {
+            // Shift: range select from anchor to this item in display order.
+            let ids = allItems.map(\.location.id)
+            if let a = ids.firstIndex(of: anchor), let b = ids.firstIndex(of: id) {
+                let range = ids[min(a,b)...max(a,b)]
+                selectedIDs = Set(range)
+            }
+        } else {
+            // Plain click: single select.
+            selectedIDs = [id]
+            anchorID = id
+        }
+        onSelectLocation?(id)
     }
 
     private func openCarousel(from item: PhotoItem, universe: [PhotoItem]) {
@@ -168,7 +211,10 @@ private struct MasonryCell: View {
     let item: PhotoGridView.PhotoItem
     let width: CGFloat
     var isHighlighted: Bool = false
+    var isSelected: Bool = false
     var onTap: (() -> Void)? = nil
+    var onDoubleTap: (() -> Void)? = nil
+    var dragPayload: (() -> NSItemProvider)? = nil
     var originalFilePath: String? = nil
     @State private var isHovered = false
 
@@ -198,7 +244,12 @@ private struct MasonryCell: View {
             }
         }
         .overlay {
-            if isHighlighted {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.accentColor.opacity(0.22))
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(Color.accentColor, lineWidth: 2.5)
+            } else if isHighlighted {
                 RoundedRectangle(cornerRadius: 3)
                     .strokeBorder(Color.accentColor, lineWidth: 2.5)
             }
@@ -208,16 +259,17 @@ private struct MasonryCell: View {
             isHovered = inside
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
+        .onTapGesture(count: 2) { onDoubleTap?() }
         .onTapGesture { onTap?() }
-        .if(item.isPinned) { $0.onDrag({
-            NSItemProvider(object: "pin:\(item.location.id.uuidString)" as NSString)
-        }, preview: {
-            if let url = item.image.url {
-                DragThumbnail(url: url)
-            } else {
-                Color.gray.opacity(0.25).frame(width: 72, height: 72)
-            }
-        }) }
+        .if(item.isPinned && dragPayload != nil) { view in
+            view.onDrag(dragPayload!, preview: {
+                if let url = item.image.url {
+                    DragThumbnail(url: url)
+                } else {
+                    Color.gray.opacity(0.25).frame(width: 72, height: 72)
+                }
+            })
+        }
         .contextMenu {
             if let path = originalFilePath {
                 Button("Reveal in Finder") {

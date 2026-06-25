@@ -41,6 +41,14 @@ final class ScoutMapController: ObservableObject {
     }
 
     func setRegion(_ region: MKCoordinateRegion, animated: Bool) {
+        // LOCATION BUTTON INVARIANT — DO NOT REMOVE:
+        // Any programmatic camera move drops MapKit's follow mode silently.
+        // Always stop it explicitly first so the button icon stays in sync.
+        // showsUserLocation is set ONCE in makeMap and NEVER touched here.
+        // See: memory/project_scout_location_button.md
+        if mapView?.userTrackingMode != .none {
+            mapView?.setUserTrackingMode(.none, animated: false)
+        }
         mapView?.setRegion(region, animated: animated)
     }
 
@@ -622,11 +630,12 @@ final class ScoutDotAnnotationView: MKAnnotationView {
 final class ScoutPhotoAnnotationView: MKAnnotationView {
     static let reuseID = "scoutPhoto"
 
-    private let imageView = NSImageView()
+    /// CALayer used instead of NSImageView so we get contentsGravity = .resizeAspectFill
+    /// (fill+crop) which NSImageView cannot do natively.
+    private let photoLayer = CALayer()
     private var loadTask: Task<Void, Never>?
+    private var currentScale: CGFloat = 1.0
 
-    /// Set by the map's hover tracking — thickens the white border to show this photo is
-    /// the one a click will select (only one is ever hovered, even when photos overlap).
     var isHovered: Bool = false {
         didSet { guard oldValue != isHovered else { return }; applyBorder() }
     }
@@ -641,28 +650,26 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
 
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
-        let size: CGFloat = 50
+        let size: CGFloat = Self.baseSize
         frame = CGRect(x: 0, y: 0, width: size, height: size)
         wantsLayer = true
         canShowCallout = false
 
         layer?.cornerRadius = 8
         layer?.borderWidth = 2.5
-        layer?.borderColor = NSColor.white.cgColor  // overridden by borderColor setter
+        layer?.borderColor = NSColor.white.cgColor
         layer?.shadowColor = NSColor.black.cgColor
         layer?.shadowOpacity = 0.35
         layer?.shadowRadius = 4
         layer?.shadowOffset = CGSize(width: 0, height: -2)
         layer?.masksToBounds = false
 
-        imageView.frame = bounds
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.imageAlignment = .alignCenter
-        imageView.wantsLayer = true
-        imageView.layer?.cornerRadius = 6
-        imageView.layer?.masksToBounds = true
-        imageView.autoresizingMask = [.width, .height]
-        addSubview(imageView)
+        photoLayer.frame = bounds
+        photoLayer.contentsGravity = .resizeAspectFill   // fill + center-crop
+        photoLayer.masksToBounds = true
+        photoLayer.cornerRadius = 6
+        photoLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        layer?.addSublayer(photoLayer)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -683,20 +690,23 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     }
 
     static let baseSize: CGFloat = 50
+
     func setScale(_ scale: CGFloat) {
-        let s = Self.baseSize * max(scale, 0.2)
+        currentScale = max(scale, 0.2)
+        applySize()
+    }
+
+    private func applySize() {
+        let s = Self.baseSize * currentScale
         guard abs(bounds.width - s) > 0.5 else { return }
-        // Resize about the current center so the photo grows in place. Setting bounds alone
-        // keeps frame.origin fixed (the pin appears to drift until MapKit's next layout).
         let c = CGPoint(x: frame.midX, y: frame.midY)
         frame = CGRect(x: c.x - s / 2, y: c.y - s / 2, width: s, height: s)
-        imageView.frame = bounds
-        // Scale chrome with the view so the border/corner don't dominate small pins.
+        photoLayer.frame = bounds
         let ratio = s / Self.baseSize
         layer?.cornerRadius = 8 * ratio
         layer?.shadowRadius = 4 * ratio
-        imageView.layer?.cornerRadius = 6 * ratio
-        applyBorder()   // keeps the hover thickness consistent across sizes
+        photoLayer.cornerRadius = 6 * ratio
+        applyBorder()
     }
 
     override func prepareForReuse() {
@@ -704,20 +714,25 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         layer?.setAffineTransform(.identity)
         layer?.zPosition = 0
         isHovered = false
+        currentScale = 1.0
+        photoLayer.contents = nil
     }
 
     func configure(imageURL: URL?) {
         loadTask?.cancel()
         if let url = imageURL, let cached = PhotoLoader.cached(url) {
-            imageView.image = cached
+            photoLayer.contents = cached.cgImage(forProposedRect: nil, context: nil, hints: nil)
             return
         }
-        imageView.image = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)
+        photoLayer.contents = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)?
+            .cgImage(forProposedRect: nil, context: nil, hints: nil)
         guard let url = imageURL else { return }
         loadTask = Task {
             let img = await PhotoLoader.load(url)
             guard !Task.isCancelled, let img else { return }
-            await MainActor.run { self.imageView.image = img }
+            await MainActor.run {
+                self.photoLayer.contents = img.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            }
         }
     }
 }
@@ -838,6 +853,11 @@ struct ScoutMapView {
     var searchPolygon: [CLLocationCoordinate2D]? = nil
     var onPolygonComplete: ([CLLocationCoordinate2D]) -> Void = { _ in }
     var onFrameAllPins: () -> Void = {}
+    /// Called when a stack annotation is tapped, with the stack's groupID.
+    /// ContentView toggles expandedStackID so member pins appear/disappear on the map.
+    var onStackTapped: ((UUID) -> Void)? = nil
+    /// Called when the map is clicked on empty space (deselect) so stacks can collapse.
+    var onMapDeselect: (() -> Void)? = nil
     var mapType: MKMapType = .standard
     var cyclingProvider: CyclingTileProvider? = nil
     var showPhotoAnnotations: Bool = false
@@ -865,6 +885,7 @@ struct ScoutMapView {
         map.delegate = context.coordinator
         map.showsUserLocation = true
         map.showsCompass = true
+        map.cameraZoomRange = MKMapView.CameraZoomRange(minCenterCoordinateDistance: 1)
         #if os(macOS)
         map.showsScale = true
         #endif
@@ -913,9 +934,11 @@ struct ScoutMapView {
             // by viewFor: (which reads parent.pinScale) when they scroll into view.
             #if os(macOS)
             let scale = CGFloat(pinScale)
-            for ann in map.annotations where ann is LocationAnnotation {
+            // Only resize visible annotation views — off-screen ones pick up the new
+            // scale from parent.pinScale when they're next dequeued by viewFor:.
+            for ann in map.annotations(in: map.visibleMapRect).compactMap({ $0 as? LocationAnnotation }) {
                 switch map.view(for: ann) {
-                case let dot as ScoutDotAnnotationView:   dot.setScale(scale)
+                case let dot as ScoutDotAnnotationView:     dot.setScale(scale)
                 case let photo as ScoutPhotoAnnotationView: photo.setScale(scale)
                 default: break
                 }
@@ -970,17 +993,17 @@ struct ScoutMapView {
             #endif
         }
 
-        /// Diffs the on-map annotations of one kind (search results or saved project pins)
-        /// against the desired set and swaps them only when they differ. Keyed by
-        /// id + tint + first photo URL, so a recolor (moved to another list) or a photo
-        /// arriving later (offline backfill) refreshes the pin while stable pins are left alone.
-        // Cheap content signatures (no per-pin string allocation) so the common case —
-        // updateMap fired for an unrelated reason while the pin set is unchanged — bails
-        // out in O(n) hashing instead of O(n) string building + two Set<String> allocations.
-        private var lastSearchSig: Int = 0
+        // Stable index of live annotations — keyed by UUID for O(1) lookup.
+        private var searchIndex:  [UUID: LocationAnnotation] = [:]
+        private var projectIndex: [UUID: LocationAnnotation] = [:]
+        private var lastSearchSig:  Int = 0
         private var lastProjectSig: Int = 0
 
+        /// True incremental diff: adds only new annotations, removes only stale ones, and
+        /// updates tint/image in-place — so a 1000-pin project that hasn't changed costs
+        /// just an O(n) hash check followed by nothing, instead of 2000 MapKit calls.
         func syncAnnotations(_ map: MKMapView, desired: [(ScoutLocation, String?)], projectPins: Bool) {
+            // Fast signature check — bail immediately if nothing changed.
             var hasher = Hasher()
             for (loc, tint) in desired {
                 hasher.combine(loc.id)
@@ -989,33 +1012,56 @@ struct ScoutMapView {
             }
             let sig = hasher.finalize()
             if projectPins {
-                if sig == lastProjectSig { return }
+                guard sig != lastProjectSig else { return }
+                lastProjectSig = sig
             } else {
-                if sig == lastSearchSig { return }
+                guard sig != lastSearchSig else { return }
+                lastSearchSig = sig
             }
 
-            func key(_ loc: ScoutLocation, _ tint: String?) -> String {
-                "\(loc.id)|\(tint ?? "")|\(loc.images.first?.url?.absoluteString ?? "")"
+            var index = projectPins ? projectIndex : searchIndex
+
+            // Build desired lookup: id → (location, tint, imageURL)
+            var desiredMap: [UUID: (ScoutLocation, String?)] = Dictionary(
+                uniqueKeysWithValues: desired.map { ($0.0.id, ($0.0, $0.1)) }
+            )
+
+            // Remove annotations that are no longer desired.
+            var toRemove: [LocationAnnotation] = []
+            for (id, ann) in index where desiredMap[id] == nil {
+                toRemove.append(ann)
+                index.removeValue(forKey: id)
             }
-            let current = map.annotations.compactMap { $0 as? LocationAnnotation }.filter { $0.isProjectPin == projectPins }
-            let currentKeys = Set(current.map { key($0.location, $0.tintHex) })
-            let newKeys = Set(desired.map { key($0.0, $0.1) })
-            guard currentKeys != newKeys else {
-                if projectPins { lastProjectSig = sig } else { lastSearchSig = sig }
-                return
+            if !toRemove.isEmpty { map.removeAnnotations(toRemove) }
+
+            // Update in-place where tint or image changed; add truly new ones.
+            var toAdd: [LocationAnnotation] = []
+            for (id, (loc, tint)) in desiredMap {
+                if let existing = index[id] {
+                    // Already on map — update tint color without remove/add if it changed.
+                    if existing.tintHex != tint {
+                        let replacement = LocationAnnotation(loc, isProjectPin: projectPins, tintHex: tint)
+                        map.removeAnnotation(existing)
+                        toAdd.append(replacement)
+                        index[id] = replacement
+                    }
+                    // Image URL change: let the view update on next viewFor: (annotation unchanged).
+                } else {
+                    let ann = LocationAnnotation(loc, isProjectPin: projectPins, tintHex: tint)
+                    toAdd.append(ann)
+                    index[id] = ann
+                }
             }
-            map.removeAnnotations(current)
-            map.addAnnotations(desired.map { LocationAnnotation($0.0, isProjectPin: projectPins, tintHex: $0.1) })
-            if projectPins { lastProjectSig = sig } else { lastSearchSig = sig }
+            if !toAdd.isEmpty { map.addAnnotations(toAdd) }
+
+            if projectPins { projectIndex = index } else { searchIndex = index }
         }
 
         func syncSelection(_ map: MKMapView, selection: ScoutLocation?) {
             let selected = map.selectedAnnotations.compactMap { $0 as? LocationAnnotation }.first
 
             if let selection,
-               let annotation = map.annotations
-                   .compactMap({ $0 as? LocationAnnotation })
-                   .first(where: { $0.location.id == selection.id }) {
+               let annotation = searchIndex[selection.id] ?? projectIndex[selection.id] {
                 if selected?.location.id != selection.id {
                     map.selectAnnotation(annotation, animated: false)
                 } else if let view = map.view(for: annotation), activePopover == nil {
@@ -1097,6 +1143,21 @@ struct ScoutMapView {
             let work = DispatchWorkItem { [weak self] in self?.parent.onRegionEnd(region) }
             regionSaveWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+
+            // When crossing the photo↔dot zoom threshold, recycle visible annotation views
+            // so viewFor: can immediately swap between photo and dot renderers.
+            let spanKm = region.span.latitudeDelta * 111
+            let bucket = spanKm < 80 ? 0 : 1
+            if bucket != lastSpanKmBucket {
+                lastSpanKmBucket = bucket
+                // Recycle only visible annotations to avoid touching all 1000+.
+                let visible: [LocationAnnotation] = mapView.annotations(in: mapView.visibleMapRect)
+                    .compactMap { $0 as? LocationAnnotation }
+                if !visible.isEmpty {
+                    mapView.removeAnnotations(visible)
+                    mapView.addAnnotations(visible)
+                }
+            }
         }
 
         #if os(macOS)
@@ -1128,16 +1189,23 @@ struct ScoutMapView {
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? LocationAnnotation else { return }
-            // Defer the binding write: this delegate can fire mid view-update (via
-            // syncSelection → selectAnnotation), and mutating SwiftUI state then is undefined.
-            DispatchQueue.main.async { self.parent.selection = ann.location }
+            DispatchQueue.main.async {
+                self.parent.selection = ann.location
+                // If this is a stack lead, notify ContentView to toggle expansion.
+                if let groupID = ann.location.groupID {
+                    self.parent.onStackTapped?(groupID)
+                }
+            }
             #if os(macOS)
             showPopover(for: ann.location, from: view, in: mapView)
             #endif
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
-            DispatchQueue.main.async { self.parent.selection = nil }
+            DispatchQueue.main.async {
+                self.parent.selection = nil
+                self.parent.onMapDeselect?()
+            }
             #if os(macOS)
             activePopover?.close()
             activePopover = nil
@@ -1167,11 +1235,9 @@ struct ScoutMapView {
             pop.behavior = .applicationDefined
             pop.animates = false   // appear instantly on click instead of fading in
 
-            // Anchor at the top edge of the annotation view so the popover arrow points
-            // directly at the pin/photo regardless of scale. In AppKit coordinates Y goes
-            // up, so maxY is the top of the view. .minY preferred edge means the popover
-            // appears above (north of) the anchor rect.
-            let anchorY = annotationView.bounds.maxY - 1
+            // MKAnnotationView uses flipped coordinates (Y increases downward), so minY=0
+            // is the top edge. .minY preferred edge makes the popover appear above the photo.
+            let anchorY = annotationView.bounds.minY + 1
             let anchor = NSRect(x: annotationView.bounds.midX - 0.5,
                                 y: anchorY, width: 1, height: 1)
             pop.show(relativeTo: anchor, of: annotationView, preferredEdge: .minY)
@@ -1230,13 +1296,21 @@ struct ScoutMapView {
 
         var lastPhotoAnnotationsMode: Bool = false
         var lastPinScale: Double = 1.0
+        var lastSpanKmBucket: Int = 0   // tracks coarse zoom bucket to trigger photo↔dot swap
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if let ann = annotation as? LocationAnnotation {
                 #if os(macOS)
                 let scale = CGFloat(parent.pinScale)
                 // Photo annotations only make sense when the pin actually has an image.
-                if parent.showPhotoAnnotations, ann.location.images.first?.url != nil {
+                // Suppress photo loading when zoomed far out — loading hundreds of
+                // thumbnail images simultaneously tanks frame rate. Switch to dots below
+                // ~10 km span; photos look like blobs at that scale anyway.
+                let spanKm = mapView.region.span.latitudeDelta * 111
+                let showPhoto = parent.showPhotoAnnotations
+                    && ann.location.images.first?.url != nil
+                    && spanKm < 80
+                if showPhoto {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutPhotoAnnotationView.reuseID) as? ScoutPhotoAnnotationView)
                         ?? ScoutPhotoAnnotationView(annotation: annotation, reuseIdentifier: ScoutPhotoAnnotationView.reuseID)
                     view.annotation = annotation

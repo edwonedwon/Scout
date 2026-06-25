@@ -68,7 +68,8 @@ enum TimelineGeoService {
     /// timeline entries' ISO 8601 offset and re-parse the EXIF date with that timezone
     /// so the timestamps match correctly — without this, e.g. a UTC system clock
     /// shifts all Japan photos 9 hours into the wrong activity windows.
-    static func backfill(timelineURL: URL, context: ModelContext) async -> BackfillResult {
+    static func backfill(timelineURL: URL, context: ModelContext,
+                         onProgress: (@MainActor (Int, Int, String) -> Void)? = nil) async -> BackfillResult {
         let scoped = timelineURL.startAccessingSecurityScopedResource()
         defer { if scoped { timelineURL.stopAccessingSecurityScopedResource() } }
         guard let rawData = try? Data(contentsOf: timelineURL) else { return BackfillResult() }
@@ -89,7 +90,9 @@ enum TimelineGeoService {
         let candidates = pins.filter { !$0.hasGPS || $0.gpsFromTimeline }
 
         var result = BackfillResult(detectedTimezone: tzName)
-        for pin in candidates {
+        let total = candidates.count
+        for (idx, pin) in candidates.enumerated() {
+            await onProgress?(idx, total, pin.name)
             // Re-read EXIF date from the first photo file using the detected timezone.
             // This bypasses any timezone error baked into the stored dateTaken.
             let date = exifDate(from: pin, formatter: exifFmt) ?? pin.dateTaken

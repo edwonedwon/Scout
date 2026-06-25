@@ -115,6 +115,7 @@ struct ProjectsPanel: View {
     var onZoomToPin: ((PinnedLocationData) -> Void)? = nil
     var onClearPin: (() -> Void)? = nil
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
+    var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
     /// Set by photo grid to scroll the sidebar to the tapped pin.
     var scrollToPinUUID: UUID? = nil
 
@@ -142,6 +143,7 @@ struct ProjectsPanel: View {
                         onZoomToPin: onZoomToPin,
                         onClearPin: onClearPin,
                         onRevealPins: onRevealPins,
+                        onOpenCarousel: onOpenCarousel,
                         onExpandedChanged: { uuids in
                             expandedListUUIDs = uuids.joined(separator: ",")
                         },
@@ -290,11 +292,14 @@ private final class SidebarSelection: ObservableObject {
 private enum SidebarItem: Identifiable {
     case photo(PinnedLocationData)
     case list(LocationListData)
+    /// A group of photos that share a stackID — shown as one row with a count badge.
+    case stack(lead: PinnedLocationData, members: [PinnedLocationData])
 
     var id: PersistentIdentifier {
         switch self {
         case .photo(let p): return p.persistentModelID
         case .list(let l): return l.persistentModelID
+        case .stack(let lead, _): return lead.persistentModelID
         }
     }
 
@@ -302,6 +307,7 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return p.panelOrder
         case .list(let l): return l.panelOrder
+        case .stack(let lead, _): return lead.panelOrder
         }
     }
 
@@ -309,15 +315,15 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return p.createdAt
         case .list(let l): return l.createdAt
+        case .stack(let lead, _): return lead.createdAt
         }
     }
 
-    /// Stable drag identifier: "photo:<uuid>" or "list:<uuid>". Transferred as a
-    /// plain String, which round-trips through the pasteboard with no UTType setup.
     var dragID: String {
         switch self {
         case .photo(let p): return "photo:\(p.uuid.uuidString)"
         case .list(let l): return "list:\(l.uuid.uuidString)"
+        case .stack(let lead, _): return "photo:\(lead.uuid.uuidString)"
         }
     }
 }
@@ -333,6 +339,7 @@ private struct ProjectDetailView: View {
     var onZoomToPin: ((PinnedLocationData) -> Void)?
     var onClearPin: (() -> Void)?
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
+    var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
     var onExpandedChanged: (([String]) -> Void)? = nil
     /// Set from the photo grid to scroll the sidebar to a specific pin.
     var scrollToPinUUID: UUID? = nil
@@ -345,6 +352,9 @@ private struct ProjectDetailView: View {
     @State private var renamingList: LocationListData? = nil
     @State private var renameListText = ""
     @State private var isBackfilling = false
+    @State private var showMovePopup = false
+    @State private var importProgress: (current: Int, total: Int)? = nil
+    @State private var timelineProgress: (current: Int, total: Int, name: String)? = nil
     // Selection lives in a reference-type model owned via plain @State (not @StateObject),
     // so changing it never re-renders this view or rebuilds the row list. Only the visible
     // rows observe it, so shift-selecting thousands of off-screen rows is instant.
@@ -352,6 +362,8 @@ private struct ProjectDetailView: View {
     // Cached sidebar items — rebuilt only when photos/lists actually change,
     // not on every render triggered by selection or scroll state.
     @State private var cachedSidebarItems: [SidebarItem] = []
+    // Held so moveSelection can scroll without needing to be inside the ScrollViewReader body.
+    @State private var listProxyHolder: ScrollViewProxy? = nil
 
     /// Flat ordered list of every currently visible row id (including expanded list pins),
     /// used to resolve a shift-click range.
@@ -367,14 +379,27 @@ private struct ProjectDetailView: View {
                     result.append(contentsOf:
                         list.pins.sorted { $0.sortOrder < $1.sortOrder }.map(\.persistentModelID))
                 }
+            case .stack(let lead, _):
+                result.append(lead.persistentModelID)
             }
         }
         return result
     }
 
-    /// Single click selects just this row (and fires the map side effect). Shift-click
-    /// extends the range from the anchor. All in code — only on-screen rows repaint.
-    private func handleTap(_ id: PersistentIdentifier, shift: Bool) {
+    /// Single click selects just this row (and fires the map side effect).
+    /// Shift-click extends a contiguous range from the anchor.
+    /// Option-click toggles this item in/out of a disparate selection.
+    private func handleTap(_ id: PersistentIdentifier, shift: Bool, option: Bool = false) {
+        if option {
+            if selection.ids.contains(id) {
+                selection.ids.remove(id)
+                if selection.anchor == id { selection.anchor = selection.ids.first }
+            } else {
+                selection.ids.insert(id)
+                selection.anchor = id
+            }
+            return   // disparate toggle: no map nav
+        }
         if shift, let anchor = selection.anchor {
             let order = flatVisibleIDs
             if let a = order.firstIndex(of: anchor), let b = order.firstIndex(of: id) {
@@ -394,19 +419,80 @@ private struct ProjectDetailView: View {
         }
     }
 
-    /// Double-click zooms into a pin (or fits to a list).
+    /// Double-click zooms into a pin (or fits to a list). No-GPS pins open in carousel.
     private func handleDoubleTap(_ id: PersistentIdentifier) {
         if let pin = findPin(byID: id) {
-            onZoomToPin?(pin)
+            if pin.hasGPS {
+                onZoomToPin?(pin)
+            } else {
+                onOpenCarousel?(pin)
+            }
         } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
             onFitToList?(list.pins.filter { $0.hasGPS })
         }
     }
 
+    /// Moves keyboard selection up (-1) or down (+1) through the flat visible row list.
+    /// If the next item is a list, it auto-expands it and steps inside to its first pin.
+    private func moveSelection(_ delta: Int) {
+        let flat = flatVisibleIDs
+        guard !flat.isEmpty else { return }
+        let current = selection.anchor ?? flat.first!
+        guard let idx = flat.firstIndex(of: current) else { return }
+        var next = max(0, min(flat.count - 1, idx + delta))
+
+        // If the target is a collapsed list and we're moving into it, expand it first
+        // and step to its first pin (or last pin when moving up).
+        if let list = cachedSidebarItems.compactMap({ if case .list(let l) = $0 { return l } else { return nil } })
+            .first(where: { $0.persistentModelID == flat[next] }),
+           !expandedListIDs.contains(list.persistentModelID) {
+            let pins = list.pins.sorted { $0.sortOrder < $1.sortOrder }
+            if !pins.isEmpty {
+                expandedListIDs.insert(list.persistentModelID)
+                // Re-compute flat after expansion to find the pin's index.
+                let newFlat = flatVisibleIDs
+                let targetPin = delta > 0 ? pins.first! : pins.last!
+                if let pinIdx = newFlat.firstIndex(of: targetPin.persistentModelID) {
+                    next = pinIdx
+                }
+            }
+        }
+
+        let newFlat = flatVisibleIDs
+        guard next < newFlat.count else { return }
+        let targetID = newFlat[next]
+        selection.ids = [targetID]
+        selection.anchor = targetID
+
+        // Fire the same map / photo-mode side effects as a tap.
+        if let pin = findPin(byID: targetID) {
+            onSelectPin?(pin)
+        }
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            listProxyHolder?.scrollTo(targetID, anchor: .center)
+        }
+    }
+
     private func rebuildSidebarItems() {
-        let photos = project.importedPhotos.map { SidebarItem.photo($0) }
+        // Group imported photos by stackID; unstacked photos become individual .photo items.
+        var stackGroups: [UUID: [PinnedLocationData]] = [:]
+        var unstackedPhotos: [PinnedLocationData] = []
+        for pin in project.importedPhotos {
+            if let sid = pin.stackID {
+                stackGroups[sid, default: []].append(pin)
+            } else {
+                unstackedPhotos.append(pin)
+            }
+        }
+        var photoItems: [SidebarItem] = unstackedPhotos.map { .photo($0) }
+        for (_, members) in stackGroups {
+            let sorted = members.sorted { $0.sortOrder < $1.sortOrder }
+            guard let lead = sorted.first else { continue }
+            photoItems.append(.stack(lead: lead, members: sorted))
+        }
         let lists = project.lists.filter { $0.parentList == nil }.map { SidebarItem.list($0) }
-        cachedSidebarItems = (photos + lists).sorted {
+        cachedSidebarItems = (photoItems + lists).sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
         }
     }
@@ -422,8 +508,9 @@ private struct ProjectDetailView: View {
         // Normalize panelOrder values — only write when stale to avoid cascading updates.
         for (i, item) in cachedSidebarItems.enumerated() {
             switch item {
-            case .photo(let p): if p.panelOrder != i { p.panelOrder = i }
-            case .list(let l):  if l.panelOrder != i { l.panelOrder = i }
+            case .photo(let p):          if p.panelOrder != i { p.panelOrder = i }
+            case .list(let l):           if l.panelOrder != i { l.panelOrder = i }
+            case .stack(let lead, _):    if lead.panelOrder != i { lead.panelOrder = i }
             }
         }
     }
@@ -461,7 +548,17 @@ private struct ProjectDetailView: View {
         }
         _ = provider.loadObject(ofClass: NSString.self) { object, _ in
             guard let dragID = object as? String else { return }
-            Task { @MainActor in _ = handleDrop(dragID, onto: target) }
+            Task { @MainActor in
+                if dragID.hasPrefix("photos:") {
+                    let uuids = dragID.dropFirst(7).split(separator: ",").map(String.init)
+                    if case .list(let list) = target {
+                        let pins = uuids.compactMap { findPin(uuid: $0) }
+                        pins.forEach { movePinsToList($0, intoList: list) }
+                    }
+                } else {
+                    _ = handleDrop(dragID, onto: target)
+                }
+            }
         }
         return true
     }
@@ -564,6 +661,12 @@ private struct ProjectDetailView: View {
         _ = provider.loadObject(ofClass: NSString.self) { object, _ in
             guard let dragID = object as? String else { return }
             Task { @MainActor in
+                if dragID.hasPrefix("photos:") {
+                    let uuids = dragID.dropFirst(7).split(separator: ",").map(String.init)
+                    let pins = uuids.compactMap { findPin(uuid: $0) }
+                    pins.forEach { movePinsToList($0, intoList: list, afterPin: afterPin) }
+                    return
+                }
                 let uuid: String
                 if dragID.hasPrefix("pin:") { uuid = String(dragID.dropFirst(4)) }
                 else if dragID.hasPrefix("photo:") { uuid = String(dragID.dropFirst(6)) }
@@ -593,6 +696,13 @@ private struct ProjectDetailView: View {
                 detach(pin)
                 pin.owningProject = project
                 pin.panelOrder = targetPin.panelOrder
+                project.importedPhotos.append(pin)
+                normalizeOrder()
+                try? modelContext.save()
+            case .stack(let lead, _):
+                detach(pin)
+                pin.owningProject = project
+                pin.panelOrder = lead.panelOrder
                 project.importedPhotos.append(pin)
                 normalizeOrder()
                 try? modelContext.save()
@@ -627,8 +737,9 @@ private struct ProjectDetailView: View {
         items.insert(moving, at: min(to, items.count))
         for (i, item) in items.enumerated() {
             switch item {
-            case .photo(let p): p.panelOrder = i
-            case .list(let l): l.panelOrder = i
+            case .photo(let p):       p.panelOrder = i
+            case .list(let l):        l.panelOrder = i
+            case .stack(let lead, _): lead.panelOrder = i
             }
         }
         try? modelContext.save()
@@ -691,8 +802,31 @@ private struct ProjectDetailView: View {
                          : "Delete Items (\(selection.ids.count))"
     }
 
+    private var selectedPhotoCount: Int {
+        selection.ids.filter { findPin(byID: $0) != nil }.count
+    }
+
+    /// Groups selected top-level photos into a stack (shared stackID).
+    private func makeStack(from ids: Set<PersistentIdentifier>) {
+        let pins = ids.compactMap { findPin(byID: $0) }.filter { $0.list == nil }
+        guard pins.count >= 2 else { return }
+        let stackID = UUID()
+        for pin in pins { pin.stackID = stackID }
+        selection.ids = []
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// Removes all pins from their stack (clears stackID).
+    private func unstackPins(_ pins: [PinnedLocationData]) {
+        for pin in pins { pin.stackID = nil }
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
     var body: some View {
         ScrollViewReader { listProxy in
+        let _ = { listProxyHolder = listProxy }()
         List {
             Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
 
@@ -724,11 +858,23 @@ private struct ProjectDetailView: View {
                     PinRow(
                         pin: pin,
                         selection: selection,
-                        onTap: { shift in handleTap(pin.persistentModelID, shift: shift) },
+                        onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
                         onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
                     )
                     .contextMenu {
                         let multi = isInMultiSelection(pin.persistentModelID)
+                        if multi && selectedPhotoCount >= 2 {
+                            Button { makeStack(from: selection.ids) } label: {
+                                Label("Make Stack", systemImage: "square.3.layers.3d")
+                            }
+                            Divider()
+                        }
+                        if let path = pin.originalFilePath {
+                            Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
+                                Label("Reveal in Finder", systemImage: "folder")
+                            }
+                            Divider()
+                        }
                         Button(role: .destructive) {
                             if multi { deleteSelectedItems() } else { deletePin(pin) }
                         } label: {
@@ -738,6 +884,29 @@ private struct ProjectDetailView: View {
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
                     .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
                         tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .photo(pin))
+                    }
+                case .stack(let lead, let members):
+                    StackRow(
+                        lead: lead,
+                        members: members,
+                        selection: selection,
+                        onTap: { shift, option in handleTap(lead.persistentModelID, shift: shift, option: option) },
+                        onDoubleTap: { onOpenCarousel?(lead) }
+                    )
+                    .contextMenu {
+                        Button { unstackPins(members) } label: {
+                            Label("Unstack", systemImage: "square.3.layers.3d.slash")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            members.forEach { deletePin($0) }
+                        } label: {
+                            Label("Delete Stack", systemImage: "trash")
+                        }
+                    }
+                    .onDrag { NSItemProvider(object: item.dragID as NSString) }
+                    .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
+                        tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .stack(lead: lead, members: members))
                     }
                 case .list(let list):
                     let isExpanded = expandedListIDs.contains(list.persistentModelID)
@@ -749,7 +918,7 @@ private struct ProjectDetailView: View {
                             if isExpanded { expandedListIDs.remove(list.persistentModelID) }
                             else { expandedListIDs.insert(list.persistentModelID) }
                         },
-                        onTap: { shift in handleTap(list.persistentModelID, shift: shift) },
+                        onTap: { shift, option in handleTap(list.persistentModelID, shift: shift, option: option) },
                         onDoubleTap: { handleDoubleTap(list.persistentModelID) },
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
@@ -777,7 +946,7 @@ private struct ProjectDetailView: View {
                                 pin: pin,
                                 selection: selection,
                                 listColor: Color(hexString: list.colorHex),
-                                onTap: { shift in handleTap(pin.persistentModelID, shift: shift) },
+                                onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
                                 onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
                             )
                             .padding(.leading, 24)
@@ -914,6 +1083,37 @@ private struct ProjectDetailView: View {
             }
         }
         } // ScrollViewReader
+        .onKeyPress(.downArrow) { moveSelection(1); return .handled }
+        .onKeyPress(.upArrow)   { moveSelection(-1); return .handled }
+        // Hidden M key button — opens Move popup when pins are selected.
+        .background {
+            Button("") {
+                let hasPins = selection.ids.contains(where: { findPin(byID: $0) != nil })
+                if hasPins { showMovePopup = true }
+            }
+            .keyboardShortcut("m", modifiers: [])
+            .opacity(0)
+            .allowsHitTesting(false)
+        }
+        .sheet(isPresented: $showMovePopup) {
+            MoveToListSheet(
+                lists: project.lists,
+                onMove: { list in
+                    let pins = selection.ids.compactMap { findPin(byID: $0) }
+                    guard let first = pins.first else { return }
+                    movePinsToList(first, intoList: list)
+                    showMovePopup = false
+                },
+                onDismiss: { showMovePopup = false }
+            )
+        }
+        .overlay {
+            if let prog = importProgress {
+                ImportProgressOverlay(current: prog.current, total: prog.total)
+            } else if let prog = timelineProgress {
+                TimelineProgressOverlay(current: prog.current, total: prog.total, currentName: prog.name)
+            }
+        }
     }
 
     private func importPhotos() {
@@ -942,11 +1142,15 @@ private struct ProjectDetailView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         isBackfilling = true
+        timelineProgress = (0, 0, "")
         DebugLogger.shared.log("Timeline import started…", level: .info)
         let context = modelContext
         Task {
-            let result = await TimelineGeoService.backfill(timelineURL: url, context: context)
+            let result = await TimelineGeoService.backfill(timelineURL: url, context: context) { current, total, name in
+                timelineProgress = (current, total, name)
+            }
             isBackfilling = false
+            timelineProgress = nil
             DebugLogger.shared.log(
                 "Timeline import done — timezone: \(result.detectedTimezone), updated: \(result.updated), skipped: \(result.skipped), failed: \(result.failed)",
                 level: result.failed > 0 ? .warning : .success
@@ -963,8 +1167,12 @@ private struct ProjectDetailView: View {
     private func importImageURLs(_ urls: [URL], into list: LocationListData?) async {
         // Collect all existing pins across this project for duplicate detection.
         let existingPins = (project.lists.flatMap(\.pins)) + project.importedPhotos
+        importProgress = (0, urls.count)
         let results = await PhotoImportService.importPhotos(from: urls, into: list,
-                                                            existingPins: existingPins)
+                                                            existingPins: existingPins) { current, total in
+            importProgress = (current, total)
+        }
+        importProgress = nil
         if let list {
             for result in results {
                 modelContext.insert(result.pin)
@@ -1008,7 +1216,7 @@ private struct ListRow: View {
     let isExpanded: Bool
     @ObservedObject var selection: SidebarSelection
     let onToggleExpand: () -> Void
-    var onTap: ((Bool) -> Void)? = nil
+    var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
@@ -1082,7 +1290,7 @@ private struct ListRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
         )
-        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift)) }
+        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift), NSEvent.modifierFlags.contains(.option)) }
         .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
         .contextMenu {
             Button { onRename?() } label: {
@@ -1126,7 +1334,7 @@ private struct PinRow: View {
     let pin: PinnedLocationData
     @ObservedObject var selection: SidebarSelection
     var listColor: Color? = nil
-    var onTap: ((Bool) -> Void)? = nil
+    var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
 
     private var isSelected: Bool { selection.contains(pin.persistentModelID) }
@@ -1167,8 +1375,17 @@ private struct PinRow: View {
         )
         // Single click selects (instant); double click zooms. Manual handling — no native
         // List selection — so selecting thousands is an O(1) set write with no per-row work.
-        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift)) }
+        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift), NSEvent.modifierFlags.contains(.option)) }
         .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
+        .contextMenu {
+            if let path = pin.originalFilePath {
+                Button {
+                    NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder")
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -1187,6 +1404,80 @@ private struct PinRow: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.secondary.opacity(0.15))
                 .overlay(Image(systemName: "mappin").foregroundStyle(.secondary))
+        }
+    }
+}
+
+// MARK: - Stack row
+
+private struct StackRow: View {
+    let lead: PinnedLocationData
+    let members: [PinnedLocationData]
+    @ObservedObject var selection: SidebarSelection
+    var onTap: ((Bool, Bool) -> Void)? = nil
+    var onDoubleTap: (() -> Void)? = nil
+
+    private var isSelected: Bool { selection.contains(lead.persistentModelID) }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack(alignment: .bottomTrailing) {
+                thumbnailImage(for: lead)
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                // Stacked layers badge
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(.ultraThinMaterial)
+                    Text("\(members.count)")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                }
+                .frame(width: 20, height: 16)
+                .offset(x: 4, y: 4)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(lead.name)
+                    .font(.body)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Image(systemName: "square.3.layers.3d")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("\(members.count) photos")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
+        )
+        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift), NSEvent.modifierFlags.contains(.option)) }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
+    }
+
+    @ViewBuilder
+    private func thumbnailImage(for pin: PinnedLocationData) -> some View {
+        let url: URL? = pin.thumbnailImages.first?.url
+            ?? pin.photoFiles.first.map { PinPhotoStore.fileURL($0) }
+            ?? pin.imageURL.flatMap { URL(string: $0) }
+        if let url {
+            GooglePhotoImage(url: url) { Color.secondary.opacity(0.2) }
+                .aspectRatio(contentMode: .fill)
+        } else {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.15))
+                .overlay(Image(systemName: "square.3.layers.3d").foregroundStyle(.secondary))
         }
     }
 }
@@ -1225,6 +1516,172 @@ struct NameEntrySheet: View {
         }
         .padding(24)
         .frame(width: 280)
+    }
+}
+
+// MARK: - Import progress overlay
+
+private struct ImportProgressOverlay: View {
+    let current: Int
+    let total: Int
+
+    private var fraction: Double {
+        guard total > 0 else { return 0 }
+        return min(Double(current) / Double(total), 1)
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text("Importing Photos…")
+                .font(.subheadline.weight(.semibold))
+            ProgressView(value: fraction)
+                .progressViewStyle(.linear)
+                .frame(width: 200)
+            Text("\(current) of \(total)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(20)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .shadow(radius: 12)
+    }
+}
+
+// MARK: - Timeline progress overlay
+
+private struct TimelineProgressOverlay: View {
+    let current: Int
+    let total: Int
+    let currentName: String
+
+    private var fraction: Double {
+        guard total > 0 else { return 0 }
+        return min(Double(current) / Double(total), 1)
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text("Setting Photo Locations")
+                .font(.subheadline.weight(.semibold))
+            Text("Matching photos to Timeline history…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ProgressView(value: fraction)
+                .progressViewStyle(.linear)
+                .frame(width: 200)
+            if !currentName.isEmpty {
+                Text(currentName)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .frame(width: 200)
+            }
+            if total > 0 {
+                Text("\(current) of \(total)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(20)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .shadow(radius: 12)
+    }
+}
+
+// MARK: - Move-to-list popup
+
+private struct MoveToListSheet: View {
+    let lists: [LocationListData]
+    let onMove: (LocationListData) -> Void
+    let onDismiss: () -> Void
+
+    @State private var query = ""
+    @State private var highlighted = 0
+    @FocusState private var fieldFocused: Bool
+
+    private var filtered: [LocationListData] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return lists }
+        return lists.filter { $0.name.lowercased().contains(q) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Search field
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.right.square")
+                    .foregroundStyle(.secondary)
+                TextField("Move to list…", text: $query)
+                    .textFieldStyle(.plain)
+                    .focused($fieldFocused)
+                    .onSubmit { commit() }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            Divider()
+
+            // Filtered list
+            if filtered.isEmpty {
+                Text("No matching lists")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 16)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(filtered.enumerated()), id: \.element.persistentModelID) { idx, list in
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(Color(hexString: list.colorHex))
+                                        .frame(width: 9, height: 9)
+                                    Text(list.name)
+                                        .font(.subheadline)
+                                    Spacer()
+                                    if idx == highlighted {
+                                        Image(systemName: "return")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(idx == highlighted ? Color.accentColor.opacity(0.15) : Color.clear,
+                                            in: RoundedRectangle(cornerRadius: 6))
+                                .contentShape(Rectangle())
+                                .onTapGesture { onMove(list) }
+                                .id(idx)
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                    .onChange(of: highlighted) { _, idx in
+                        withAnimation { proxy.scrollTo(idx, anchor: .center) }
+                    }
+                }
+            }
+        }
+        .frame(width: 280)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear { fieldFocused = true; highlighted = 0 }
+        .onChange(of: query) { highlighted = 0 }
+        .onKeyPress(.downArrow)  { move( 1); return .handled }
+        .onKeyPress(.upArrow)    { move(-1); return .handled }
+        .onKeyPress(.escape)     { onDismiss(); return .handled }
+    }
+
+    private func move(_ delta: Int) {
+        guard !filtered.isEmpty else { return }
+        highlighted = (highlighted + delta + filtered.count) % filtered.count
+    }
+
+    private func commit() {
+        guard highlighted < filtered.count else { return }
+        onMove(filtered[highlighted])
     }
 }
 

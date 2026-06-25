@@ -106,6 +106,8 @@ final class PinnedLocationData {
     // Capture time from EXIF — reserved for a future Google Timeline sync feature that
     // will derive coordinates for GPS-less imported photos from Timeline movement data.
     var dateTaken: Date? = nil
+    /// When set, this pin is part of a stack. All pins sharing a stackID form one visual unit.
+    var stackID: UUID? = nil
     @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
     /// Set when this pin was imported directly into a project (not inside a list).
     var owningProject: ProjectData? = nil
@@ -170,10 +172,11 @@ final class PinnedLocationData {
             images = []
         }
         return ScoutLocation(
-            id: uuid,   // stable id so map selection/popover and annotation diffing work
+            id: uuid,
             name: name,
             description: notes,
             coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+            groupID: stackID,   // lets the map know this pin is part of a stack
             sourceURL: sourceURLString.flatMap { URL(string: $0) },
             images: images,
             fullResImages: fullResImages,

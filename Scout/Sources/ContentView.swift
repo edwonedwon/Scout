@@ -87,6 +87,8 @@ struct ContentView: View {
     @State private var cachedProjectPins: [(ScoutLocation, String)] = []
     @State private var cachedAllProjectPins: [ScoutLocation] = []
     @State private var cachedGridSections: [PhotoGridView.Section] = []
+    /// When non-nil, this stackID is expanded on the map — all member pins are shown individually.
+    @State private var expandedStackID: UUID? = nil
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -139,6 +141,11 @@ struct ContentView: View {
                     mapController.dismissPopover()
                 }
             }
+            .onChange(of: photoViewer.isVisible) { _, visible in
+                // The map popover is a native NSPopover that floats above the entire view
+                // hierarchy. Always close it when the carousel opens, regardless of viewMode.
+                if visible { mapController.dismissPopover() }
+            }
     }
 
     @ViewBuilder private var rootLayoutWithSelectionObservers: some View {
@@ -188,6 +195,7 @@ struct ContentView: View {
                             mapController.revealPins(coords: coords, order: ids, delay: 0.9)
                         }
                     },
+                    onOpenCarousel: openInCarousel,
                     scrollToPinUUID: highlightedPinID
                 )
                 .frame(width: 240)
@@ -442,6 +450,7 @@ struct ContentView: View {
                 viewModeToggle
                 Spacer()
                 HStack(spacing: 4) {
+                    fitAllPinsButton
                     locationTrackingButton
                     panelToggleButton(
                         icon: showRightPanel ? "sidebar.right" : "rectangle.rightthird.inset.filled",
@@ -452,6 +461,16 @@ struct ContentView: View {
             .padding(.top, 14)
             .padding(.horizontal, 8)
         }
+    }
+
+    private var fitAllPinsButton: some View {
+        Button { frameAllProjectPins() } label: {
+            Image(systemName: "crop")
+                .font(.subheadline.weight(.medium))
+                .mapControlChrome(diameter: 32, circle: false)
+        }
+        .buttonStyle(.plain)
+        .disabled(cachedProjectPins.isEmpty)
     }
 
     private var locationTrackingButton: some View {
@@ -498,7 +517,21 @@ struct ContentView: View {
             list.pins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), list.colorHex) }
         }
         for project in allProjects {
-            mapPins += project.importedPhotos.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
+            var seenStacks: Set<UUID> = []
+            for pin in project.importedPhotos where pin.hasGPS {
+                if let sid = pin.stackID {
+                    if sid == expandedStackID {
+                        // Stack is expanded — show every member individually.
+                        mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
+                    } else {
+                        // Stack is collapsed — only show the lead pin once.
+                        guard seenStacks.insert(sid).inserted else { continue }
+                        mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
+                    }
+                } else {
+                    mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
+                }
+            }
         }
         mapPins += unfiledPins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
         cachedProjectPins = mapPins
@@ -524,13 +557,21 @@ struct ContentView: View {
                 if !locs.isEmpty {
                     sections.append(PhotoGridView.Section(
                         title: project.lists.count > 1 ? "\(project.name) — \(list.name)" : project.name,
-                        locations: locs
+                        locations: locs,
+                        color: Color(hexString: list.colorHex)
                     ))
                 }
             }
-            // Directly-imported photos (no list).
+            // Directly-imported photos (no list). Deduplicate stacks — show only lead pin.
+            var seenStacksGrid: Set<UUID> = []
             let imported = project.importedPhotos
                 .sorted { $0.sortOrder < $1.sortOrder }
+                .filter { pin in
+                    if let sid = pin.stackID {
+                        return seenStacksGrid.insert(sid).inserted
+                    }
+                    return true
+                }
                 .map { $0.asScoutLocation() }
                 .filter { !$0.images.isEmpty }
             if !imported.isEmpty {
@@ -545,7 +586,11 @@ struct ContentView: View {
                 .map { $0.asScoutLocation() }
                 .filter { !$0.images.isEmpty }
             if !locs.isEmpty {
-                sections.append(PhotoGridView.Section(title: list.name, locations: locs))
+                sections.append(PhotoGridView.Section(
+                    title: list.name,
+                    locations: locs,
+                    color: Color(hexString: list.colorHex)
+                ))
             }
         }
         // Unfiled pins.
@@ -564,15 +609,15 @@ struct ContentView: View {
     /// (unfiled pins are always shown), then centers on it.
     private func selectPin(_ pin: PinnedLocationData) {
         if viewMode == .photos {
-            // If the carousel is open, close it first so the grid is visible.
             if photoViewer.isVisible { photoViewer.dismiss() }
             let id = pin.uuid
             highlightedPinID = (highlightedPinID == id) ? nil : id
             return
         }
+        // Single-click in the sidebar list: just highlight the pin, no map pan.
+        // Map panning only happens on double-click (zoomToPin) or clicking a map annotation.
         guard pin.hasGPS else { return }
         let location = pin.asScoutLocation()
-        // Toggle: tapping the already-selected pin again closes its popover.
         if selectedLocation?.id == location.id {
             selectedLocation = nil
             return
@@ -581,7 +626,6 @@ struct ContentView: View {
             activeListIDs.insert(listID)
         }
         selectedLocation = location
-        mapController.pan(to: location.coordinate, animated: true)
     }
 
     /// Double-clicking a sidebar pin: switch to the map if needed, then center AND zoom
@@ -601,6 +645,38 @@ struct ContentView: View {
         let zoom = { mapController.center(on: location.coordinate, meters: 800, animated: true) }
         if wasMap { zoom() }
         else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { zoom() } }
+    }
+
+    /// Opens a pin in the carousel with all pinned locations as the navigation universe,
+    /// in sidebar order (matching cachedGridSections). Used for double-clicking no-GPS pins.
+    private func openInCarousel(_ pin: PinnedLocationData) {
+        // If this pin belongs to a stack, gather all stack members' images into one location.
+        let location: ScoutLocation
+        if let stackID = pin.stackID {
+            let members = allPins.filter { $0.stackID == stackID }
+                .sorted { $0.sortOrder < $1.sortOrder }
+            let allImages = members.flatMap { m -> [ScoutImage] in
+                let loc = m.asScoutLocation()
+                return loc.fullResImages.isEmpty ? loc.images : loc.fullResImages
+            }
+            let base = pin.asScoutLocation()
+            location = ScoutLocation(id: base.id, name: base.name, description: base.description,
+                                     coordinate: base.coordinate, sourceURL: base.sourceURL,
+                                     images: allImages, googleMapsURL: base.googleMapsURL,
+                                     googlePlaceId: base.googlePlaceId)
+        } else {
+            location = pin.asScoutLocation()
+        }
+        // Build ordered universe from the grid sections (sidebar order).
+        var seen = Set<UUID>()
+        let allLocs = cachedGridSections.flatMap(\.locations).filter { seen.insert($0.id).inserted }
+        let images = location.fullResImages.isEmpty ? location.images : location.fullResImages
+        PhotoViewerState.shared.show(
+            images: images,
+            startingAt: 0,
+            location: location,
+            allLocations: allLocs
+        )
     }
 
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
@@ -786,6 +862,20 @@ struct ContentView: View {
             searchPolygon: searchArea.polygon,
             onPolygonComplete: { coords in searchArea.setPolygon(coords) },
             onFrameAllPins: frameAllProjectPins,
+            onStackTapped: { stackID in
+                if expandedStackID == stackID {
+                    expandedStackID = nil
+                } else {
+                    expandedStackID = stackID
+                }
+                rebuildPinCaches()
+            },
+            onMapDeselect: {
+                if expandedStackID != nil {
+                    expandedStackID = nil
+                    rebuildPinCaches()
+                }
+            },
             mapType: mapStyle.mapType,
             cyclingProvider: cyclingProvider,
             showPhotoAnnotations: showPhotoAnnotations,
