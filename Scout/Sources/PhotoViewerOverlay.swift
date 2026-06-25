@@ -100,7 +100,11 @@ enum PhotoLoader {
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0,
                   [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
         else { return nil }
+        #if os(macOS)
         return ScoutImageType(cgImage: cgImage, size: .zero)
+        #else
+        return ScoutImageType(cgImage: cgImage)
+        #endif
     }
 }
 

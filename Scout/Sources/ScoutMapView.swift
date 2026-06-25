@@ -1192,9 +1192,13 @@ struct ScoutMapView {
                let annotation = searchIndex[selection.id] ?? projectIndex[selection.id] {
                 if selected?.location.id != selection.id {
                     map.selectAnnotation(annotation, animated: false)
-                } else if let view = map.view(for: annotation), activePopover == nil {
-                    // Annotation is already selected but popover was closed — reopen it.
-                    showPopover(for: selection, from: view, in: map)
+                } else {
+                    #if os(macOS)
+                    if let view = map.view(for: annotation), activePopover == nil {
+                        // Annotation is already selected but popover was closed — reopen it.
+                        showPopover(for: selection, from: view, in: map)
+                    }
+                    #endif
                 }
             } else if selection == nil,
                       let current = map.selectedAnnotations.first(where: { $0 is LocationAnnotation }) {
@@ -1320,11 +1324,13 @@ struct ScoutMapView {
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? LocationAnnotation else { return }
             // Blue selection ring — store original border color so we can restore it on deselect.
+            #if os(macOS)
             if let photo = view as? ScoutPhotoAnnotationView {
                 photo.borderColor = .systemBlue
             } else if let dot = view as? ScoutDotAnnotationView {
                 dot.dotColor = .systemBlue
             }
+            #endif
             DispatchQueue.main.async {
                 self.parent.selection = ann.location
             }
@@ -1335,6 +1341,7 @@ struct ScoutMapView {
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
             // Restore the original border/dot color from the annotation's tintHex.
+            #if os(macOS)
             if let ann = view.annotation as? LocationAnnotation {
                 if let photo = view as? ScoutPhotoAnnotationView {
                     photo.borderColor = .clear   // no colored frame on map photos
@@ -1342,6 +1349,7 @@ struct ScoutMapView {
                     dot.dotColor = ann.tintColor
                 }
             }
+            #endif
             DispatchQueue.main.async {
                 self.parent.selection = nil
                 self.parent.onMapDeselect?()
@@ -1461,6 +1469,7 @@ struct ScoutMapView {
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             // User location: render as a standard blue dot at the same scale as other pins.
             if annotation is MKUserLocation {
+                #if os(macOS)
                 let id = "userLocationDot"
                 let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? ScoutDotAnnotationView)
                     ?? ScoutDotAnnotationView(annotation: annotation, reuseIdentifier: id)
@@ -1471,6 +1480,10 @@ struct ScoutMapView {
                 // Always float above every other pin/photo (hover uses 100, so go far higher).
                 view.layer?.zPosition = 10_000
                 return view
+                #else
+                // iOS: use the system default blue user-location dot.
+                return nil
+                #endif
             }
             if let ann = annotation as? LocationAnnotation {
                 #if os(macOS)

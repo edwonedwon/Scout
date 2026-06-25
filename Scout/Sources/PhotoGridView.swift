@@ -191,8 +191,14 @@ struct PhotoGridView: View {
 
     private func selectItem(_ item: PhotoItem, allItems: [PhotoItem]) {
         let id = item.location.id
+        #if os(macOS)
         let shift = NSEvent.modifierFlags.contains(.shift)
         let option = NSEvent.modifierFlags.contains(.option)
+        #else
+        // iOS has no keyboard modifiers during a tap; selection is single-tap only.
+        let shift = false
+        let option = false
+        #endif
 
         if option {
             // Option: toggle this item in/out of a disparate selection.
@@ -303,7 +309,9 @@ private struct MasonryCell: View {
         .contentShape(Rectangle())
         .onHover { inside in
             isHovered = inside
+            #if os(macOS)
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            #endif
         }
         .onTapGesture(count: 2) { onDoubleTap?() }
         .onTapGesture { onTap?() }
@@ -323,11 +331,13 @@ private struct MasonryCell: View {
                 }
             }
             if item.isPinned { Divider() }
+            #if os(macOS)
             if let path = originalFilePath {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
                 }
             }
+            #endif
         }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.2), value: isHighlighted)
@@ -380,9 +390,15 @@ private struct DragThumbnail: View {
     var body: some View {
         Group {
             if let img = PhotoLoader.cached(url) {
+                #if os(macOS)
                 Image(nsImage: img)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
+                #else
+                Image(uiImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                #endif
             } else {
                 Color.gray.opacity(0.25)
             }

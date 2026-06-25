@@ -4,6 +4,17 @@ import ScoutKit
 import CoreLocation
 import UniformTypeIdentifiers
 
+/// Current keyboard modifier state, cross-platform. macOS reads live `NSEvent` flags;
+/// iOS has no equivalent during a tap, so both are false (single-tap behavior).
+func currentModifierFlags() -> (shift: Bool, option: Bool) {
+    #if os(macOS)
+    let f = NSEvent.modifierFlags
+    return (f.contains(.shift), f.contains(.option))
+    #else
+    return (false, false)
+    #endif
+}
+
 // MARK: - Finder drag helpers
 
 let imageExtensions: Set<String> = ["jpg","jpeg","png","heic","heif","tiff","tif","webp","gif","bmp","raw","arw","cr2","nef","dng"]
@@ -1177,7 +1188,7 @@ private struct ProjectDetailView: View {
                     Spacer()
                     Button {
                         let pid = project.persistentModelID
-                        if NSEvent.modifierFlags.contains(.option) {
+                        if currentModifierFlags().option {
                             setProjectVisibility(!uncategorizedVisible)
                         } else if uncategorizedVisible {
                             hiddenUncategorizedProjectIDs.insert(pid)
@@ -1209,12 +1220,14 @@ private struct ProjectDetailView: View {
                     )
                     .contextMenu {
                         let multi = isInMultiSelection(pin.persistentModelID)
+                        #if os(macOS)
                         if let path = pin.originalFilePath {
                             Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
                                 Label("Reveal in Finder", systemImage: "folder")
                             }
                             Divider()
                         }
+                        #endif
                         Button(role: .destructive) {
                             if multi { deleteSelectedItems() } else { deletePin(pin) }
                         } label: {
@@ -1430,8 +1443,10 @@ private struct ProjectDetailView: View {
                 }
         }
         // Reserve a constant right-hand gutter for the scrollbar so row width never
-        // changes when the scroller appears/disappears on long lists.
+        // changes when the scroller appears/disappears on long lists. (macOS-only AppKit.)
+        #if os(macOS)
         .background(ScrollerGutterReserver(width: 14))
+        #endif
         .onAppear {
             normalizeOrder()
             purgeExpiredTrash()   // remove photos trashed > 30 days ago
@@ -1595,6 +1610,7 @@ private struct ProjectDetailView: View {
     }
 
     private func importPhotos() {
+        #if os(macOS)
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -1607,11 +1623,14 @@ private struct ProjectDetailView: View {
         guard panel.runModal() == .OK else { return }
         let urls = panel.urls
         Task { @MainActor in await importImageURLs(urls, into: nil) }
+        #endif
+        // iOS uses PhotosPicker instead — see IOS_PLAN.md (not wired into this Mac sidebar).
     }
 
     /// Picks a Google Maps Timeline JSON export and backfills GPS onto photos that lack it
     /// by matching their EXIF capture time to the timeline's locations.
     private func pickTimelineAndBackfill() {
+        #if os(macOS)
         let panel = NSOpenPanel()
         panel.title = "Select Google Maps Timeline JSON"
         panel.allowedContentTypes = [.json]
@@ -1637,6 +1656,7 @@ private struct ProjectDetailView: View {
                 onRevealPins?(result.updatedPins)
             }
         }
+        #endif
     }
 
     /// Imports photo files into a list (or top-level when `list` is nil), inserting the
@@ -1754,7 +1774,7 @@ private struct ListRow: View {
             .modifier(OptionalDrag(provider: dragProvider))
 
             Button {
-                let optionHeld = NSApp.currentEvent?.modifierFlags.contains(.option) == true
+                let optionHeld = currentModifierFlags().option
                 if optionHeld, let toggle = onToggleAllVisibility {
                     // Option+click: show all when this one is hidden, hide all when visible.
                     toggle(!isActive)
@@ -1779,7 +1799,7 @@ private struct ListRow: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
         )
-        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift), NSEvent.modifierFlags.contains(.option)) }
+        .onTapGesture { { let m = currentModifierFlags(); onTap?(m.shift, m.option) }() }
         .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
         .contextMenu {
             Button { onRename?() } label: {
@@ -1869,9 +1889,10 @@ private struct PinRow: View {
         )
         // Single click selects (instant); double click zooms. Manual handling — no native
         // List selection — so selecting thousands is an O(1) set write with no per-row work.
-        .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift), NSEvent.modifierFlags.contains(.option)) }
+        .onTapGesture { { let m = currentModifierFlags(); onTap?(m.shift, m.option) }() }
         .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
         .contextMenu {
+            #if os(macOS)
             if let path = pin.originalFilePath {
                 Button {
                     NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
@@ -1879,6 +1900,7 @@ private struct PinRow: View {
                     Label("Reveal in Finder", systemImage: "folder")
                 }
             }
+            #endif
         }
     }
 
@@ -2300,6 +2322,7 @@ extension Color {
 
 // MARK: - Scrollbar gutter
 
+#if os(macOS)
 /// Forces the enclosing List's NSScrollView to use overlay scrollers (which never push
 /// content) and reserves a constant right-hand content inset, so row width stays identical
 /// whether or not the scrollbar is showing. Fixes the layout jump on long lists.
@@ -2345,3 +2368,4 @@ private struct ScrollerGutterReserver: NSViewRepresentable {
         return nil
     }
 }
+#endif

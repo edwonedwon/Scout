@@ -31,7 +31,7 @@ struct LocationCalloutView: View {
                                 PhotoViewerState.shared.openedFromMap = true
                                 PhotoViewerState.shared.show(images: carouselImages, startingAt: idx, location: location)
                             }
-                            .cursor(.pointingHand)
+                            .pointingHandCursor()
                         }
                     }
                 }
@@ -125,9 +125,10 @@ private extension View {
         if condition { transform(self) } else { self }
     }
 
-    func cursor(_ cursor: NSCursor) -> some View {
+    /// Shows the pointing-hand cursor on hover (macOS only; no-op on iOS where there's no cursor).
+    func pointingHandCursor() -> some View {
         #if os(macOS)
-        return self.onHover { inside in inside ? cursor.push() : NSCursor.pop() }
+        return self.onHover { inside in inside ? NSCursor.pointingHand.push() : NSCursor.pop() }
         #else
         return self
         #endif

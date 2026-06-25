@@ -2111,11 +2111,13 @@ struct BoundarySettingsPopover: View {
         .environmentObject(APIKeyState.shared)
         .modelContainer(PreviewData.container)
         .onAppear {
+            #if os(macOS)
             NSApp.windows.forEach { window in
                 window.titleVisibility = .hidden
                 window.titlebarAppearsTransparent = true
                 window.styleMask.insert(.fullSizeContentView)
             }
+            #endif
         }
 }
 

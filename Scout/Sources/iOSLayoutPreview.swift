@@ -25,6 +25,21 @@ private struct MockList: Identifiable {
     var name: String
     var color: Color
     var pins: [MockPin]
+    /// Child lists — when non-empty this list renders as a folder (folder icon, indented kids).
+    var children: [MockList] = []
+
+    var isFolder: Bool { !children.isEmpty }
+    /// Pin count including all child lists (matches the Mac folder count badge).
+    var totalPinCount: Int { pins.count + children.reduce(0) { $0 + $1.pins.count } }
+    /// Leaf lists that actually hold pins: self when not a folder, else the children.
+    var leafLists: [MockList] { isFolder ? children : [self] }
+}
+
+private extension MockProject {
+    /// All photo-bearing lists, flattening folders into their child lists.
+    var leafLists: [MockList] { lists.flatMap(\.leafLists) }
+    /// Every pin in the project (across lists, folders, and uncategorized).
+    var allPins: [MockPin] { leafLists.flatMap(\.pins) + uncategorized }
 }
 
 private struct MockProject: Identifiable {
@@ -61,11 +76,37 @@ private let tokyoProject = MockProject(
             MockPin(name: "Senso-ji Temple", notes: "Pre-dawn, before crowds. Long exposure on the lantern.", lat: 35.7147, lng: 139.7966, listColor: .green, dateTaken: Date()),
             MockPin(name: "Nakamise-dori", notes: "Leading lines down the shopping street", lat: 35.7133, lng: 139.7960, listColor: .green),
         ]),
+        // A folder: a list that holds other lists (matches the Mac folder feature).
+        MockList(name: "Cycling Roads", color: .gray, pins: [], children: [
+            MockList(name: "View From Road", color: .blue, pins: [
+                MockPin(name: "Arakawa Riverside", notes: "Long flat path, mountains in the distance", lat: 35.7600, lng: 139.7800, listColor: .blue, dateTaken: Date()),
+            ]),
+            MockList(name: "Riverside Path", color: .teal, pins: [
+                MockPin(name: "Tamagawa Bank", notes: "Golden grass at sunset", lat: 35.6000, lng: 139.6500, listColor: .teal),
+                MockPin(name: "Cherry Tunnel", notes: "Blossoms arch over the path in spring", lat: 35.6100, lng: 139.6600, listColor: .teal, dateTaken: Date()),
+            ]),
+        ]),
     ],
     uncategorized: [
         MockPin(name: "Yanaka Cemetery", notes: "Found this by accident — cats everywhere", lat: 35.7261, lng: 139.7660, listColor: .gray),
     ]
 )
+
+// A second project so the Projects tab can show a real project-list root.
+private let osakaProject = MockProject(
+    name: "Osaka — Industrial",
+    lists: [
+        MockList(name: "Warehouses", color: .purple, pins: [
+            MockPin(name: "Namba Freight Depot", notes: "High ceilings, shafts of light", lat: 34.6620, lng: 135.5010, listColor: .purple, dateTaken: Date()),
+        ]),
+        MockList(name: "Rooftops", color: .pink, pins: [
+            MockPin(name: "Umeda Sky Building", notes: "360° skyline at blue hour", lat: 34.7050, lng: 135.4900, listColor: .pink),
+        ]),
+    ],
+    uncategorized: []
+)
+
+private let allProjects: [MockProject] = [tokyoProject, osakaProject]
 
 private let tracks: [MockTrack] = [
     MockTrack(name: "Shinjuku Evening Walk", date: Date().addingTimeInterval(-86400), distanceKm: 4.2, photoCount: 23, durationMin: 67),
@@ -112,7 +153,7 @@ struct iOSMapTab: View {
     var body: some View {
         ZStack(alignment: .top) {
             Map(initialPosition: .region(tokyoRegion)) {
-                ForEach(tokyoProject.lists.flatMap(\.pins)) { pin in
+                ForEach(tokyoProject.allPins) { pin in
                     Annotation(pin.name, coordinate: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng)) {
                         PinDot(color: pin.listColor)
                             .onTapGesture { selectedPin = pin }
@@ -223,50 +264,137 @@ private struct PinCalloutSheet: View {
 
 // MARK: - Projects Tab
 
+/// Projects tab root: a list of all projects → tap into a project's lists/folders.
 struct iOSProjectsTab: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach(tokyoProject.lists) { list in
+                ForEach(allProjects) { project in
                     NavigationLink {
-                        iOSListDetailView(list: list)
+                        iOSProjectDetailView(project: project)
                     } label: {
-                        HStack(spacing: 10) {
-                            Circle().fill(list.color).frame(width: 12, height: 12)
+                        HStack(spacing: 12) {
+                            Image(systemName: "folder.fill")
+                                .foregroundStyle(.orange)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(list.name).font(.body)
-                                Text("\(list.pins.count) locations")
+                                Text(project.name).font(.body)
+                                Text("\(project.lists.count) lists")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            Spacer()
                         }
                         .padding(.vertical, 2)
                     }
                 }
-
-                if !tokyoProject.uncategorized.isEmpty {
-                    Section("Uncategorized") {
-                        ForEach(tokyoProject.uncategorized) { pin in
-                            NavigationLink {
-                                iOSPinDetailView(pin: pin)
-                            } label: {
-                                PinRow(pin: pin)
-                            }
-                        }
-                    }
-                }
             }
-            .navigationTitle(tokyoProject.name)
+            .navigationTitle("Projects")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button { } label: { Image(systemName: "plus") }
                 }
-                ToolbarItem(placement: .secondaryAction) {
-                    Button { } label: { Label("Import Photos", systemImage: "photo.badge.plus") }
+            }
+        }
+    }
+}
+
+/// A single project's lists (with folders) + uncategorized photos. Mirrors the Mac sidebar:
+/// eye toggles for visibility, folders that expand to show child lists, a folder acting as a
+/// master visibility gate over its children.
+struct iOSProjectDetailView: View {
+    let project: MockProject
+    // Visibility set (eye on). A list is effectively visible only if it AND its ancestors are on.
+    @State private var visible: Set<UUID> = []
+    @State private var expanded: Set<UUID> = []
+    @State private var search = ""
+
+    var body: some View {
+        List {
+            ForEach(project.lists) { list in
+                if list.isFolder {
+                    folderRows(list)
+                } else {
+                    listRow(list, indent: 0, gatedOff: false)
+                }
+            }
+
+            if !project.uncategorized.isEmpty {
+                Section("Uncategorized") {
+                    ForEach(project.uncategorized) { pin in
+                        NavigationLink { iOSPinDetailView(pin: pin) } label: { PinRow(pin: pin) }
+                    }
                 }
             }
         }
+        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search photos")
+        .navigationTitle(project.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button { } label: { Label("New List", systemImage: "plus") }
+                    Button { } label: { Label("Import Photos", systemImage: "photo.badge.plus") }
+                } label: { Image(systemName: "plus") }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func folderRows(_ folder: MockList) -> some View {
+        let isOpen = expanded.contains(folder.id)
+        let folderOff = !visible.contains(folder.id)
+        // Folder header row
+        HStack(spacing: 10) {
+            Button {
+                if isOpen { expanded.remove(folder.id) } else { expanded.insert(folder.id) }
+            } label: {
+                Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                    .font(.caption).foregroundStyle(.secondary).frame(width: 16)
+            }
+            .buttonStyle(.plain)
+            Image(systemName: isOpen ? "folder.fill" : "folder").foregroundStyle(.secondary)
+            Text(folder.name).font(.body)
+            Spacer()
+            Text("\(folder.totalPinCount)").font(.caption).foregroundStyle(.secondary)
+            eyeButton(folder.id)
+        }
+        .padding(.vertical, 2)
+
+        if isOpen {
+            ForEach(folder.children) { child in
+                listRow(child, indent: 1, gatedOff: folderOff)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func listRow(_ list: MockList, indent: Int, gatedOff: Bool) -> some View {
+        let off = gatedOff || !visible.contains(list.id)
+        NavigationLink {
+            iOSListDetailView(list: list)
+        } label: {
+            HStack(spacing: 10) {
+                Circle().fill(list.color).frame(width: 12, height: 12)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(list.name).font(.body)
+                    Text("\(list.pins.count) locations").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                eyeButton(list.id)
+            }
+            .padding(.leading, CGFloat(indent) * 18)
+            .padding(.vertical, 2)
+            .opacity(off ? 0.45 : 1)
+        }
+    }
+
+    private func eyeButton(_ id: UUID) -> some View {
+        Button {
+            if visible.contains(id) { visible.remove(id) } else { visible.insert(id) }
+        } label: {
+            Image(systemName: visible.contains(id) ? "eye.fill" : "eye")
+                .foregroundStyle(visible.contains(id) ? Color.accentColor : .secondary)
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -407,7 +535,7 @@ private struct PinRow: View {
 struct iOSPhotosTab: View {
     @State private var columns = 3
     private let gap: CGFloat = 2
-    private let allPins = tokyoProject.lists.flatMap(\.pins)
+    private let allPins = tokyoProject.leafLists.flatMap(\.pins)
 
     var body: some View {
         NavigationStack {
@@ -416,7 +544,7 @@ struct iOSPhotosTab: View {
                 ZStack(alignment: .bottom) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
-                            ForEach(tokyoProject.lists) { list in
+                            ForEach(tokyoProject.leafLists) { list in
                                 if !list.pins.isEmpty {
                                     // Section header
                                     Text(list.name)

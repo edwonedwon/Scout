@@ -318,7 +318,11 @@ enum BackupService {
     }
 
     // MARK: - Zip / unzip via /usr/bin/zip
+    // macOS shells out to the system zip/unzip binaries. iOS has no `Process`; the iOS
+    // backup path will use AppleArchive later (see IOS_PLAN.md) — for now these throw so the
+    // target compiles and the unported feature fails loudly rather than silently.
 
+    #if os(macOS)
     private static func zip(sourceDir: URL, to dest: URL) throws {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
@@ -341,6 +345,15 @@ enum BackupService {
             throw BackupError.unzipFailed(proc.terminationStatus)
         }
     }
+    #else
+    private static func zip(sourceDir: URL, to dest: URL) throws {
+        throw BackupError.unsupportedOnPlatform
+    }
+
+    private static func unzip(archive: URL, to dest: URL) throws {
+        throw BackupError.unsupportedOnPlatform
+    }
+    #endif
 }
 
 // MARK: - Model factory extensions
@@ -396,11 +409,13 @@ extension ProjectData {
 enum BackupError: LocalizedError {
     case zipFailed(Int32)
     case unzipFailed(Int32)
+    case unsupportedOnPlatform
 
     var errorDescription: String? {
         switch self {
         case .zipFailed(let code):   return "zip exited with code \(code)"
         case .unzipFailed(let code): return "unzip exited with code \(code)"
+        case .unsupportedOnPlatform: return "Backup import/export isn't available on this platform yet."
         }
     }
 }
