@@ -79,6 +79,29 @@ final class ScoutMapController: ObservableObject {
         let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLng + maxLng) / 2)
         setRegion(MKCoordinateRegion(center: center, span: span), animated: animated)
     }
+
+    // MARK: - Sequential pin reveal
+
+    /// UUIDs of pins currently mid-reveal animation. Annotation views observe this to
+    /// play their bounce-in when they first appear after a timeline GPS backfill.
+    @Published var revealingPinIDs: Set<UUID> = []
+
+    /// Fit the map to `coords`, then reveal each annotation UUID in `order` one by one,
+    /// 80 ms apart. Clears the revealing set 600 ms after the last one fires.
+    func revealPins(coords: [CLLocationCoordinate2D], order: [UUID], delay: TimeInterval = 0.8) {
+        guard !coords.isEmpty else { return }
+        fit(coords, padding: 0.3, animated: true)
+        let stride: TimeInterval = 0.08
+        for (i, id) in order.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay + Double(i) * stride) { [weak self] in
+                self?.revealingPinIDs.insert(id)
+            }
+        }
+        let clearAfter = delay + Double(order.count) * stride + 0.6
+        DispatchQueue.main.asyncAfter(deadline: .now() + clearAfter) { [weak self] in
+            self?.revealingPinIDs = []
+        }
+    }
 }
 
 // MARK: - Native user-tracking button (iOS only; macOS MapKit has no MKUserTrackingButton)
@@ -546,6 +569,22 @@ final class ScoutDotAnnotationView: MKAnnotationView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    func reveal() {
+        guard let layer else { return }
+        layer.transform = CATransform3DMakeScale(0, 0, 1)
+        let anim = CAKeyframeAnimation(keyPath: "transform.scale")
+        anim.values   = [0, 1.5, 0.85, 1.1, 1.0]
+        anim.keyTimes = [0, 0.35, 0.6, 0.8, 1.0]
+        anim.duration = 0.45
+        anim.fillMode = .forwards
+        anim.isRemovedOnCompletion = false
+        layer.add(anim, forKey: "revealBounce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.46) {
+            layer.transform = CATransform3DIdentity
+            layer.removeAnimation(forKey: "revealBounce")
+        }
+    }
+
     static let baseSize: CGFloat = 14
     func setScale(_ scale: CGFloat) {
         let s = Self.baseSize * max(scale, 0.2)
@@ -619,6 +658,22 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         addSubview(imageView)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    func reveal() {
+        guard let layer else { return }
+        layer.transform = CATransform3DMakeScale(0, 0, 1)
+        let anim = CAKeyframeAnimation(keyPath: "transform.scale")
+        anim.values   = [0, 1.4, 0.9, 1.05, 1.0]
+        anim.keyTimes = [0, 0.3, 0.6, 0.8, 1.0]
+        anim.duration = 0.5
+        anim.fillMode = .forwards
+        anim.isRemovedOnCompletion = false
+        layer.add(anim, forKey: "revealBounce")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.51) {
+            layer.transform = CATransform3DIdentity
+            layer.removeAnimation(forKey: "revealBounce")
+        }
+    }
 
     static let baseSize: CGFloat = 50
     func setScale(_ scale: CGFloat) {
@@ -809,7 +864,10 @@ struct ScoutMapView {
             map.setRegion(initialRegion, animated: false)
         }
 
-        Task { @MainActor in controller.mapView = map }
+        Task { @MainActor in
+            controller.mapView = map
+            context.coordinator.wireReveal(controller: controller, mapView: map)
+        }
         return map
     }
 
@@ -1030,7 +1088,29 @@ struct ScoutMapView {
         #if os(macOS)
         private var activePopover: NSPopover?
         private var photoViewerCancellable: AnyCancellable?
+        private var revealCancellable: AnyCancellable?
         #endif
+
+        func wireReveal(controller: ScoutMapController, mapView: MKMapView) {
+            #if os(macOS)
+            revealCancellable = controller.$revealingPinIDs
+                .receive(on: DispatchQueue.main)
+                .sink { [weak mapView] ids in
+                    guard !ids.isEmpty else { return }
+                    // For each newly-revealing pin, call reveal() on its existing annotation
+                    // view if visible, or recycle it so viewFor: fires with the id in the set.
+                    for ann in mapView?.annotations ?? [] {
+                        guard let locAnn = ann as? LocationAnnotation,
+                              ids.contains(locAnn.location.id) else { continue }
+                        if let dot = mapView?.view(for: ann) as? ScoutDotAnnotationView {
+                            dot.reveal()
+                        } else if let photo = mapView?.view(for: ann) as? ScoutPhotoAnnotationView {
+                            photo.reveal()
+                        }
+                    }
+                }
+            #endif
+        }
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? LocationAnnotation else { return }
@@ -1149,6 +1229,9 @@ struct ScoutMapView {
                     view.borderColor = ann.tintColor
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url)
+                    if parent.controller.revealingPinIDs.contains(ann.location.id) {
+                        view.reveal()
+                    }
                     return view
                 } else {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutDotAnnotationView.reuseID) as? ScoutDotAnnotationView)
@@ -1156,6 +1239,9 @@ struct ScoutMapView {
                     view.annotation = annotation
                     view.dotColor = ann.tintColor
                     view.setScale(scale)
+                    if parent.controller.revealingPinIDs.contains(ann.location.id) {
+                        view.reveal()
+                    }
                     return view
                 }
                 #else

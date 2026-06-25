@@ -55,6 +55,7 @@ enum TimelineGeoService {
         var skipped: Int = 0     // no dateTaken or no matching timeline window
         var failed: Int = 0      // matched but file write failed
         var detectedTimezone: String = ""
+        var updatedPins: [PinnedLocationData] = []
     }
 
     // MARK: - Public entry point
@@ -110,6 +111,7 @@ enum TimelineGeoService {
                     pin.dateTaken = corrected
                 }
                 result.updated += 1
+                result.updatedPins.append(pin)
             } else {
                 result.failed += 1
             }

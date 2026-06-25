@@ -72,9 +72,26 @@ enum PhotoLoader {
 
     static func load(_ url: URL) async -> ScoutImageType? {
         if let c = cached(url) { return c }
-        guard let data = await data(for: url), let img = ScoutImageType(data: data) else { return nil }
+        guard let data = await data(for: url) else { return nil }
+        // NSImage(data:) cannot decode RAW/HEIF formats. Use CGImageSource for file URLs
+        // so CR2/NEF/ARW/HEIC all decode correctly, then fall back to NSImage for remote data.
+        let img: ScoutImageType?
+        if url.isFileURL {
+            img = decodeImage(from: data)
+        } else {
+            img = ScoutImageType(data: data) ?? decodeImage(from: data)
+        }
+        guard let img else { return nil }
         cache.setObject(img, forKey: url as NSURL)
         return img
+    }
+
+    private static func decodeImage(from data: Data) -> ScoutImageType? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0,
+                  [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        else { return nil }
+        return ScoutImageType(cgImage: cgImage, size: .zero)
     }
 }
 

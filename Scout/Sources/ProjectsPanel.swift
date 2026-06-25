@@ -114,6 +114,7 @@ struct ProjectsPanel: View {
     var onSelectPin: ((PinnedLocationData) -> Void)? = nil
     var onZoomToPin: ((PinnedLocationData) -> Void)? = nil
     var onClearPin: (() -> Void)? = nil
+    var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
 
     /// Persisted open project (stored as UUID string, resolved to ProjectData on load).
     @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
@@ -138,6 +139,7 @@ struct ProjectsPanel: View {
                         onSelectPin: onSelectPin,
                         onZoomToPin: onZoomToPin,
                         onClearPin: onClearPin,
+                        onRevealPins: onRevealPins,
                         onExpandedChanged: { uuids in
                             expandedListUUIDs = uuids.joined(separator: ",")
                         }
@@ -327,6 +329,7 @@ private struct ProjectDetailView: View {
     var onSelectPin: ((PinnedLocationData) -> Void)?
     var onZoomToPin: ((PinnedLocationData) -> Void)?
     var onClearPin: (() -> Void)?
+    var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
     var onExpandedChanged: (([String]) -> Void)? = nil
 
     @Environment(\.modelContext) private var modelContext
@@ -889,6 +892,9 @@ private struct ProjectDetailView: View {
                 "Timeline import done — timezone: \(result.detectedTimezone), updated: \(result.updated), skipped: \(result.skipped), failed: \(result.failed)",
                 level: result.failed > 0 ? .warning : .success
             )
+            if !result.updatedPins.isEmpty {
+                onRevealPins?(result.updatedPins)
+            }
         }
     }
 

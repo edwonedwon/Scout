@@ -144,7 +144,10 @@ final class PinnedLocationData {
         // Try the original file first.
         if let path = originalFilePath {
             let url = URL(fileURLWithPath: path)
-            if FileManager.default.fileExists(atPath: path) {
+            // isReadableFile checks both existence AND sandbox read permission,
+            // unlike fileExists which only stats the file (and returns true for
+            // sandboxed-but-unreadable paths after user-selected access expires).
+            if FileManager.default.isReadableFile(atPath: path) {
                 return [ScoutImage(url: url, source: source, dateTaken: dateTaken)]
             }
         }

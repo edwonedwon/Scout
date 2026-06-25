@@ -118,7 +118,19 @@ struct ContentView: View {
                     },
                     onSelectPin: selectPin,
                     onZoomToPin: zoomToPin,
-                    onClearPin: { selectedLocation = nil }
+                    onClearPin: { selectedLocation = nil },
+                    onRevealPins: { pins in
+                        let gps = pins.filter { $0.hasGPS }
+                        guard !gps.isEmpty else { return }
+                        // Switch to map so the user sees the animation.
+                        withAnimation(.spring(duration: 0.3)) { viewMode = .map }
+                        let coords = gps.map(\.coordinate)
+                        let ids = gps.map(\.uuid)
+                        // Small delay so the map mode switch settles before panning.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            mapController.revealPins(coords: coords, order: ids, delay: 0.9)
+                        }
+                    }
                 )
                     .frame(width: 240)
                     .transition(.move(edge: .leading))
