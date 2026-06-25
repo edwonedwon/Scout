@@ -301,7 +301,7 @@ struct iOSProjectsTab: View {
 /// eye toggles for visibility, folders that expand to show child lists, a folder acting as a
 /// master visibility gate over its children.
 struct iOSProjectDetailView: View {
-    let project: MockProject
+    fileprivate let project: MockProject
     // Visibility set (eye on). A list is effectively visible only if it AND its ancestors are on.
     @State private var visible: Set<UUID> = []
     @State private var expanded: Set<UUID> = []
@@ -399,7 +399,7 @@ struct iOSProjectDetailView: View {
 }
 
 struct iOSListDetailView: View {
-    let list: MockList
+    fileprivate let list: MockList
     var body: some View {
         List {
             ForEach(list.pins) { pin in
@@ -430,7 +430,7 @@ struct iOSListDetailView: View {
 }
 
 struct iOSPinDetailView: View {
-    let pin: MockPin
+    fileprivate let pin: MockPin
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
