@@ -1337,6 +1337,8 @@ struct ScoutMapView {
                 view.dotColor = .systemBlue
                 view.setScale(CGFloat(parent.pinScale))
                 view.displayPriority = .required
+                // Always float above every other pin/photo (hover uses 100, so go far higher).
+                view.layer?.zPosition = 10_000
                 return view
             }
             if let ann = annotation as? LocationAnnotation {
