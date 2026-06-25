@@ -145,6 +145,7 @@ struct iOSAppPreview: View {
 struct iOSMapTab: View {
     @State private var selectedPin: MockPin? = nil
     @State private var sheetHeight: PresentationDetent = .medium
+    @State private var showCamera = false
     private let tokyoRegion = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917),
         span: MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
@@ -177,12 +178,40 @@ struct iOSMapTab: View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 12)
             .padding(.top, 8)
+
+            // Floating camera button — shoot a photo and drop it on the map immediately.
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button {
+                        showCamera = true
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(LinearGradient(colors: [.orange, .red],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 62, height: 62)
+                                .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+                            Image(systemName: "camera.fill")
+                                .font(.title2.weight(.semibold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 24)
+                }
+            }
         }
         .sheet(item: $selectedPin) { pin in
             PinCalloutSheet(pin: pin)
                 .presentationDetents([.height(320), .large])
                 .presentationDragIndicator(.visible)
                 .presentationBackgroundInteraction(.enabled)
+        }
+        .sheet(isPresented: $showCamera) {
+            CameraSheetPreview()
+                .presentationDetents([.large])
         }
     }
 }
@@ -893,17 +922,67 @@ private struct StatChip: View {
     }
 }
 
+/// One selectable lens, mirroring the native Camera app's zoom chips. The real device set
+/// comes from AVCaptureDevice.DiscoverySession (e.g. a Pro phone exposes 0.5×/1×/2×/3×,
+/// a base phone only 0.5×/1×); here it's mocked.
+private struct CameraLens: Identifiable, Equatable {
+    let id = UUID()
+    let zoom: Double          // e.g. 0.5, 1, 2
+    let label: String         // "0.5", "1", "2"
+}
+
 private struct CameraSheetPreview: View {
     @Environment(\.dismiss) private var dismiss
+    // A Pro-style lens set. On a base iPhone this would be just [0.5×, 1×].
+    private let lenses: [CameraLens] = [
+        CameraLens(zoom: 0.5, label: ".5"),
+        CameraLens(zoom: 1, label: "1"),
+        CameraLens(zoom: 2, label: "2"),
+        CameraLens(zoom: 3, label: "3"),
+    ]
+    @State private var selectedZoom: Double = 1
+    @State private var flashOn = false
+    // Which list newly-shot photos drop into (nil = leave uncategorized).
+    @State private var targetListID: UUID? = tokyoProject.lists.first?.id
+
+    private var targetListName: String {
+        tokyoProject.leafLists.first { $0.id == targetListID }?.name ?? "Uncategorized"
+    }
+
+    private var zoomLabel: String {
+        selectedZoom == selectedZoom.rounded() ? String(Int(selectedZoom)) : String(selectedZoom)
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            VStack {
+            VStack(spacing: 0) {
+                // Top bar: close + flash + list picker
+                HStack {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                    }
+                    Spacer()
+                    Button { flashOn.toggle() } label: {
+                        Image(systemName: flashOn ? "bolt.fill" : "bolt.slash.fill")
+                            .font(.headline)
+                            .foregroundStyle(flashOn ? .yellow : .white)
+                            .frame(width: 44, height: 44)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+
                 Spacer()
+
+                // Viewfinder
                 RoundedRectangle(cornerRadius: 0)
                     .fill(Color(.systemGray6).opacity(0.15))
                     .frame(maxWidth: .infinity)
-                    .frame(height: 400)
+                    .frame(height: 380)
                     .overlay {
                         VStack(spacing: 12) {
                             Image(systemName: "camera.viewfinder")
@@ -912,33 +991,80 @@ private struct CameraSheetPreview: View {
                             Text("Live camera preview")
                                 .foregroundStyle(.white.opacity(0.5))
                                 .font(.caption)
-                            Text("Photo will be added to\nTokyo — Spring 2026")
+                            Text("\(zoomLabel)× · \(targetListName)")
                                 .foregroundStyle(.white.opacity(0.4))
                                 .font(.caption2)
-                                .multilineTextAlignment(.center)
                         }
                     }
+                    .overlay(alignment: .bottom) {
+                        // Native-style lens selector pill
+                        HStack(spacing: 6) {
+                            ForEach(lenses) { lens in
+                                let isSel = lens.zoom == selectedZoom
+                                Button {
+                                    withAnimation(.snappy(duration: 0.18)) { selectedZoom = lens.zoom }
+                                } label: {
+                                    Text(isSel ? "\(lens.label)×" : lens.label)
+                                        .font(.system(size: isSel ? 13 : 12, weight: .semibold))
+                                        .foregroundStyle(isSel ? .yellow : .white)
+                                        .frame(width: isSel ? 44 : 34, height: isSel ? 44 : 34)
+                                        .background(Circle().fill(.black.opacity(0.45)))
+                                }
+                            }
+                        }
+                        .padding(6)
+                        .background(Capsule().fill(.black.opacity(0.35)))
+                        .padding(.bottom, 14)
+                    }
+
                 Spacer()
-                HStack(spacing: 50) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
+
+                // List picker — choose where shots land (or leave uncategorized)
+                Menu {
+                    Button { targetListID = nil } label: {
+                        Label("Uncategorized", systemImage: targetListID == nil ? "checkmark" : "tray")
                     }
-                    // Shutter button
+                    ForEach(tokyoProject.leafLists) { list in
+                        Button { targetListID = list.id } label: {
+                            Label(list.name, systemImage: targetListID == list.id ? "checkmark" : "mappin.circle")
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder")
+                        Text("Adding to: \(targetListName)")
+                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Capsule().fill(.white.opacity(0.15)))
+                }
+                .padding(.bottom, 18)
+
+                // Bottom controls: gallery, shutter, flip
+                HStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(.white.opacity(0.2))
+                        .frame(width: 44, height: 44)
+                        .overlay(Image(systemName: "photo").foregroundStyle(.white))
+                    Spacer()
+                    // Shutter
                     ZStack {
-                        Circle().stroke(.white, lineWidth: 3).frame(width: 70, height: 70)
-                        Circle().fill(.white).frame(width: 58, height: 58)
+                        Circle().stroke(.white, lineWidth: 3).frame(width: 74, height: 74)
+                        Circle().fill(.white).frame(width: 62, height: 62)
                     }
+                    Spacer()
                     Button { } label: {
                         Image(systemName: "arrow.triangle.2.circlepath.camera")
                             .font(.title3.weight(.semibold))
                             .foregroundStyle(.white)
                             .frame(width: 44, height: 44)
+                            .background(Circle().fill(.white.opacity(0.15)))
                     }
                 }
-                .padding(.bottom, 40)
+                .padding(.horizontal, 30)
+                .padding(.bottom, 36)
             }
         }
     }
