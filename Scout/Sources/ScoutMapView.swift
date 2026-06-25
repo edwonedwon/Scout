@@ -779,26 +779,27 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     required init?(coder: NSCoder) { fatalError() }
 
     /// Draws a centered row of solid color dots along the bottom edge — one per tag.
+    /// Mimics macOS Finder tag dots: small, tight, no border.
     private func redrawTagDots() {
         dotsLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
         guard !tagColors.isEmpty else { return }
         let s = bounds.width
-        let d = s * 0.18                       // dot diameter
-        let gap = d * 0.35
+        let d = s * 0.16                        // dot diameter
+        let gap = d * 0.25                      // tight gap like Finder
+        let margin = s * 0.10                   // inset from bottom edge
         let total = CGFloat(tagColors.count) * d + CGFloat(tagColors.count - 1) * gap
         var x = (s - total) / 2
-        let y = d * 0.55                        // sit just inside the bottom edge
+        let y = s - d - margin                  // bottom edge (y-down coordinate system)
         for color in tagColors {
             let dot = CALayer()
             dot.frame = CGRect(x: x, y: y, width: d, height: d)
             dot.cornerRadius = d / 2
             dot.backgroundColor = color.cgColor
-            dot.borderColor = NSColor.white.cgColor
-            dot.borderWidth = d * 0.14
+            // no border — clean solid dots
             dot.shadowColor = NSColor.black.cgColor
-            dot.shadowOpacity = 0.4
-            dot.shadowRadius = d * 0.1
-            dot.shadowOffset = CGSize(width: 0, height: -0.5)
+            dot.shadowOpacity = 0.35
+            dot.shadowRadius = d * 0.15
+            dot.shadowOffset = CGSize(width: 0, height: 0.5)
             dotsLayer.addSublayer(dot)
             x += d + gap
         }

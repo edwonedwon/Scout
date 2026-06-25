@@ -1721,7 +1721,7 @@ private struct TimelineProgressOverlay: View {
 
 // MARK: - Move-to-list popup
 
-private struct MoveToListSheet: View {
+struct MoveToListSheet: View {
     let project: ProjectData
     let onMove: (LocationListData) -> Void
     let onDismiss: () -> Void

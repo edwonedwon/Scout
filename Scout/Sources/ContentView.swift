@@ -96,6 +96,8 @@ struct ContentView: View {
     @State private var externalMoveUUIDs: [UUID] = []
     /// Option-click multi-selection of map pins (location IDs).
     @State private var mapSelection: Set<UUID> = []
+    /// Shows MoveToListSheet from ContentView when sidebar is hidden.
+    @State private var showExternalMoveSheet = false
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -483,8 +485,41 @@ struct ContentView: View {
             .allowsHitTesting(false)
         }
         // Clear the map multi-selection once the move sheet has closed.
+        // Also open the sheet here when the sidebar is hidden (ProjectsPanel is not in hierarchy).
         .onChange(of: externalMoveUUIDs) { _, ids in
-            if ids.isEmpty { mapSelection = [] }
+            if ids.isEmpty {
+                mapSelection = []
+                showExternalMoveSheet = false
+            } else if !showProjectsPanel {
+                showExternalMoveSheet = true
+            }
+        }
+        .sheet(isPresented: $showExternalMoveSheet, onDismiss: { externalMoveUUIDs = [] }) {
+            if let project = allProjects.first(where: { $0.uuid.uuidString == openProjectUUID }) {
+                MoveToListSheet(
+                    project: project,
+                    onMove: { list in
+                        let pins = externalMoveUUIDs.compactMap { uuid in
+                            allPins.first(where: { $0.uuid == uuid })
+                        }
+                        for pin in pins {
+                            if let oldList = pin.list {
+                                oldList.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
+                                pin.list = nil
+                            }
+                            pin.owningProject?.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+                            pin.owningProject = nil
+                            list.pins.insert(pin, at: 0)
+                            pin.list = list
+                        }
+                        for (i, p) in list.pins.enumerated() { p.sortOrder = i }
+                        try? modelContext.save()
+                        externalMoveUUIDs = []
+                        showExternalMoveSheet = false
+                    },
+                    onDismiss: { externalMoveUUIDs = []; showExternalMoveSheet = false }
+                )
+            }
         }
         .overlay(alignment: .top) {
             HStack {
@@ -629,7 +664,8 @@ struct ContentView: View {
                 }
             }
         }
-        mapPins += unfiledPins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
+        // unfiledPins (list==nil, owningProject==nil) are orphaned data from old builds.
+        // They have no sidebar entry and no visibility toggle, so exclude from map.
         cachedProjectPins = mapPins
 
         // Flat list kept for places that still need it (annotation building etc.)
