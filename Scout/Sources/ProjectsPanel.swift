@@ -448,6 +448,10 @@ private struct ProjectDetailView: View {
     #if os(macOS)
     @State private var dragEndMonitor: Any? = nil
     #endif
+    // True only while the user has clicked into the sidebar search field. Bare-letter
+    // keys (e.g. the "m" Move shortcut) must not be swallowed by the field unless it's
+    // actually focused, so we resign this whenever a row is selected.
+    @FocusState private var searchFieldFocused: Bool
 
     /// Flat ordered list of every currently visible row id (including expanded list pins),
     /// used to resolve a shift-click range.
@@ -472,6 +476,9 @@ private struct ProjectDetailView: View {
     /// Shift-click extends a contiguous range from the anchor.
     /// Option-click toggles this item in/out of a disparate selection.
     private func handleTap(_ id: PersistentIdentifier, shift: Bool, option: Bool = false) {
+        // Selecting a row takes keyboard focus off the search field so bare-letter
+        // shortcuts (like "m" to Move) aren't typed into the search box.
+        searchFieldFocused = false
         if option {
             if selection.ids.contains(id) {
                 selection.ids.remove(id)
@@ -1081,6 +1088,7 @@ private struct ProjectDetailView: View {
             TextField("Search photos…", text: $searchText)
                 .textFieldStyle(.plain)
                 .font(.callout)
+                .focused($searchFieldFocused)
             if !searchText.isEmpty {
                 Button { searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
