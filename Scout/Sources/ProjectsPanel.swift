@@ -509,10 +509,9 @@ private struct ProjectDetailView: View {
                 // Toggling OFF — just hide this one.
                 activeListIDs.remove(list.persistentModelID)
             } else {
-                // Toggling ON — "solo" this list: hide every OTHER top-level list/folder.
-                // For folders we only flip the top-level gate (add/remove the folder itself);
-                // their nested children keep their own eye state ("don't change the insides").
-                // Find this list's top-level ancestor so we never hide its own parent folder.
+                // Toggling ON — "solo" this list. Hide every OTHER top-level list/folder,
+                // keeping only this list's own top-level ancestor. Other folders are flipped
+                // at the top-level gate; their nested children keep their own eye state.
                 var topAncestor = list
                 while let parent = topAncestor.parentList { topAncestor = parent }
                 for top in project.lists where top.parentList == nil {
@@ -522,8 +521,15 @@ private struct ProjectDetailView: View {
                         activeListIDs.remove(top.persistentModelID)
                     }
                 }
-                // Ensure the clicked list and its whole ancestor chain are active so the
-                // folder visibility gate lets it show through.
+                // If this list lives inside a folder, also hide its sibling lists so only
+                // this one shows within the folder; its folder is made visible below.
+                if let folder = list.parentList {
+                    for sibling in folder.childLists where sibling.persistentModelID != list.persistentModelID {
+                        activeListIDs.remove(sibling.persistentModelID)
+                    }
+                }
+                // Ensure the clicked list and its whole ancestor chain (folder) are active so
+                // the folder visibility gate lets it show through.
                 var node: LocationListData? = list
                 while let n = node {
                     activeListIDs.insert(n.persistentModelID)
