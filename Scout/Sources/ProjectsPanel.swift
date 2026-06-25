@@ -1757,11 +1757,6 @@ struct MoveToListSheet: View {
                     .textFieldStyle(.plain)
                     .focused($fieldFocused)
                     .onSubmit { commit() }
-                    // Arrow/escape handling lives on the TextField so it keeps keyboard
-                    // focus — letters keep flowing into the field to narrow the search.
-                    .onKeyPress(.downArrow) { move( 1); return .handled }
-                    .onKeyPress(.upArrow)   { move(-1); return .handled }
-                    .onKeyPress(.escape)    { onDismiss(); return .handled }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -1812,6 +1807,22 @@ struct MoveToListSheet: View {
         }
         .frame(width: 280)
         .fixedSize(horizontal: false, vertical: true)
+        // Arrow/escape handled by hidden keyboardShortcut buttons rather than
+        // .onKeyPress on the TextField — on macOS, attaching .onKeyPress to a
+        // focused TextField intercepts the key path and stops the text binding from
+        // updating live, which silently broke the search filtering. Letter keys flow
+        // straight to the field editor here, so `query` updates on every keystroke.
+        .background {
+            Button("") { move(1) }
+                .keyboardShortcut(.downArrow, modifiers: [])
+                .opacity(0).allowsHitTesting(false)
+            Button("") { move(-1) }
+                .keyboardShortcut(.upArrow, modifiers: [])
+                .opacity(0).allowsHitTesting(false)
+            Button("") { onDismiss() }
+                .keyboardShortcut(.escape, modifiers: [])
+                .opacity(0).allowsHitTesting(false)
+        }
         .onAppear {
             highlighted = 0
             // Async focus: in a sheet the window isn't key yet during onAppear, so

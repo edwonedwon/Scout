@@ -466,7 +466,8 @@ struct ContentView: View {
                 .zIndex(10)
             if photoViewer.isVisible {
                 PhotoViewerOverlay(availableLists: openProjectLists, onSave: savePinned,
-                                   onRotate: { url in rotatePin(forImageURL: url) })
+                                   onRotate: { url in rotatePin(forImageURL: url) },
+                                   onDelete: { loc in deletePinFromCarousel(loc) })
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
                     .zIndex(20)
@@ -691,8 +692,7 @@ struct ContentView: View {
                 .filter { activeListIDs.contains($0.persistentModelID) }
                 .sorted { $0.panelOrder < $1.panelOrder }
             for list in sortedLists {
-                let locs = list.pins
-                    .sorted { $0.sortOrder < $1.sortOrder }
+                let locs = proximityOrdered(list.pins.sorted { $0.sortOrder < $1.sortOrder })
                     .map { $0.asScoutLocation() }
                     .filter { !$0.images.isEmpty }
                 if !locs.isEmpty {
@@ -706,7 +706,7 @@ struct ContentView: View {
             // Directly-imported photos (no list). Deduplicate stacks — show only lead pin.
             // Skipped entirely when this project's "Uncategorized" eye is off.
             var seenStacksGrid: Set<UUID> = []
-            let imported = hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
+            let importedPins = hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
                 ? []
                 : project.importedPhotos
                 .sorted { $0.sortOrder < $1.sortOrder }
@@ -716,6 +716,7 @@ struct ContentView: View {
                     }
                     return true
                 }
+            let imported = proximityOrdered(importedPins)
                 .map { $0.asScoutLocation() }
                 .filter { !$0.images.isEmpty }
             if !imported.isEmpty {
@@ -725,8 +726,7 @@ struct ContentView: View {
         }
         // Active standalone lists not belonging to any project.
         for list in active.filter({ $0.project == nil }).sorted(by: { $0.createdAt < $1.createdAt }) {
-            let locs = list.pins
-                .sorted { $0.sortOrder < $1.sortOrder }
+            let locs = proximityOrdered(list.pins.sorted { $0.sortOrder < $1.sortOrder })
                 .map { $0.asScoutLocation() }
                 .filter { !$0.images.isEmpty }
             if !locs.isEmpty {
@@ -741,6 +741,36 @@ struct ContentView: View {
         // They have no sidebar entry and no visibility toggle, so exclude from the grid —
         // the grid must show nothing when no list/uncategorized is visible.
         cachedGridSections = sections
+    }
+
+    /// Orders pins within a grid section so geographically close photos sit next to each
+    /// other: a greedy nearest-neighbour walk starting from the north-west-most pin.
+    /// GPS-less pins can't be placed spatially, so they keep their original order and go last.
+    private func proximityOrdered(_ pins: [PinnedLocationData]) -> [PinnedLocationData] {
+        let gps = pins.filter { $0.hasGPS }
+        let noGPS = pins.filter { !$0.hasGPS }
+        guard gps.count > 2 else { return gps + noGPS }
+
+        var remaining = gps
+        // Start north-west (smallest longitude, then largest latitude) for a stable anchor.
+        let startIdx = remaining.indices.min {
+            (remaining[$0].longitude, -remaining[$0].latitude) <
+            (remaining[$1].longitude, -remaining[$1].latitude)
+        }!
+        var ordered = [remaining.remove(at: startIdx)]
+        while !remaining.isEmpty {
+            let last = ordered[ordered.count - 1]
+            // Longitude degrees shrink with latitude — scale so distances aren't skewed.
+            let cosLat = cos(last.latitude * .pi / 180)
+            func sqDist(_ p: PinnedLocationData) -> Double {
+                let dLat = p.latitude - last.latitude
+                let dLng = (p.longitude - last.longitude) * cosLat
+                return dLat * dLat + dLng * dLng
+            }
+            let nextIdx = remaining.indices.min { sqDist(remaining[$0]) < sqDist(remaining[$1]) }!
+            ordered.append(remaining.remove(at: nextIdx))
+        }
+        return ordered + noGPS
     }
 
     /// Tapping a saved pin in the sidebar selects it on the map and shows its popover —
@@ -852,6 +882,21 @@ struct ContentView: View {
             modelContext.insert(pin)
             cachePhotos(for: pin, from: location)
         }
+    }
+
+    /// Deletes the pin backing the carousel's current location, then refreshes caches.
+    /// The carousel has already dismissed itself by the time this runs.
+    private func deletePinFromCarousel(_ loc: ScoutLocation) {
+        guard let pin = allPins.first(where: { $0.uuid == loc.id }) else { return }
+        if let list = pin.list {
+            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
+        }
+        if let project = pin.owningProject {
+            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+        }
+        modelContext.delete(pin)
+        try? modelContext.save()
+        rebuildPinCaches()
     }
 
     /// Moves an existing pin out of wherever it lives and into `list`.

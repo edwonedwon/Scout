@@ -277,6 +277,8 @@ struct PhotoViewerOverlay: View {
     var onSave: ((ScoutLocation, LocationListData?) -> Void)? = nil
     /// Persists a 90° CCW rotation for the photo at the given file URL (the displayed image).
     var onRotate: ((URL) -> Void)? = nil
+    /// Deletes the pin for the given location. The carousel closes immediately after.
+    var onDelete: ((ScoutLocation) -> Void)? = nil
     @State private var justSavedTo: String? = nil
 
     var body: some View {
@@ -296,6 +298,16 @@ struct PhotoViewerOverlay: View {
                             .monospacedDigit()
                     }
                     Spacer()
+                    if onDelete != nil, viewer.location != nil {
+                        Button(action: deleteCurrent) {
+                            Image(systemName: "trash.circle.fill")
+                                .font(.title2)
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Delete photo (⌫)")
+                    }
                     Button(action: viewer.dismiss) {
                         Image(systemName: "xmark.circle.fill")
                             .font(.title2)
@@ -422,7 +434,17 @@ struct PhotoViewerOverlay: View {
         .onKeyPress(.leftArrow)  { viewer.previous(); return .handled }
         .onKeyPress(.rightArrow) { viewer.next();     return .handled }
         .onKeyPress(KeyEquivalent("r")) { rotateCurrent(); return .handled }
+        .onKeyPress(.delete)        { deleteCurrent(); return .handled }
+        .onKeyPress(.deleteForward) { deleteCurrent(); return .handled }
         // Escape is handled app-wide in ContentView.handleEscape (carousel → grid).
+    }
+
+    /// Deletes the pin for the current photo and closes the carousel immediately.
+    /// Dismiss first so nothing re-renders against the about-to-be-deleted model.
+    private func deleteCurrent() {
+        guard let loc = viewer.location else { return }
+        viewer.dismiss()
+        onDelete?(loc)
     }
 
     /// Rotates the currently shown photo 90° counter-clockwise: updates the live image so it

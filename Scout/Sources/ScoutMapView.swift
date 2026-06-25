@@ -1001,15 +1001,27 @@ struct ScoutMapView {
                 coordinator?.buildAnnotationMenu(for: location)
             }
             zoomable.onMultiSelectionChanged = { ids in
-                DispatchQueue.main.async { mapSelection = ids }
+                // Update synchronously. An async hop leaves a window where the view's
+                // multiSelectedIDs is ahead of this binding; an unrelated re-render in
+                // that window (e.g. popover deselect → onMapDeselect → rebuildPinCaches)
+                // runs the reconciliation below and wipes the just-added pin's ring —
+                // which is why option-click could never build up more than one selection.
+                // Mouse events never fire during a SwiftUI view update, so a synchronous
+                // binding write here is safe.
+                mapSelection = ids
             }
-            // Keep the view's mirror in sync when the binding changes externally (e.g. cleared
-            // after a batch move). Re-apply rings if the set was emptied elsewhere.
+            // Reconcile the view's selection rings when the binding changes externally
+            // (e.g. cleared after a batch move, or restored). Handle both directions.
             if zoomable.multiSelectedIDs != mapSelection {
                 let removed = zoomable.multiSelectedIDs.subtracting(mapSelection)
+                let added = mapSelection.subtracting(zoomable.multiSelectedIDs)
                 zoomable.multiSelectedIDs = mapSelection
-                for ann in zoomable.annotations.compactMap({ $0 as? LocationAnnotation }) where removed.contains(ann.location.id) {
-                    zoomable.applySelectionRing(to: ann, selected: false)
+                for ann in zoomable.annotations.compactMap({ $0 as? LocationAnnotation }) {
+                    if removed.contains(ann.location.id) {
+                        zoomable.applySelectionRing(to: ann, selected: false)
+                    } else if added.contains(ann.location.id) {
+                        zoomable.applySelectionRing(to: ann, selected: true)
+                    }
                 }
             }
         }
