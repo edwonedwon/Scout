@@ -51,7 +51,7 @@ struct PhotoGridView: View {
     private var allPinnedItems: [PhotoItem] { sectionItems.flatMap(\.items) }
     private var hasAny: Bool { !searchItems.isEmpty || !allPinnedItems.isEmpty }
 
-    private let columns = 3
+    @State private var columns = 3
     private let gap: CGFloat = 2
 
     var body: some View {
@@ -94,7 +94,7 @@ struct PhotoGridView: View {
                                             allItems: allPinnedItems + searchItems)
                             }
                         }
-                        .padding(.bottom, 8)
+                        .padding(.bottom, 44)
                     }
                     .onChange(of: highlightedLocationID) { _, id in
                         guard let id,
@@ -104,6 +104,9 @@ struct PhotoGridView: View {
                             proxy.scrollTo(first.id, anchor: .center)
                         }
                     }
+                }
+                .overlay(alignment: .bottom) {
+                    GridSizeSlider(columns: $columns)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -202,11 +205,72 @@ private struct MasonryCell: View {
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
         .onTapGesture { onTap?() }
-        .if(item.isPinned) { $0.onDrag {
+        .if(item.isPinned) { $0.onDrag({
             NSItemProvider(object: "pin:\(item.location.id.uuidString)" as NSString)
-        }}
+        }, preview: {
+            DragThumbnail(url: item.image.url)
+        }) }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.2), value: isHighlighted)
+    }
+}
+
+/// Floating slider pinned to the bottom of the photo grid for adjusting column count.
+private struct GridSizeSlider: View {
+    @Binding var columns: Int
+    @State private var isHovered = false
+    private let minCols = 1
+    private let maxCols = 8
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "photo")
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(0.5))
+            Slider(
+                value: Binding(
+                    get: { Double(maxCols + 1 - columns) },
+                    set: { columns = maxCols + 1 - Int($0.rounded()) }
+                ),
+                in: Double(minCols)...Double(maxCols),
+                step: 1
+            )
+            .controlSize(.small)
+            .tint(.white.opacity(0.6))
+            Image(systemName: "photo")
+                .font(.system(size: 15))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial.opacity(isHovered ? 1 : 0.6))
+        .clipShape(Capsule())
+        .padding(.bottom, 10)
+        .frame(maxWidth: 220)
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
+    }
+}
+
+/// Drag preview for a photo grid cell.
+/// Reads synchronously from PhotoLoader's NSCache so the image is available
+/// immediately — drag previews don't trigger .onAppear, so async loaders show
+/// a gray placeholder on the first drag.
+private struct DragThumbnail: View {
+    let url: URL
+    var body: some View {
+        Group {
+            if let img = PhotoLoader.cached(url) {
+                Image(nsImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Color.gray.opacity(0.25)
+            }
+        }
+        .frame(width: 72, height: 72)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .opacity(0.72)
     }
 }
 

@@ -538,7 +538,7 @@ private struct ProjectDetailView: View {
                let idx = list.pins.firstIndex(where: { $0.persistentModelID == after.persistentModelID }) {
                 list.pins.insert(pin, at: idx + 1)
             } else {
-                list.pins.append(pin)
+                list.pins.insert(pin, at: 0)
             }
             pin.list = list
         }

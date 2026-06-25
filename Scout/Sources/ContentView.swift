@@ -188,10 +188,17 @@ struct ContentView: View {
         }
         // Rebuild pin caches when SwiftData delivers new query results (inserts, deletes,
         // property changes like hasGPS flipping after timeline backfill).
-        .onChange(of: allPins.count)      { rebuildPinCaches() }
-        .onChange(of: unfiledPins.count)  { rebuildPinCaches() }
-        .onChange(of: allLists.count)     { rebuildPinCaches() }
-        .onChange(of: allProjects.count)  { rebuildPinCaches() }
+        .onChange(of: allPins.count)           { rebuildPinCaches() }
+        .onChange(of: unfiledPins.count)       { rebuildPinCaches() }
+        .onChange(of: allLists.count)          { rebuildPinCaches() }
+        .onChange(of: allProjects.count)       { rebuildPinCaches() }
+        // Fires when any pin moves between lists or changes sort order (count unchanged).
+        .onChange(of: pinListAssignmentHash)   { rebuildPinCaches() }
+        .onChange(of: selectedLocation) { _, loc in
+            // When the user taps a map pin, highlight and scroll the sidebar to it.
+            guard viewMode == .map, let loc else { return }
+            highlightedPinID = loc.id
+        }
         .onChange(of: rightPanelTab) { _, _ in
             locations = []
             selectedLocation = nil
@@ -456,6 +463,14 @@ struct ContentView: View {
 
     private static let generalPinColor = "#E53935"   // red for unfiled pins
 
+    /// Changes whenever any pin's list membership or sort order changes, even when total
+    /// counts are unchanged — used to trigger a grid rebuild after drag-reorder.
+    private var pinListAssignmentHash: Int {
+        allPins.reduce(0) {
+            $0 ^ ($1.list?.persistentModelID.hashValue ?? 0) ^ $1.sortOrder ^ $1.panelOrder
+        }
+    }
+
     private func rebuildPinCaches() {
         let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
         var mapPins: [(ScoutLocation, String)] = active.flatMap { list in
@@ -573,7 +588,8 @@ struct ContentView: View {
             movePin(existing, to: list)
             return
         }
-        let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
+        list.pins.forEach { $0.sortOrder += 1 }
+        let pin = PinnedLocationData(from: location, sortOrder: 0)
         modelContext.insert(pin)
         pin.list = list
         cachePhotos(for: pin, from: location)
@@ -590,7 +606,8 @@ struct ContentView: View {
             return
         }
         if let list {
-            let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
+            list.pins.forEach { $0.sortOrder += 1 }
+            let pin = PinnedLocationData(from: location, sortOrder: 0)
             modelContext.insert(pin)
             pin.list = list
             cachePhotos(for: pin, from: location)
@@ -613,7 +630,8 @@ struct ContentView: View {
             project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
             pin.owningProject = nil
         }
-        pin.sortOrder = list.pins.count
+        list.pins.forEach { $0.sortOrder += 1 }
+        pin.sortOrder = 0
         list.pins.append(pin)
         pin.list = list
         // owningProject must stay nil for list pins — it's the inverse of importedPhotos,
