@@ -318,9 +318,8 @@ enum BackupService {
     }
 
     // MARK: - Zip / unzip via /usr/bin/zip
-    // macOS shells out to the system zip/unzip binaries. iOS has no `Process`; the iOS
-    // backup path will use AppleArchive later (see IOS_PLAN.md) — for now these throw so the
-    // target compiles and the unported feature fails loudly rather than silently.
+    // Works in debug (non-sandboxed) builds. If sandbox is ever re-enabled,
+    // replace with a proper zip library (e.g. ZipFoundation).
 
     #if os(macOS)
     private static func zip(sourceDir: URL, to dest: URL) throws {
@@ -349,7 +348,6 @@ enum BackupService {
     private static func zip(sourceDir: URL, to dest: URL) throws {
         throw BackupError.unsupportedOnPlatform
     }
-
     private static func unzip(archive: URL, to dest: URL) throws {
         throw BackupError.unsupportedOnPlatform
     }

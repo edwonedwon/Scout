@@ -38,6 +38,9 @@ targets:
       configs:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          # Disable sandbox in debug so Process-based zip/unzip works for export/import.
+          # This is a personal-use debug build — not submitted to the App Store.
+          ENABLE_APP_SANDBOX: NO
     entitlements:
       path: Scout/Scout.entitlements
       properties:
