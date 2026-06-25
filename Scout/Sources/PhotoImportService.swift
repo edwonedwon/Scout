@@ -23,12 +23,46 @@ enum PhotoImportService {
 
     // MARK: - Public entry point
 
-    static func importPhotos(from urls: [URL], into list: LocationListData?) async -> [ImportResult] {
+    /// Imports photos from `urls`, skipping any that already exist in `existingPins`.
+    /// Duplicate detection uses three fast O(1) checks built from `existingPins` once:
+    ///  1. Exact filename of the original file path.
+    ///  2. Same date-taken (±1 s) AND same GPS (±0.0001°, ≈10 m).
+    ///  3. Same date-taken (±1 s) AND same display name (for GPS-less photos).
+    static func importPhotos(from urls: [URL],
+                             into list: LocationListData?,
+                             existingPins: [PinnedLocationData] = []) async -> [ImportResult] {
+        // Build dedup indexes once — O(n) for n existing pins.
+        var existingFilenames: Set<String> = []
+        var existingDateGPS:   Set<String> = []  // "timestamp|lat4|lng4"
+        var existingDateName:  Set<String> = []  // "timestamp|name"   (GPS-less fallback)
+        for pin in existingPins {
+            if let path = pin.originalFilePath {
+                existingFilenames.insert(URL(fileURLWithPath: path).lastPathComponent)
+            }
+            if let d = pin.dateTaken {
+                let ts = String(Int(d.timeIntervalSinceReferenceDate))
+                if pin.hasGPS {
+                    let lat = String(format: "%.4f", pin.latitude)
+                    let lng = String(format: "%.4f", pin.longitude)
+                    existingDateGPS.insert("\(ts)|\(lat)|\(lng)")
+                } else {
+                    existingDateName.insert("\(ts)|\(pin.name)")
+                }
+            }
+        }
+
         var results: [ImportResult] = []
         for (order, url) in urls.enumerated() {
+            // Fast filename check before touching the file.
+            if existingFilenames.contains(url.lastPathComponent) { continue }
+
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            guard let result = await importOne(url: url, sortOrder: (list?.pins.count ?? 0) + order) else { continue }
+            guard let result = await importOne(url: url,
+                                               sortOrder: (list?.pins.count ?? 0) + order,
+                                               existingDateGPS: existingDateGPS,
+                                               existingDateName: existingDateName)
+            else { continue }
             results.append(result)
         }
         return results
@@ -36,7 +70,9 @@ enum PhotoImportService {
 
     // MARK: - Single file
 
-    private static func importOne(url: URL, sortOrder: Int) async -> ImportResult? {
+    private static func importOne(url: URL, sortOrder: Int,
+                                   existingDateGPS: Set<String> = [],
+                                   existingDateName: Set<String> = []) async -> ImportResult? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
 
@@ -65,6 +101,19 @@ enum PhotoImportService {
         } else if let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any],
                   let str = tiff[kCGImagePropertyTIFFDateTime as String] as? String {
             dateTaken = exifFmt.date(from: str)
+        }
+
+        // --- Duplicate check on EXIF data (before any disk writes) ---
+        if let d = dateTaken {
+            let ts = String(Int(d.timeIntervalSinceReferenceDate))
+            if let coord = coordinate {
+                let lat = String(format: "%.4f", coord.latitude)
+                let lng = String(format: "%.4f", coord.longitude)
+                if existingDateGPS.contains("\(ts)|\(lat)|\(lng)") { return nil }
+            } else {
+                let name = url.deletingPathExtension().lastPathComponent
+                if existingDateName.contains("\(ts)|\(name)") { return nil }
+            }
         }
 
         // --- Decode pixel data (handles RAW, HEIC, HEIF, TIFF, JPEG, etc.) ---

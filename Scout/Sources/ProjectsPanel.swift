@@ -757,6 +757,13 @@ private struct ProjectDetailView: View {
                             renameListText = list.name
                             renamingList = list
                         },
+                        onToggleAllVisibility: { makeAllActive in
+                            if makeAllActive {
+                                project.lists.forEach { activeListIDs.insert($0.persistentModelID) }
+                            } else {
+                                project.lists.forEach { activeListIDs.remove($0.persistentModelID) }
+                            }
+                        },
                         dragProvider: { NSItemProvider(object: item.dragID as NSString) }
                     )
                     .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
@@ -954,7 +961,10 @@ private struct ProjectDetailView: View {
     /// pins and wiring their relationship. Shared by the Import menu and Finder drag-drop.
     @MainActor
     private func importImageURLs(_ urls: [URL], into list: LocationListData?) async {
-        let results = await PhotoImportService.importPhotos(from: urls, into: list)
+        // Collect all existing pins across this project for duplicate detection.
+        let existingPins = (project.lists.flatMap(\.pins)) + project.importedPhotos
+        let results = await PhotoImportService.importPhotos(from: urls, into: list,
+                                                            existingPins: existingPins)
         if let list {
             for result in results {
                 modelContext.insert(result.pin)
@@ -1003,6 +1013,8 @@ private struct ListRow: View {
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onRename: (() -> Void)? = nil
+    /// Called when the user Option+clicks the eye. `true` = show all, `false` = hide all.
+    var onToggleAllVisibility: ((Bool) -> Void)? = nil
     /// Supply a drag provider to make the name area a drag handle. Buttons are
     /// excluded so accidental drag on chevron/eye never triggers a reorder.
     var dragProvider: (() -> NSItemProvider)? = nil
@@ -1045,13 +1057,20 @@ private struct ListRow: View {
             .modifier(OptionalDrag(provider: dragProvider))
 
             Button {
-                if isActive { activeListIDs.remove(list.persistentModelID) }
-                else { activeListIDs.insert(list.persistentModelID) }
+                let optionHeld = NSApp.currentEvent?.modifierFlags.contains(.option) == true
+                if optionHeld, let toggle = onToggleAllVisibility {
+                    // Option+click: show all when this one is hidden, hide all when visible.
+                    toggle(!isActive)
+                } else {
+                    if isActive { activeListIDs.remove(list.persistentModelID) }
+                    else { activeListIDs.insert(list.persistentModelID) }
+                }
             } label: {
                 Image(systemName: isActive ? "eye.fill" : "eye")
                     .foregroundStyle(isActive ? listColor : .secondary)
             }
             .buttonStyle(.plain)
+            .help(onToggleAllVisibility != nil ? "Click to toggle · Option+click to toggle all" : "")
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())

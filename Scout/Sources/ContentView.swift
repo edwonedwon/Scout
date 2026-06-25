@@ -703,6 +703,7 @@ struct ContentView: View {
             pinScale: pinSize,
             availableLists: openProjectLists,
             onSaveToList: saveToList,
+            isSelectedPinned: allPins.contains(where: { $0.uuid == selectedLocation?.id }),
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,
             showBoundaryNames: showBoundaryNames,

@@ -844,6 +844,8 @@ struct ScoutMapView {
     var pinScale: Double = 1.0
     var availableLists: [LocationListData] = []
     var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
+    /// True when the currently-selected location is an already-saved pin — enables drag-to-list.
+    var isSelectedPinned: Bool = false
     var boundaryPolygons: [BoundaryPolygon] = []
     var boundaryOpacity: Double = 0.2
     var showBoundaryNames: Bool = true
@@ -1009,14 +1011,19 @@ struct ScoutMapView {
 
         func syncSelection(_ map: MKMapView, selection: ScoutLocation?) {
             let selected = map.selectedAnnotations.compactMap { $0 as? LocationAnnotation }.first
-            guard selected?.location.id != selection?.id else { return }
 
             if let selection,
                let annotation = map.annotations
                    .compactMap({ $0 as? LocationAnnotation })
                    .first(where: { $0.location.id == selection.id }) {
-                map.selectAnnotation(annotation, animated: false)
-            } else if selection == nil, let current = map.selectedAnnotations.first {
+                if selected?.location.id != selection.id {
+                    map.selectAnnotation(annotation, animated: false)
+                } else if let view = map.view(for: annotation), activePopover == nil {
+                    // Annotation is already selected but popover was closed — reopen it.
+                    showPopover(for: selection, from: view, in: map)
+                }
+            } else if selection == nil,
+                      let current = map.selectedAnnotations.first(where: { $0 is LocationAnnotation }) {
                 map.deselectAnnotation(current, animated: false)
             }
         }
@@ -1145,7 +1152,8 @@ struct ScoutMapView {
             let callout = LocationCalloutView(
                 location: location,
                 availableLists: lists,
-                onSaveToList: saveHandler.map { handler in { list in handler(location, list) } }
+                onSaveToList: saveHandler.map { handler in { list in handler(location, list) } },
+                isPinned: parent.isSelectedPinned
             )
             let vc = NSHostingController(rootView: callout)
             let height = LocationCalloutView.height(for: location, hasLists: !lists.isEmpty)

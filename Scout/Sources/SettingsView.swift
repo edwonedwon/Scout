@@ -68,6 +68,16 @@ struct SettingsView: View {
             }
             #endif
 
+            #if os(macOS)
+            Section {
+                BackupSection()
+            } header: {
+                Text("Backup & Restore")
+            } footer: {
+                Text("Exports compressed photos and all project data. Original large files are referenced by filename and can be relinked after restore.")
+            }
+            #endif
+
             Section {
                 Button("Clear All Keys", role: .destructive) {
                     showClearConfirm = true
@@ -86,6 +96,80 @@ struct SettingsView: View {
         }
     }
 }
+
+// MARK: - Backup section (macOS only)
+
+#if os(macOS)
+@MainActor
+private struct BackupSection: View {
+    @Environment(\.modelContext) private var modelContext
+    @State private var isBusy = false
+    @State private var statusMessage: String? = nil
+    @State private var errorMessage: String? = nil
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button("Export Backup…") { Task { await doExport() } }
+                .disabled(isBusy)
+            Button("Import Backup…") { Task { await doImport() } }
+                .disabled(isBusy)
+            Button("Relink Originals…") { Task { await doRelink() } }
+                .disabled(isBusy)
+            if isBusy { ProgressView().controlSize(.small) }
+        }
+        if let msg = statusMessage {
+            Text(msg).font(.caption).foregroundStyle(.secondary)
+        }
+        if let err = errorMessage {
+            Text(err).font(.caption).foregroundStyle(.red)
+        }
+    }
+
+    private func doExport() async {
+        isBusy = true; statusMessage = nil; errorMessage = nil
+        defer { isBusy = false }
+        do {
+            let zipURL = try await BackupService.export(context: modelContext)
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = zipURL.lastPathComponent
+            panel.allowedContentTypes = [.zip]
+            guard panel.runModal() == .OK, let dest = panel.url else { return }
+            try FileManager.default.copyItem(at: zipURL, to: dest)
+            try? FileManager.default.removeItem(at: zipURL)
+            statusMessage = "Exported to \(dest.lastPathComponent)"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func doImport() async {
+        isBusy = true; statusMessage = nil; errorMessage = nil
+        defer { isBusy = false }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.zip]
+        panel.message = "Select a Scout backup archive (.zip)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let summary = try await BackupService.importBackup(from: url, context: modelContext)
+            statusMessage = "Imported \(summary.projectsAdded) projects, \(summary.listsAdded) lists, \(summary.pinsAdded) pins, \(summary.photoFilesCopied) photos. Skipped \(summary.skippedDuplicates) duplicates."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func doRelink() async {
+        isBusy = true; statusMessage = nil; errorMessage = nil
+        defer { isBusy = false }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.message = "Select the folder containing your original photo files"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let result = await BackupService.relinkOriginals(folder: url, context: modelContext)
+        statusMessage = "Relinked \(result.linked) originals. \(result.notFound) not found in that folder."
+    }
+}
+#endif
 
 // MARK: - Section header with help popover
 

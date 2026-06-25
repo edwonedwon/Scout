@@ -6,6 +6,8 @@ struct LocationCalloutView: View {
     let location: ScoutLocation
     var availableLists: [LocationListData] = []
     var onSaveToList: ((LocationListData) -> Void)? = nil
+    /// True when this location is a saved pin — enables drag-to-sidebar-list.
+    var isPinned: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -90,6 +92,18 @@ struct LocationCalloutView: View {
         }
         .frame(width: 420)
         .background(.background)
+        .if(isPinned) { content in
+            content.overlay(alignment: .topTrailing) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(10)
+                    .help("Drag to move to a list")
+            }
+            .onDrag {
+                NSItemProvider(object: "pin:\(location.id.uuidString)" as NSString)
+            }
+        }
     }
 
     static func height(for location: ScoutLocation, hasLists: Bool = false) -> CGFloat {
@@ -104,9 +118,13 @@ struct LocationCalloutView: View {
     }
 }
 
-// MARK: - Cursor helper (macOS)
+// MARK: - View helpers
 
 private extension View {
+    @ViewBuilder func `if`<T: View>(_ condition: Bool, transform: (Self) -> T) -> some View {
+        if condition { transform(self) } else { self }
+    }
+
     func cursor(_ cursor: NSCursor) -> some View {
         #if os(macOS)
         return self.onHover { inside in inside ? cursor.push() : NSCursor.pop() }
