@@ -442,6 +442,11 @@ private struct ProjectDetailView: View {
     // ⌘Z pops the last batch and restores those photos.
     @State private var trashUndoStack: [[PersistentIdentifier]] = []
     @State private var expandedTrash = false
+    // Lists awaiting a delete confirmation, plus any photos selected alongside them. A list is
+    // never deleted without this confirm step; on confirm it (and its photos) go to the Trash.
+    @State private var listsPendingDelete: [LocationListData] = []
+    @State private var pinsPendingDelete: [PinnedLocationData] = []
+    @State private var showDeleteListConfirm = false
     // Top-level row currently under a reorder drag — a blue insertion line is drawn at its
     // top edge to preview where the dragged item will land (it inserts before this row).
     @State private var dropTargetID: PersistentIdentifier? = nil
@@ -614,7 +619,8 @@ private struct ProjectDetailView: View {
            !expandedListIDs.contains(list.persistentModelID) {
             let pins = list.pins.sorted { $0.sortOrder < $1.sortOrder }
             if !pins.isEmpty {
-                expandedListIDs.insert(list.persistentModelID)
+                var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                withTransaction(tx) { expandedListIDs.insert(list.persistentModelID) }
                 // Re-compute flat after expansion to find the pin's index.
                 let newFlat = flatVisibleIDs
                 let targetPin = delta > 0 ? pins.first! : pins.last!
@@ -643,7 +649,9 @@ private struct ProjectDetailView: View {
         // Top-level rows are the lists/folders plus the virtual "Uncategorized" row, which
         // holds every loose photo and is itself a reorderable top-level item. Loose photos
         // are NOT individual top-level rows anymore — they render nested under Uncategorized.
-        var items = project.lists.filter { $0.parentList == nil }.map { SidebarItem.list($0) }
+        var items = project.lists
+            .filter { $0.parentList == nil && $0.deletedAt == nil }
+            .map { SidebarItem.list($0) }
         if !loosePhotos.isEmpty {
             items.append(.uncategorized(project))
         }
@@ -846,18 +854,29 @@ private struct ProjectDetailView: View {
                 if let pin = findPin(byID: id) { allPins.append(pin) }
             }
         }
-        for pin in allPins {
-            guard pin.list?.persistentModelID != list.persistentModelID else { continue }
+        // Only pins not already in the target list.
+        let moving = allPins.filter { $0.list?.persistentModelID != list.persistentModelID }
+        guard !moving.isEmpty else { return }
+        for pin in moving {
             detach(pin)
-            if let after = afterPin, allPins.count == 1,
-               let idx = list.pins.firstIndex(where: { $0.persistentModelID == after.persistentModelID }) {
-                list.pins.insert(pin, at: idx + 1)
-            } else {
-                list.pins.insert(pin, at: 0)
-            }
+            // Setting the inverse relationship is enough — SwiftData adds the pin to
+            // list.pins automatically. Do NOT also insert into list.pins, or the pin ends
+            // up in the array twice (caused a "Duplicate values for key" crash on the map).
             pin.list = list
         }
-        for (i, p) in list.pins.enumerated() { p.sortOrder = i }
+        // Compute the final order purely via sortOrder. Existing members (excluding the just-
+        // moved ones) keep their order; the moved pins go after `afterPin`, else to the front.
+        let movingIDs = Set(moving.map(\.persistentModelID))
+        var ordered = list.pins
+            .filter { !movingIDs.contains($0.persistentModelID) }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        if let after = afterPin, moving.count == 1,
+           let idx = ordered.firstIndex(where: { $0.persistentModelID == after.persistentModelID }) {
+            ordered.insert(contentsOf: moving, at: idx + 1)
+        } else {
+            ordered.insert(contentsOf: moving, at: 0)
+        }
+        for (i, p) in ordered.enumerated() { p.sortOrder = i }
         normalizeOrder()
         try? modelContext.save()
     }
@@ -1022,37 +1041,122 @@ private struct ProjectDetailView: View {
         try? modelContext.save()
     }
 
-    /// Deletes every currently-selected sidebar item. Photos go to the Trash (soft-delete,
-    /// undoable); whole lists are removed outright. Resolves all targets first so we never
-    /// re-read a relationship mid-mutation.
+    /// Deletes every currently-selected sidebar item. Photos go straight to the Trash
+    /// (undoable). Lists are NEVER deleted without an explicit confirmation — if the selection
+    /// includes any list, we stash everything and show a confirm dialog first.
     private func deleteSelectedItems() {
         let ids = selection.ids
         guard !ids.isEmpty else { return }
-        var pinsToTrash: [PinnedLocationData] = []
-        var listsToDelete: [LocationListData] = []
+        var pins: [PinnedLocationData] = []
+        var lists: [LocationListData] = []
         for id in ids {
             if let pin = findPin(byID: id) {
-                pinsToTrash.append(pin)
+                pins.append(pin)
             } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
-                listsToDelete.append(list)
+                lists.append(list)
             }
         }
-        for list in listsToDelete {
-            activeListIDs.remove(list.persistentModelID)
-            modelContext.delete(list)
+        if lists.isEmpty {
+            // Photos only — trash immediately (undoable, no confirm needed).
+            selection.ids = []
+            trashPins(pins)
+        } else {
+            // Any list selected → confirm before trashing.
+            listsPendingDelete = lists
+            pinsPendingDelete = pins
+            showDeleteListConfirm = true
         }
+    }
+
+    /// Requests deletion of a single list (from its row's context menu) — always confirms.
+    private func requestDeleteList(_ list: LocationListData) {
+        listsPendingDelete = [list]
+        pinsPendingDelete = []
+        showDeleteListConfirm = true
+    }
+
+    /// Carries out a confirmed delete: lists (and any co-selected photos) move to the Trash.
+    private func confirmDeletePending() {
+        for list in listsPendingDelete { trashList(list) }
+        let pins = pinsPendingDelete
+        listsPendingDelete = []
+        pinsPendingDelete = []
         selection.ids = []
-        trashPins(pinsToTrash)   // saves + normalizes
-        if pinsToTrash.isEmpty { normalizeOrder(); try? modelContext.save() }
+        if !pins.isEmpty { trashPins(pins) } else { normalizeOrder(); try? modelContext.save() }
+    }
+
+    /// Human-readable summary for the delete-confirmation dialog.
+    private var deleteConfirmMessage: String {
+        let listCount = listsPendingDelete.count
+        // Count photos that will go to the trash with the lists (their pins + descendants).
+        let listPhotoCount = listsPendingDelete.reduce(0) { $0 + photoCount(in: $1) }
+        let extraPhotos = pinsPendingDelete.count
+        let listWord = listCount == 1 ? "list" : "lists"
+        var parts = ["\(listCount) \(listWord)"]
+        let totalPhotos = listPhotoCount + extraPhotos
+        if totalPhotos > 0 { parts.append("\(totalPhotos) photo\(totalPhotos == 1 ? "" : "s")") }
+        return "Move \(parts.joined(separator: " and ")) to the Trash? Items are removed permanently after 30 days."
+    }
+
+    /// Live (non-trashed) photo count in a list, including its descendant child lists.
+    private func photoCount(in list: LocationListData) -> Int {
+        list.pins.filter { $0.deletedAt == nil }.count
+            + list.childLists.reduce(0) { $0 + photoCount(in: $1) }
+    }
+
+    /// Soft-deletes a list (and, for folders, its child lists) to the Trash. The list's photos
+    /// travel with it implicitly — they stay attached, hidden because their list is trashed.
+    private func trashList(_ list: LocationListData) {
+        let now = Date()
+        func mark(_ l: LocationListData) {
+            if l.deletedAt == nil { l.deletedAt = now }
+            activeListIDs.remove(l.persistentModelID)
+            selection.ids.remove(l.persistentModelID)
+            for child in l.childLists { mark(child) }
+        }
+        mark(list)
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// Restores a trashed list (and its trashed child lists) from the Trash.
+    private func restoreList(_ list: LocationListData) {
+        func clear(_ l: LocationListData) {
+            l.deletedAt = nil
+            for child in l.childLists where child.deletedAt != nil { clear(child) }
+        }
+        clear(list)
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
+    /// Permanently deletes a trashed list and everything under it (pins + child lists cascade).
+    private func purgeList(_ list: LocationListData) {
+        list.project = nil
+        list.parentList = nil
+        modelContext.delete(list)   // cascade removes pins and child lists
+        try? modelContext.save()
     }
 
     // MARK: - Trash
 
-    /// All trashed photos in this project (top-level or inside any list), newest first.
+    /// All trashed photos in this project (top-level, or individually trashed inside a LIVE
+    /// list). Photos inside a trashed *list* are excluded — they travel with their list and
+    /// show under it in the Trash, not as loose photos.
     private var trashedPins: [PinnedLocationData] {
         var pins = project.importedPhotos.filter { $0.deletedAt != nil }
-        for list in project.lists { pins += list.pins.filter { $0.deletedAt != nil } }
+        for list in project.lists where list.deletedAt == nil {
+            pins += list.pins.filter { $0.deletedAt != nil }
+        }
         return pins.sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
+    }
+
+    /// Trashed lists shown in the Trash — only the root of each trashed subtree (a trashed
+    /// child whose parent is also trashed is hidden under its parent), newest first.
+    private var trashedLists: [LocationListData] {
+        project.lists
+            .filter { $0.deletedAt != nil && ($0.parentList == nil || $0.parentList?.deletedAt == nil) }
+            .sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
     }
 
     /// Restores a trashed photo back to wherever it lived.
@@ -1089,18 +1193,18 @@ private struct ProjectDetailView: View {
         try? modelContext.save()
     }
 
-    /// Empties the Trash — permanently deletes every trashed photo in this project.
+    /// Empties the Trash — permanently deletes every trashed photo AND trashed list.
     private func emptyTrash() {
         for pin in trashedPins { purgePin(pin) }
+        for list in trashedLists { purgeList(list) }
         try? modelContext.save()
     }
 
-    /// Purges photos that have been in the Trash longer than 30 days. Called on appear.
+    /// Purges photos and lists that have been in the Trash longer than 30 days. Called on appear.
     private func purgeExpiredTrash() {
         let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
-        let expired = trashedPins.filter { ($0.deletedAt ?? .distantFuture) < cutoff }
-        guard !expired.isEmpty else { return }
-        for pin in expired { purgePin(pin) }
+        for pin in trashedPins.filter({ ($0.deletedAt ?? .distantFuture) < cutoff }) { purgePin(pin) }
+        for list in trashedLists.filter({ ($0.deletedAt ?? .distantFuture) < cutoff }) { purgeList(list) }
         try? modelContext.save()
     }
 
@@ -1294,6 +1398,91 @@ private struct ProjectDetailView: View {
         return false
     }
 
+    /// Trash section — soft-deleted lists and photos, with Empty Trash. Auto-purged at 30 days.
+    @ViewBuilder
+    private var trashSection: some View {
+        let trashed = trashedPins
+        let trashedListRows = trashedLists
+        if !trashed.isEmpty || !trashedListRows.isEmpty {
+            HStack(spacing: 6) {
+                Button {
+                var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                withTransaction(tx) { expandedTrash.toggle() }
+            } label: {
+                    Image(systemName: expandedTrash ? "chevron.down" : "chevron.right")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 28, height: 32).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Image(systemName: "trash").font(.caption).foregroundStyle(.secondary)
+                Text("Trash").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(trashed.count + trashedListRows.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 4)
+            .listRowBackground(Color.clear)
+            .contextMenu {
+                Button(role: .destructive) { emptyTrash() } label: {
+                    Label("Empty Trash", systemImage: "trash.slash")
+                }
+            }
+            .help("Items here are deleted automatically after 30 days")
+
+            if expandedTrash {
+                ForEach(trashedListRows, id: \.persistentModelID) { list in
+                    trashedListRow(list)
+                }
+                ForEach(trashed, id: \.persistentModelID) { pin in
+                    trashedPinRow(pin)
+                }
+            }
+        }
+    }
+
+    /// A single trashed-photo row in the Trash section.
+    @ViewBuilder
+    private func trashedPinRow(_ pin: PinnedLocationData) -> some View {
+        PinRow(pin: pin, selection: selection, onTap: { _, _ in }, onDoubleTap: {})
+            .padding(.leading, 24)
+            .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+            .opacity(0.6)
+            .contextMenu {
+                Button { restoreFromTrash(pin) } label: {
+                    Label("Put Back", systemImage: "arrow.uturn.backward")
+                }
+                Divider()
+                Button(role: .destructive) { purgePin(pin) } label: {
+                    Label("Delete Permanently", systemImage: "trash")
+                }
+            }
+    }
+
+    /// A single trashed-list row in the Trash section, with Put Back / Delete Permanently.
+    @ViewBuilder
+    private func trashedListRow(_ list: LocationListData) -> some View {
+        let n = photoCount(in: list)
+        HStack(spacing: 6) {
+            Image(systemName: list.childLists.isEmpty ? "list.bullet" : "folder")
+                .font(.caption).foregroundStyle(.secondary).frame(width: 14)
+            Text(list.name).font(.body).foregroundStyle(.primary)
+            Spacer()
+            if n > 0 { Text("\(n)").font(.caption).foregroundStyle(.secondary) }
+        }
+        .padding(.leading, 24)
+        .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+        .opacity(0.6)
+        .contextMenu {
+            Button { restoreList(list) } label: {
+                Label("Put Back", systemImage: "arrow.uturn.backward")
+            }
+            Divider()
+            Button(role: .destructive) { purgeList(list) } label: {
+                Label("Delete Permanently", systemImage: "trash")
+            }
+        }
+    }
+
     /// The Uncategorized pseudo-list row + its loose photos. Behaves like a normal list:
     /// collapsible, reorderable among top-level rows, eye toggle. It can't be nested into a
     /// folder, always holds the project's loose photos, and is the default import target.
@@ -1304,7 +1493,10 @@ private struct ProjectDetailView: View {
         let photos = searching ? loosePhotos.filter { nameMatches($0.name) } : loosePhotos
 
         HStack(spacing: 6) {
-            Button { uncategorizedExpanded.toggle() } label: {
+            Button {
+                var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                withTransaction(tx) { uncategorizedExpanded.toggle() }
+            } label: {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(width: 28, height: 32).contentShape(Rectangle())
@@ -1422,8 +1614,11 @@ private struct ProjectDetailView: View {
             isNested: true,
             selection: selection,
             onToggleExpand: {
-                if childExpanded { expandedListIDs.remove(child.persistentModelID) }
-                else { expandedListIDs.insert(child.persistentModelID) }
+                var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                withTransaction(tx) {
+                    if childExpanded { expandedListIDs.remove(child.persistentModelID) }
+                    else { expandedListIDs.insert(child.persistentModelID) }
+                }
             },
             onTap: { shift, option in handleTap(child.persistentModelID, shift: shift, option: option) },
             onDoubleTap: { handleDoubleTap(child.persistentModelID) },
@@ -1434,6 +1629,7 @@ private struct ProjectDetailView: View {
                 renamingList = child
             },
             onMoveToTopLevel: { unnestList(child) },
+            onDelete: { requestDeleteList(child) },
             dragProvider: { NSItemProvider(object: "list:\(child.uuid.uuidString)" as NSString) }
         )
         .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
@@ -1534,8 +1730,11 @@ private struct ProjectDetailView: View {
                         isNested: isNested,
                         selection: selection,
                         onToggleExpand: {
-                            if isExpanded { expandedListIDs.remove(list.persistentModelID) }
-                            else { expandedListIDs.insert(list.persistentModelID) }
+                            var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                            withTransaction(tx) {
+                                if isExpanded { expandedListIDs.remove(list.persistentModelID) }
+                                else { expandedListIDs.insert(list.persistentModelID) }
+                            }
                         },
                         onTap: { shift, option in handleTap(list.persistentModelID, shift: shift, option: option) },
                         onDoubleTap: { handleDoubleTap(list.persistentModelID) },
@@ -1549,6 +1748,7 @@ private struct ProjectDetailView: View {
                             setProjectVisibility(makeAllActive)
                         },
                         onMoveToTopLevel: { unnestList(list) },
+                        onDelete: { requestDeleteList(list) },
                         dragProvider: { NSItemProvider(object: item.dragID as NSString) }
                     )
                     .background { rowHeightReader(item.id) }
@@ -1565,9 +1765,11 @@ private struct ProjectDetailView: View {
 
                     if isExpanded {
                         // Child lists (folders) shown before pins.
-                        let childLists = list.childLists.sorted {
-                            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
-                        }.filter { !searching || nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) } }
+                        let childLists = list.childLists
+                            .filter { $0.deletedAt == nil }
+                            .sorted {
+                                $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+                            }.filter { !searching || nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) } }
                         ForEach(childLists, id: \.persistentModelID) { child in
                             childListRow(child, folder: list)
                         }
@@ -1605,63 +1807,7 @@ private struct ProjectDetailView: View {
                 }
             }
 
-            // Trash — soft-deleted photos. Pinned to the bottom of the sidebar.
-            let trashed = trashedPins
-            if !trashed.isEmpty {
-                HStack(spacing: 6) {
-                    Button {
-                        expandedTrash.toggle()
-                    } label: {
-                        Image(systemName: expandedTrash ? "chevron.down" : "chevron.right")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 28, height: 32)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    Image(systemName: "trash")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("Trash")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(trashed.count)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 4)
-                .listRowBackground(Color.clear)
-                .contextMenu {
-                    Button(role: .destructive) { emptyTrash() } label: {
-                        Label("Empty Trash", systemImage: "trash.slash")
-                    }
-                }
-                .help("Photos here are deleted automatically after 30 days")
-
-                if expandedTrash {
-                    ForEach(trashed, id: \.persistentModelID) { pin in
-                        PinRow(
-                            pin: pin,
-                            selection: selection,
-                            onTap: { _, _ in },
-                            onDoubleTap: {}
-                        )
-                        .padding(.leading, 24)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
-                        .opacity(0.6)
-                        .contextMenu {
-                            Button { restoreFromTrash(pin) } label: {
-                                Label("Put Back", systemImage: "arrow.uturn.backward")
-                            }
-                            Divider()
-                            Button(role: .destructive) { purgePin(pin) } label: {
-                                Label("Delete Permanently", systemImage: "trash")
-                            }
-                        }
-                    }
-                }
-            }
+            trashSection
 
             // Bottom drop zone — same as the top one, for when the list is scrolled down.
             Color.clear
@@ -1772,6 +1918,19 @@ private struct ProjectDetailView: View {
                 renamingList = nil
             }
             Button("Cancel", role: .cancel) { renamingList = nil }
+        }
+        .confirmationDialog(
+            "Delete List",
+            isPresented: $showDeleteListConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) { confirmDeletePending() }
+            Button("Cancel", role: .cancel) {
+                listsPendingDelete = []
+                pinsPendingDelete = []
+            }
+        } message: {
+            Text(deleteConfirmMessage)
         }
         .sheet(isPresented: $showAddList) {
             NameEntrySheet(
@@ -1968,6 +2127,9 @@ private struct ListRow: View {
     /// Called when the user Option+clicks the eye. `true` = show all, `false` = hide all.
     var onToggleAllVisibility: ((Bool) -> Void)? = nil
     var onMoveToTopLevel: (() -> Void)? = nil
+    /// Called when the user chooses "Delete List". The parent shows a confirm dialog and
+    /// moves the list to the Trash — ListRow never deletes directly.
+    var onDelete: (() -> Void)? = nil
     /// Supply a drag provider to make the name area a drag handle. Buttons are
     /// excluded so accidental drag on chevron/eye never triggers a reorder.
     var dragProvider: (() -> NSItemProvider)? = nil
@@ -2067,9 +2229,7 @@ private struct ListRow: View {
             }
             Divider()
             Button(role: .destructive) {
-                activeListIDs.remove(list.persistentModelID)
-                modelContext.delete(list)
-                try? modelContext.save()
+                onDelete?()
             } label: {
                 Label("Delete List", systemImage: "trash")
             }
@@ -2309,7 +2469,8 @@ struct MoveToListSheet: View {
     private var projectLists: [LocationListData] {
         // Use the project.lists forward relationship — the exact same source the
         // sidebar uses — sorted to match sidebar order (panelOrder, then createdAt).
-        project.lists.sorted {
+        // Trashed lists are excluded so you can't move photos into a deleted list.
+        project.lists.filter { $0.deletedAt == nil }.sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
         }
     }

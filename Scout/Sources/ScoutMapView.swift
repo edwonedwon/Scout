@@ -396,7 +396,12 @@ final class ZoomableMapView: MKMapView {
                 else { selectAnnotation(ann, animated: false) }
                 return
             }
-            // Click on empty map: clear multi-selection, close any open popover, then pan.
+            // Option-click on empty map area: keep existing multi-selection intact and do
+            // NOT call super, which runs MapKit's own hit-test and can select a nearby
+            // annotation (triggering the popover) even though the user's cursor missed our
+            // custom applyHover probe.
+            if optionHeld { return }
+            // Plain click on empty map: clear multi-selection, close any open popover, then pan.
             clearMultiSelection()
             if let sel = selectedAnnotations.first { deselectAnnotation(sel, animated: false) }
             super.mouseDown(with: event)
@@ -1149,9 +1154,12 @@ struct ScoutMapView {
 
             var index = projectPins ? projectIndex : searchIndex
 
-            // Build desired lookup: id → (location, tint, imageURL)
+            // Build desired lookup: id → (location, tint, imageURL). Use uniquingKeysWith
+            // (keep first) so a stray duplicate id can never crash the map rebuild — a pin
+            // briefly appearing twice during a move should drop a dupe, not trap.
             var desiredMap: [UUID: (ScoutLocation, String?)] = Dictionary(
-                uniqueKeysWithValues: desired.map { ($0.0.id, ($0.0, $0.1)) }
+                desired.map { ($0.0.id, ($0.0, $0.1)) },
+                uniquingKeysWith: { first, _ in first }
             )
 
             // Remove annotations that are no longer desired.

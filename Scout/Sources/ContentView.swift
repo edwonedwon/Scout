@@ -117,7 +117,8 @@ struct ContentView: View {
         else { return [] }
         // Match the sidebar order (panelOrder, then createdAt) so the Save / map
         // callout menus list lists in the same order the user arranged them.
-        return project.lists.sorted {
+        // Trashed lists are excluded so you can't save into a list that's in the Trash.
+        return project.lists.filter { $0.deletedAt == nil }.sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
         }
     }
@@ -549,10 +550,11 @@ struct ContentView: View {
                             }
                             pin.owningProject?.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
                             pin.owningProject = nil
-                            list.pins.insert(pin, at: 0)
+                            // Set the inverse only — SwiftData adds to list.pins automatically.
+                            // Inserting manually too would duplicate the pin in list.pins.
                             pin.list = list
                         }
-                        for (i, p) in list.pins.enumerated() { p.sortOrder = i }
+                        for (i, p) in list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }).enumerated() { p.sortOrder = i }
                         try? modelContext.save()
                         externalMoveUUIDs = []
                         gridSelectedUUIDs = []
@@ -588,7 +590,7 @@ struct ContentView: View {
 
     private var fitAllPinsButton: some View {
         Button { frameAllProjectPins() } label: {
-            Image(systemName: "crop")
+            Image(systemName: "viewfinder")
                 .font(.subheadline.weight(.medium))
                 .mapControlChrome(diameter: 32, circle: false)
         }
@@ -674,6 +676,8 @@ struct ContentView: View {
     private func isEffectivelyActive(_ list: LocationListData) -> Bool {
         var node: LocationListData? = list
         while let n = node {
+            // A trashed list (or any trashed ancestor) is never shown on the map/grid.
+            if n.deletedAt != nil { return false }
             if !activeListIDs.contains(n.persistentModelID) { return false }
             node = n.parentList
         }
@@ -942,7 +946,8 @@ struct ContentView: View {
         }
         list.pins.forEach { $0.sortOrder += 1 }
         pin.sortOrder = 0
-        list.pins.append(pin)
+        // Set the inverse only — SwiftData adds the pin to list.pins automatically.
+        // A manual append here too would duplicate it in list.pins.
         pin.list = list
         // owningProject must stay nil for list pins — it's the inverse of importedPhotos,
         // so setting it would add the pin back to the project top-level as a duplicate.
@@ -950,7 +955,7 @@ struct ContentView: View {
     }
 
     /// Download a saved pin's photos to disk and capture its source links, so it displays
-    /// offline (never refetches) and shows its Google Maps / source link in the popover.
+    /// offsline (never refetches) and shows its Google Maps / source link in the popover.
     private func cachePhotos(for pin: PinnedLocationData, from location: ScoutLocation) {
         let placeId = pin.googlePlaceId
         let uuid = pin.uuid
