@@ -442,6 +442,12 @@ private struct ProjectDetailView: View {
     @State private var dropMode: DropMode = .before
     // Measured heights per row so the drop delegate can map cursor-Y to a drop zone.
     @State private var rowHeights: [PersistentIdentifier: CGFloat] = [:]
+    // macOS mouse-event monitor that clears a stuck drop indicator. SwiftUI's DropDelegate
+    // sometimes fails to deliver dropExited when a drag is cancelled, leaving the blue
+    // insertion line on screen; releasing the mouse (or the next click) clears it here.
+    #if os(macOS)
+    @State private var dragEndMonitor: Any? = nil
+    #endif
 
     /// Flat ordered list of every currently visible row id (including expanded list pins),
     /// used to resolve a shift-click range.
@@ -1534,7 +1540,21 @@ private struct ProjectDetailView: View {
                                  .map(\.persistentModelID)
                 )
             }
+            #if os(macOS)
+            // Clear any stuck drop indicator on mouse-up / next click (see dragEndMonitor docs).
+            if dragEndMonitor == nil {
+                dragEndMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .leftMouseDown]) { event in
+                    if dropTargetID != nil { dropTargetID = nil }
+                    return event
+                }
+            }
+            #endif
         }
+        #if os(macOS)
+        .onDisappear {
+            if let m = dragEndMonitor { NSEvent.removeMonitor(m); dragEndMonitor = nil }
+        }
+        #endif
         // Delete key removes the current selection. A hidden keyboard-shortcut button is
         // used instead of `.onDeleteCommand` because the latter makes the List a focus
         // sink on macOS, which blocks click-to-focus on TextFields elsewhere in the window
