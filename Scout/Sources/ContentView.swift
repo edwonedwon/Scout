@@ -567,21 +567,57 @@ struct ContentView: View {
     }
 
     private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
+        // If this location is already a saved pin (id == pin.uuid), move it instead of copying.
+        if let existing = allPins.first(where: { $0.uuid == location.id }) {
+            movePin(existing, to: list)
+            return
+        }
         let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
         modelContext.insert(pin)
-        pin.list = list   // inverse relationship adds it to list.pins
+        pin.list = list
         cachePhotos(for: pin, from: location)
     }
 
     /// Save from the carousel: to a chosen list, or as a general unfiled pin (list == nil).
     private func savePinned(_ location: ScoutLocation, to list: LocationListData?) {
+        // If this location is already a saved pin, move/reassign rather than duplicate.
+        if let existing = allPins.first(where: { $0.uuid == location.id }) {
+            if let list {
+                movePin(existing, to: list)
+            }
+            // If list == nil the pin is already saved; nothing to do.
+            return
+        }
         if let list {
-            saveToList(location, list)
+            let pin = PinnedLocationData(from: location, sortOrder: list.pins.count)
+            modelContext.insert(pin)
+            pin.list = list
+            cachePhotos(for: pin, from: location)
         } else {
             let pin = PinnedLocationData(from: location)
-            modelContext.insert(pin)   // list stays nil → general pin
+            modelContext.insert(pin)
             cachePhotos(for: pin, from: location)
         }
+    }
+
+    /// Moves an existing pin out of wherever it lives and into `list`.
+    private func movePin(_ pin: PinnedLocationData, to list: LocationListData) {
+        // Detach from current list.
+        if let oldList = pin.list {
+            oldList.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
+            pin.list = nil
+        }
+        // Detach from project top-level (importedPhotos).
+        if let project = pin.owningProject {
+            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
+            pin.owningProject = nil
+        }
+        pin.sortOrder = list.pins.count
+        list.pins.append(pin)
+        pin.list = list
+        // Keep owningProject if the target list belongs to the same project.
+        if let project = list.project { pin.owningProject = project }
+        try? modelContext.save()
     }
 
     /// Download a saved pin's photos to disk and capture its source links, so it displays

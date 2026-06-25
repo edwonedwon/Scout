@@ -756,9 +756,9 @@ private struct ProjectDetailView: View {
                         onRename: {
                             renameListText = list.name
                             renamingList = list
-                        }
+                        },
+                        dragProvider: { NSItemProvider(object: item.dragID as NSString) }
                     )
-                    .onDrag { NSItemProvider(object: item.dragID as NSString) }
                     .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
                         tryImportDrop(providers, into: list) || loadDrop(providers, onto: .list(list))
                     }
@@ -893,11 +893,12 @@ private struct ProjectDetailView: View {
         .onChange(of: scrollToPinUUID) { _, uuid in
             guard let uuid,
                   let pin = findPin(uuid: uuid.uuidString) else { return }
-            // If the pin is inside a list, make sure that list is expanded.
+            // Expand the containing list first so its pins are in the List hierarchy.
             if let list = pin.list {
                 expandedListIDs.insert(list.persistentModelID)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            // Wait long enough for SwiftUI to insert the newly-expanded rows before scrolling.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 withAnimation(.easeInOut(duration: 0.3)) {
                     listProxy.scrollTo(pin.persistentModelID, anchor: .center)
                 }
@@ -1002,6 +1003,9 @@ private struct ListRow: View {
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
     var onRename: (() -> Void)? = nil
+    /// Supply a drag provider to make the name area a drag handle. Buttons are
+    /// excluded so accidental drag on chevron/eye never triggers a reorder.
+    var dragProvider: (() -> NSItemProvider)? = nil
     @Environment(\.modelContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
@@ -1021,18 +1025,25 @@ private struct ListRow: View {
             }
             .buttonStyle(.plain)
 
-            Circle()
-                .fill(listColor)
-                .frame(width: 10, height: 10)
-            Text(list.name)
-                .font(.body)
-                .foregroundStyle(.primary)
-            Spacer()
-            if !list.pins.isEmpty {
-                Text("\(list.pins.count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            // Drag handle: only this region initiates a reorder drag, keeping the
+            // chevron and eye buttons free from accidental drag triggers.
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(listColor)
+                    .frame(width: 10, height: 10)
+                Text(list.name)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                Spacer()
+                if !list.pins.isEmpty {
+                    Text("\(list.pins.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .contentShape(Rectangle())
+            .modifier(OptionalDrag(provider: dragProvider))
+
             Button {
                 if isActive { activeListIDs.remove(list.persistentModelID) }
                 else { activeListIDs.insert(list.persistentModelID) }
@@ -1073,6 +1084,19 @@ private struct ListRow: View {
             } label: {
                 Label("Delete List", systemImage: "trash")
             }
+        }
+    }
+}
+
+/// Applies `.onDrag` only when a provider is supplied, letting call sites restrict
+/// dragging to a specific sub-region while leaving button areas drag-free.
+private struct OptionalDrag: ViewModifier {
+    let provider: (() -> NSItemProvider)?
+    func body(content: Content) -> some View {
+        if let provider {
+            content.onDrag(provider)
+        } else {
+            content
         }
     }
 }
