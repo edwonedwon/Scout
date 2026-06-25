@@ -16,11 +16,16 @@ struct PhotoGridView: View {
     var onClearSearchResults: (() -> Void)? = nil
     /// Called with the location UUID when the user taps a cell (before the carousel opens).
     var onSelectLocation: ((UUID) -> Void)? = nil
+    /// Called on double-tap. ContentView uses this to open the carousel with stack-aware logic.
+    var onDoubleSelectLocation: ((UUID) -> Void)? = nil
+    /// Called with selected UUIDs when "Make Stack" is chosen from the grid context menu.
+    var onMakeStackFromGrid: (([UUID]) -> Void)? = nil
     /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
     var originalFilePath: ((UUID) -> String?)? = nil
 
     struct PhotoItem: Identifiable {
-        let id: Int
+        /// Stable UUID from the location — survives grid rebuilds so ScrollView can anchor.
+        var id: UUID { location.id }
         let image: ScoutImage
         let location: ScoutLocation
         let indexInLocation: Int
@@ -28,27 +33,17 @@ struct PhotoGridView: View {
         var isPinned: Bool = false
     }
 
-    private func makeItems(from locs: [ScoutLocation], startID: Int = 0,
-                           isPinned: Bool = false) -> [PhotoItem] {
-        var result: [PhotoItem] = []
-        var counter = startID
-        for loc in locs {
-            guard let img = loc.images.first else { counter += 1; continue }
-            result.append(PhotoItem(id: counter, image: img, location: loc,
-                                    indexInLocation: 0, isPinned: isPinned))
-            counter += 1
+    private func makeItems(from locs: [ScoutLocation], isPinned: Bool = false) -> [PhotoItem] {
+        locs.compactMap { loc in
+            guard let img = loc.images.first else { return nil }
+            return PhotoItem(image: img, location: loc, indexInLocation: 0, isPinned: isPinned)
         }
-        return result
     }
 
-    private var searchItems: [PhotoItem] { makeItems(from: locations, startID: 2_000_000) }
-    // Build section items with non-overlapping IDs (sections use 0-based, search uses 2M+).
+    private var searchItems: [PhotoItem] { makeItems(from: locations) }
     private var sectionItems: [(title: String, color: Color?, items: [PhotoItem])] {
-        var counter = 0
-        return pinnedSections.map { section in
-            let items = makeItems(from: section.locations, startID: counter, isPinned: true)
-            counter += section.locations.count + 1
-            return (section.title, section.color, items)
+        pinnedSections.map { section in
+            (section.title, section.color, makeItems(from: section.locations, isPinned: true))
         }
     }
     private var allPinnedItems: [PhotoItem] { sectionItems.flatMap(\.items) }
@@ -57,6 +52,7 @@ struct PhotoGridView: View {
     @State private var columns = 3
     @State private var selectedIDs: Set<UUID> = []
     @State private var anchorID: UUID? = nil
+    @State private var scrollPositionID: UUID? = nil
     private let gap: CGFloat = 2
 
     var body: some View {
@@ -100,6 +96,9 @@ struct PhotoGridView: View {
                     }
                     .padding(.bottom, 44)
                 }
+                // Tracks the topmost visible item UUID so the scroll position
+                // survives grid rebuilds (e.g. after a drag-drop into a list).
+                .scrollPosition(id: $scrollPositionID, anchor: .top)
                 .overlay(alignment: .bottom) {
                     GridSizeSlider(columns: $columns)
                 }
@@ -157,7 +156,10 @@ struct PhotoGridView: View {
                                     : "photos:\(ids.map(\.uuidString).joined(separator: ","))"
                                 return NSItemProvider(object: payload as NSString)
                             } : nil,
-                            originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil
+                            originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil,
+                            onMakeStack: (item.isPinned && selectedIDs.contains(item.location.id) && selectedIDs.count >= 2)
+                                ? { onMakeStackFromGrid?(Array(selectedIDs)) }
+                                : nil
                         )
                         .id(item.id)
                     }
@@ -192,6 +194,11 @@ struct PhotoGridView: View {
 
     private func openCarousel(from item: PhotoItem, universe: [PhotoItem]) {
         onSelectLocation?(item.location.id)
+        // If ContentView provided a double-tap handler (for stack-aware carousel), use it.
+        if item.isPinned, let handler = onDoubleSelectLocation {
+            handler(item.location.id)
+            return
+        }
         var seen = Set<UUID>()
         let all = universe.compactMap { i -> ScoutLocation? in
             guard seen.insert(i.location.id).inserted else { return nil }
@@ -216,6 +223,7 @@ private struct MasonryCell: View {
     var onDoubleTap: (() -> Void)? = nil
     var dragPayload: (() -> NSItemProvider)? = nil
     var originalFilePath: String? = nil
+    var onMakeStack: (() -> Void)? = nil
     @State private var isHovered = false
 
     var body: some View {
@@ -271,6 +279,12 @@ private struct MasonryCell: View {
             })
         }
         .contextMenu {
+            if let makeStack = onMakeStack {
+                Button(action: makeStack) {
+                    Label("Make Stack", systemImage: "square.3.layers.3d")
+                }
+                Divider()
+            }
             if let path = originalFilePath {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
