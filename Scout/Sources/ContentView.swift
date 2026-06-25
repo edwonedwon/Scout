@@ -89,6 +89,8 @@ struct ContentView: View {
     @State private var cachedGridSections: [PhotoGridView.Section] = []
     /// When non-nil, this stackID is expanded on the map — all member pins are shown individually.
     @State private var expandedStackID: UUID? = nil
+    /// UUIDs to move when the move sheet is triggered from the grid or M key outside sidebar.
+    @State private var externalMoveUUIDs: [UUID] = []
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -194,7 +196,8 @@ struct ContentView: View {
                         }
                     },
                     onOpenCarousel: openInCarousel,
-                    scrollToPinUUID: highlightedPinID
+                    scrollToPinUUID: highlightedPinID,
+                    externalMoveUUIDs: $externalMoveUUIDs
                 )
                 .frame(width: 240)
                 .transition(.move(edge: .leading))
@@ -438,6 +441,7 @@ struct ContentView: View {
                     try? modelContext.save()
                     rebuildPinCaches()
                 },
+                onMoveToList: { uuids in externalMoveUUIDs = uuids },
                 originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
                 .ignoresSafeArea()
@@ -450,6 +454,21 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
                     .zIndex(20)
             }
+        }
+        // M key: open move sheet from photo grid or map selection (sidebar handles its own M).
+        .background {
+            Button("") {
+                let gridUUIDs: [UUID] = {
+                    // Use highlighted grid pin if any
+                    if let id = highlightedPinID { return [id] }
+                    if let id = selectedLocation?.id { return [id] }
+                    return []
+                }()
+                if !gridUUIDs.isEmpty { externalMoveUUIDs = gridUUIDs }
+            }
+            .keyboardShortcut("m", modifiers: [])
+            .opacity(0)
+            .allowsHitTesting(false)
         }
         .overlay(alignment: .top) {
             HStack {

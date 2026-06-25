@@ -20,6 +20,8 @@ struct PhotoGridView: View {
     var onDoubleSelectLocation: ((UUID) -> Void)? = nil
     /// Called with selected UUIDs when "Make Stack" is chosen from the grid context menu.
     var onMakeStackFromGrid: (([UUID]) -> Void)? = nil
+    /// Called with selected UUIDs when "Add to List" is chosen from the grid context menu.
+    var onMoveToList: (([UUID]) -> Void)? = nil
     /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
     var originalFilePath: ((UUID) -> String?)? = nil
 
@@ -159,7 +161,13 @@ struct PhotoGridView: View {
                             originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil,
                             onMakeStack: (item.isPinned && selectedIDs.contains(item.location.id) && selectedIDs.count >= 2)
                                 ? { onMakeStackFromGrid?(Array(selectedIDs)) }
-                                : nil
+                                : nil,
+                            onAddToList: item.isPinned ? {
+                                let ids = selectedIDs.contains(item.location.id) && !selectedIDs.isEmpty
+                                    ? Array(selectedIDs)
+                                    : [item.location.id]
+                                onMoveToList?(ids)
+                            } : nil
                         )
                         .id(item.id)
                     }
@@ -224,6 +232,7 @@ private struct MasonryCell: View {
     var dragPayload: (() -> NSItemProvider)? = nil
     var originalFilePath: String? = nil
     var onMakeStack: (() -> Void)? = nil
+    var onAddToList: (() -> Void)? = nil
     @State private var isHovered = false
 
     var body: some View {
@@ -279,10 +288,17 @@ private struct MasonryCell: View {
             })
         }
         .contextMenu {
+            if let addToList = onAddToList {
+                Button(action: addToList) {
+                    Label("Add to List…", systemImage: "arrow.right.square")
+                }
+            }
             if let makeStack = onMakeStack {
                 Button(action: makeStack) {
                     Label("Make Stack", systemImage: "square.3.layers.3d")
                 }
+            }
+            if onAddToList != nil || onMakeStack != nil {
                 Divider()
             }
             if let path = originalFilePath {

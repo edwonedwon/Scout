@@ -118,6 +118,8 @@ struct ProjectsPanel: View {
     var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
     /// Set by photo grid to scroll the sidebar to the tapped pin.
     var scrollToPinUUID: UUID? = nil
+    /// Set by ContentView (M key or grid context menu) to open the move sheet for these UUIDs.
+    @Binding var externalMoveUUIDs: [UUID]
 
     /// Persisted open project (stored as UUID string, resolved to ProjectData on load).
     @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
@@ -147,7 +149,8 @@ struct ProjectsPanel: View {
                         onExpandedChanged: { uuids in
                             expandedListUUIDs = uuids.joined(separator: ",")
                         },
-                        scrollToPinUUID: scrollToPinUUID
+                        scrollToPinUUID: scrollToPinUUID,
+                        externalMoveUUIDs: $externalMoveUUIDs
                     )
                 }
         }
@@ -343,6 +346,9 @@ private struct ProjectDetailView: View {
     var onExpandedChanged: (([String]) -> Void)? = nil
     /// Set from the photo grid to scroll the sidebar to a specific pin.
     var scrollToPinUUID: UUID? = nil
+    /// Set by ContentView (from M key or grid context menu) to open the move sheet
+    /// for specific location UUIDs, bypassing sidebar selection.
+    @Binding var externalMoveUUIDs: [UUID]
 
     @Environment(\.modelContext) private var modelContext
     @State private var showAddList = false
@@ -1093,7 +1099,7 @@ private struct ProjectDetailView: View {
         } // ScrollViewReader
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
         .onKeyPress(.upArrow)   { moveSelection(-1); return .handled }
-        // Hidden M key button — opens Move popup when pins are selected.
+        // Hidden M key button — opens Move popup when sidebar pins are selected.
         .background {
             Button("") {
                 let hasPins = selection.ids.contains(where: { findPin(byID: $0) != nil })
@@ -1103,16 +1109,29 @@ private struct ProjectDetailView: View {
             .opacity(0)
             .allowsHitTesting(false)
         }
-        .sheet(isPresented: $showMovePopup) {
+        // External trigger from ContentView (M key while grid is focused, or grid context menu).
+        .onChange(of: externalMoveUUIDs) { _, uuids in
+            if !uuids.isEmpty { showMovePopup = true }
+        }
+        .sheet(isPresented: $showMovePopup, onDismiss: { externalMoveUUIDs = [] }) {
+            let moveIDs: [UUID] = {
+                // Prefer externally-supplied UUIDs (grid/map selection); fall back to sidebar.
+                let ext = externalMoveUUIDs
+                if !ext.isEmpty { return ext }
+                return selection.ids.compactMap { findPin(byID: $0)?.uuid }
+            }()
             MoveToListSheet(
                 lists: project.lists,
                 onMove: { list in
-                    let pins = selection.ids.compactMap { findPin(byID: $0) }
-                    guard let first = pins.first else { return }
-                    movePinsToList(first, intoList: list)
+                    let pins = moveIDs.compactMap { uuid in
+                        project.lists.flatMap(\.pins).first(where: { $0.uuid == uuid })
+                        ?? project.importedPhotos.first(where: { $0.uuid == uuid })
+                    }
+                    pins.forEach { movePinsToList($0, intoList: list) }
                     showMovePopup = false
+                    externalMoveUUIDs = []
                 },
-                onDismiss: { showMovePopup = false }
+                onDismiss: { showMovePopup = false; externalMoveUUIDs = [] }
             )
         }
         .overlay {
@@ -1691,7 +1710,7 @@ private struct MoveToListSheet: View {
 // MARK: - Previews
 
 #Preview("Projects list") {
-    ProjectsPanel(activeListIDs: .constant([]))
+    ProjectsPanel(activeListIDs: .constant([]), externalMoveUUIDs: .constant([]))
         .frame(width: 280, height: 600)
         .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self], inMemory: true)
 }
