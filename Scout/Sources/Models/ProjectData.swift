@@ -187,7 +187,8 @@ final class PinnedLocationData {
             googlePlaceId: googlePlaceId,
             status: LocationStatus(rawValue: statusRaw) ?? .scouted,
             // A pin's tags are currently its single list; becomes pin.tags after the tags migration.
-            tagColorHexes: list.map { [$0.colorHex] } ?? []
+            tagColorHexes: list.map { [$0.colorHex] } ?? [],
+            tagNames: list.map { [$0.name] } ?? []
         )
     }
 }

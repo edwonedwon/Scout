@@ -19,6 +19,8 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
     public var createdAt: Date
     /// Hex colors of every tag this location belongs to — drawn as dots/pie slices on the map.
     public var tagColorHexes: [String]
+    /// Names of every tag this location belongs to (parallel to tagColorHexes).
+    public var tagNames: [String]
 
     public init(
         id: UUID = UUID(),
@@ -34,7 +36,8 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         notes: String = "",
         status: LocationStatus = .scouted,
         createdAt: Date = Date(),
-        tagColorHexes: [String] = []
+        tagColorHexes: [String] = [],
+        tagNames: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -50,6 +53,7 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         self.status = status
         self.createdAt = createdAt
         self.tagColorHexes = tagColorHexes
+        self.tagNames = tagNames
     }
 }
 
