@@ -439,7 +439,12 @@ private struct ProjectDetailView: View {
                 onOpenCarousel?(pin)
             }
         } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
-            onFitToList?(list.pins.filter { $0.hasGPS })
+            // Double-click toggles the list's visibility (eye on/off).
+            if activeListIDs.contains(list.persistentModelID) {
+                activeListIDs.remove(list.persistentModelID)
+            } else {
+                activeListIDs.insert(list.persistentModelID)
+            }
         }
     }
 
@@ -1729,6 +1734,25 @@ private struct TimelineProgressOverlay: View {
 
 // MARK: - Move-to-list popup
 
+// ⚠️⚠️ DO NOT BREAK THE SEARCH IN THIS VIEW ⚠️⚠️
+// The live search here was broken for many debugging rounds. There are THREE separate
+// macOS/SwiftUI footguns that each independently break it — all are avoided below, and
+// changing any of them brings the bug back (you type "temple" and get an unrelated list):
+//
+//   1. ForEach row identity MUST be `id: \.persistentModelID` ONLY. Do NOT also put
+//      `.id(idx)` (or any index-based id) on the row. Two competing identities make
+//      SwiftUI reuse the row at a given position and keep showing STALE content when the
+//      filtered array changes. (This was the final root cause.)
+//   2. Do NOT attach `.onKeyPress` to the search TextField. On macOS it intercepts the key
+//      path so characters draw in the field but the `text` binding stops updating live —
+//      `query` stays "" and nothing filters. Arrow/escape are handled by hidden
+//      keyboardShortcut buttons in `.background` instead (see body).
+//   3. Read lists from `project.lists` (the forward relationship the sidebar uses), NOT a
+//      `@Query` filtered by the `.project` inverse — that inverse isn't reliably set on
+//      every list, so the fetch returns a different/partial set.
+//
+// If you touch this view, re-test: open the M-menu, type a substring of a known list name,
+// and confirm ONLY matching lists show, live, on every keystroke.
 struct MoveToListSheet: View {
     let project: ProjectData
     let onMove: (LocationListData) -> Void
@@ -1810,6 +1834,8 @@ struct MoveToListSheet: View {
                                             in: RoundedRectangle(cornerRadius: 6))
                                 .contentShape(Rectangle())
                                 .onTapGesture { onMove(list) }
+                                // ⚠️ Keep this as persistentModelID. NEVER add `.id(idx)` —
+                                // see the warning above the struct. It breaks live search.
                                 .id(list.persistentModelID)
                             }
                         }

@@ -594,12 +594,14 @@ struct ContentView: View {
 
     private static let generalPinColor = ""   // empty = no border for uncategorized pins
 
-    /// Changes whenever any pin's list membership or sort order changes, even when total
-    /// counts are unchanged — used to trigger a grid rebuild after drag-reorder.
+    /// Changes whenever any pin's list membership, sort order, or trashed state changes,
+    /// even when total counts are unchanged — used to trigger a grid/map rebuild after a
+    /// drag-reorder or a soft-delete (trashing a pin doesn't change any count).
     private var pinListAssignmentHash: Int {
         allPins.reduce(0) { acc, pin in
             let listHash = pin.list?.persistentModelID.hashValue ?? 0
-            return acc ^ listHash ^ pin.sortOrder ^ pin.panelOrder
+            let trashed = pin.deletedAt == nil ? 0 : 1
+            return acc ^ listHash ^ pin.sortOrder ^ pin.panelOrder ^ trashed
         }
     }
 
