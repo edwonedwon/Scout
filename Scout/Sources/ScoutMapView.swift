@@ -1352,6 +1352,10 @@ struct ScoutMapView {
 
         #if os(macOS)
         private func showPopover(for location: ScoutLocation, from annotationView: MKAnnotationView, in mapView: MKMapView) {
+            // Never show the map callout while the full-screen carousel is up — otherwise the
+            // popover can appear floating on top of it. This is the hard guarantee; the
+            // .onChange(photoViewer.isVisible) dismiss handles the already-open case.
+            if PhotoViewerState.shared.isVisible { return }
             activePopover?.close()
             let lists = parent.availableLists
             let saveHandler = parent.onSaveToList

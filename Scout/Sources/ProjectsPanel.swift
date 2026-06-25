@@ -51,7 +51,7 @@ func loadImageURLs(from providers: [NSItemProvider]) async -> [URL] {
 }
 
 /// Adjust this to clear the traffic light buttons in the sidebar.
-private let sidebarTopPadding: CGFloat = 35
+private let sidebarTopPadding: CGFloat = 55
 
 /// Deletes EVERY project, list, and pin in the store via SwiftData batch deletes,
 /// logging counts before and after. Must be called only after any open-project detail
@@ -761,6 +761,9 @@ private struct ProjectDetailView: View {
             }
         }
         try? modelContext.save()
+        // Rebuild the cached sidebar items so the new panelOrder is reflected on screen —
+        // writing panelOrder alone doesn't re-sort the @State-cached display array.
+        rebuildSidebarItems()
     }
 
     /// Soft-deletes a photo by moving it to the Trash (keeps its list/project membership so
@@ -1890,11 +1893,122 @@ struct MoveToListSheet: View {
 
 // MARK: - Previews
 
+#if DEBUG
+/// Rich in-memory sample data for the sidebar previews: one project with several
+/// colour-coded lists (each holding a few photos), some uncategorised photos, and a
+/// couple of trashed photos so the Trash section shows too.
+@MainActor
+private enum SidebarPreviewData {
+    /// A handful of Creative-Commons image URLs so thumbnails render when online
+    /// (they fall back to the mappin placeholder offline — layout still looks right).
+    static let imageURLs = [
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/3/30/Vasquez_Rocks_2013.jpg/320px-Vasquez_Rocks_2013.jpg",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Vasquez_Rocks_County_Park_2.jpg/320px-Vasquez_Rocks_County_Park_2.jpg",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Vasquez_Rocks.jpg/320px-Vasquez_Rocks.jpg",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Tokyo_Tower_and_around_Skyscrapers.jpg/320px-Tokyo_Tower_and_around_Skyscrapers.jpg",
+    ]
+
+    static let container: ModelContainer = {
+        let container = try! ModelContainer(
+            for: ProjectData.self, LocationListData.self, PinnedLocationData.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let ctx = container.mainContext
+
+        let project = ProjectData(name: "Tokyo Shoot")
+        ctx.insert(project)
+
+        // Builds a pin with a thumbnail URL and a GPS coordinate.
+        func makePin(_ name: String, urlIndex: Int, lat: Double, lng: Double, order: Int) -> PinnedLocationData {
+            let loc = ScoutLocation(
+                name: name,
+                coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
+                images: [ScoutImage(url: URL(string: imageURLs[urlIndex % imageURLs.count]), source: .imported)]
+            )
+            let pin = PinnedLocationData(from: loc, sortOrder: order)
+            ctx.insert(pin)
+            return pin
+        }
+
+        // Colour-coded lists (palette indices chosen for variety), each with a few photos.
+        let listSpecs: [(name: String, palette: Int)] = [
+            ("Cycling Roads", 1),     // blue
+            ("Temples", 3),           // purple
+            ("Abandoned Houses", 4),  // pink
+            ("Tea Farms", 2),         // green
+        ]
+        for (i, spec) in listSpecs.enumerated() {
+            let list = LocationListData(name: spec.name, colorHex: LocationListData.palette[spec.palette])
+            ctx.insert(list)
+            list.project = project              // inverse populates project.lists
+            list.panelOrder = i
+            for j in 0..<3 {
+                let pin = makePin("\(spec.name) \(j + 1)", urlIndex: i + j,
+                                  lat: 35.66 + Double(i) * 0.01, lng: 139.70 + Double(j) * 0.01, order: j)
+                pin.list = list                 // inverse populates list.pins
+            }
+        }
+
+        // Loose, uncategorised photos imported straight into the project.
+        for k in 0..<4 {
+            let pin = makePin("DSC0\(2530 + k)", urlIndex: k, lat: 35.64, lng: 139.74, order: k)
+            pin.owningProject = project          // inverse populates project.importedPhotos
+            pin.panelOrder = 100 + k
+        }
+
+        // A couple of trashed photos so the Trash section appears.
+        for k in 0..<2 {
+            let pin = makePin("DSC0\(2999 - k)", urlIndex: k, lat: 35.63, lng: 139.73, order: k)
+            pin.owningProject = project
+            pin.deletedAt = Date()
+        }
+
+        try? ctx.save()
+        return container
+    }()
+
+    static var project: ProjectData {
+        (try? container.mainContext.fetch(FetchDescriptor<ProjectData>()))?.first
+            ?? ProjectData(name: "Empty")
+    }
+}
+
+/// Hosts ProjectDetailView with live @State bindings and turns every list's eye on so
+/// the preview shows a fully-populated, expanded sidebar.
+private struct SidebarDetailPreview: View {
+    let project: ProjectData
+    @State private var activeListIDs: Set<PersistentIdentifier> = []
+    @State private var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier> = []
+    @State private var externalMoveUUIDs: [UUID] = []
+
+    var body: some View {
+        ProjectDetailView(
+            project: project,
+            initialExpandedUUIDs: Set(project.lists.map(\.uuid.uuidString)),
+            activeListIDs: $activeListIDs,
+            hiddenUncategorizedProjectIDs: $hiddenUncategorizedProjectIDs,
+            onFitToList: { _ in },
+            onSelectPin: { _ in },
+            onZoomToPin: { _ in },
+            onClearPin: {},
+            externalMoveUUIDs: $externalMoveUUIDs
+        )
+        .onAppear { activeListIDs = Set(project.lists.map(\.persistentModelID)) }
+    }
+}
+
+#Preview("Project detail — full") {
+    SidebarDetailPreview(project: SidebarPreviewData.project)
+        .frame(width: 280, height: 760)
+        .modelContainer(SidebarPreviewData.container)
+}
+
 #Preview("Projects list") {
     ProjectsPanel(activeListIDs: .constant([]), hiddenUncategorizedProjectIDs: .constant([]), externalMoveUUIDs: .constant([]))
         .frame(width: 280, height: 600)
-        .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self], inMemory: true)
+        .modelContainer(SidebarPreviewData.container)
 }
+#endif
 
 // MARK: - Hex color helper
 
