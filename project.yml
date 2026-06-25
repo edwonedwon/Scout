@@ -38,13 +38,13 @@ targets:
       configs:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
-          # Disable sandbox in debug so Process-based zip/unzip works for export/import.
-          # This is a personal-use debug build — not submitted to the App Store.
-          ENABLE_APP_SANDBOX: NO
     entitlements:
       path: Scout/Scout.entitlements
       properties:
-        com.apple.security.app-sandbox: true
+        # Sandbox disabled: this is a personal-use debug build (not App Store).
+        # The sandbox blocked Process from spawning /usr/bin/zip, breaking
+        # backup export/import. Re-enable + use a zip library before any release.
+        com.apple.security.app-sandbox: false
         com.apple.security.personal-information.location: true
         com.apple.security.network.client: true
     info:
