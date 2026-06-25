@@ -56,6 +56,13 @@ final class ScoutMapController: ObservableObject {
         setRegion(region, animated: animated)
     }
 
+    /// Closes any open pin popover and deselects all annotations. Call when
+    /// switching away from map mode so the popover doesn't float over other views.
+    func dismissPopover() {
+        guard let map = mapView else { return }
+        for ann in map.selectedAnnotations { map.deselectAnnotation(ann, animated: false) }
+    }
+
     /// Deselects then immediately reselects the currently-selected annotation so
     /// MapKit fires `didSelect`, which reopens the pin popover. Call this after
     /// the carousel is dismissed while the map is in view.

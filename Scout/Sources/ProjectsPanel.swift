@@ -115,6 +115,8 @@ struct ProjectsPanel: View {
     var onZoomToPin: ((PinnedLocationData) -> Void)? = nil
     var onClearPin: (() -> Void)? = nil
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
+    /// Set by photo grid to scroll the sidebar to the tapped pin.
+    var scrollToPinUUID: UUID? = nil
 
     /// Persisted open project (stored as UUID string, resolved to ProjectData on load).
     @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
@@ -142,7 +144,8 @@ struct ProjectsPanel: View {
                         onRevealPins: onRevealPins,
                         onExpandedChanged: { uuids in
                             expandedListUUIDs = uuids.joined(separator: ",")
-                        }
+                        },
+                        scrollToPinUUID: scrollToPinUUID
                     )
                 }
         }
@@ -331,12 +334,16 @@ private struct ProjectDetailView: View {
     var onClearPin: (() -> Void)?
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
     var onExpandedChanged: (([String]) -> Void)? = nil
+    /// Set from the photo grid to scroll the sidebar to a specific pin.
+    var scrollToPinUUID: UUID? = nil
 
     @Environment(\.modelContext) private var modelContext
     @State private var showAddList = false
     @State private var newListName = ""
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
     @State private var topLevelDropTargeted = false
+    @State private var renamingList: LocationListData? = nil
+    @State private var renameListText = ""
     @State private var isBackfilling = false
     // Selection lives in a reference-type model owned via plain @State (not @StateObject),
     // so changing it never re-renders this view or rebuilds the row list. Only the visible
@@ -492,13 +499,22 @@ private struct ProjectDetailView: View {
                 if dragID.hasPrefix("pin:") { uuid = String(dragID.dropFirst(4)) }
                 else if dragID.hasPrefix("photo:") { uuid = String(dragID.dropFirst(6)) }
                 else { return }
-                guard let pin = findPin(uuid: uuid) else { return }
-                guard pin.list != nil else { return } // already top-level, nothing to do
-                detach(pin)
-                pin.owningProject = project
-                // Set panelOrder outside the current range so normalizeOrder places it correctly.
-                pin.panelOrder = atTop ? -1 : sidebarItems.count + 1
-                project.importedPhotos.append(pin)
+                guard let primaryPin = findPin(uuid: uuid) else { return }
+                guard primaryPin.list != nil else { return } // already top-level, nothing to do
+
+                // If the dragged pin is part of a multi-selection, move all selected pins.
+                var pinsToMove: [PinnedLocationData] = [primaryPin]
+                if selection.contains(primaryPin.persistentModelID) {
+                    for id in selection.ids where id != primaryPin.persistentModelID {
+                        if let p = findPin(byID: id), p.list != nil { pinsToMove.append(p) }
+                    }
+                }
+                for pin in pinsToMove {
+                    detach(pin)
+                    pin.owningProject = project
+                    pin.panelOrder = atTop ? -1 : sidebarItems.count + 1
+                    project.importedPhotos.append(pin)
+                }
                 normalizeOrder()
                 try? modelContext.save()
             }
@@ -676,6 +692,7 @@ private struct ProjectDetailView: View {
     }
 
     var body: some View {
+        ScrollViewReader { listProxy in
         List {
             Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
 
@@ -735,7 +752,11 @@ private struct ProjectDetailView: View {
                         onTap: { shift in handleTap(list.persistentModelID, shift: shift) },
                         onDoubleTap: { handleDoubleTap(list.persistentModelID) },
                         activeListIDs: $activeListIDs,
-                        onFitToList: onFitToList
+                        onFitToList: onFitToList,
+                        onRename: {
+                            renameListText = list.name
+                            renamingList = list
+                        }
                     )
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
                     .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
@@ -838,6 +859,20 @@ private struct ProjectDetailView: View {
                 }
             }
         }
+        .alert("Rename List", isPresented: Binding(
+            get: { renamingList != nil },
+            set: { if !$0 { renamingList = nil } }
+        )) {
+            TextField("List name", text: $renameListText)
+            Button("Rename") {
+                if let list = renamingList, !renameListText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    list.name = renameListText.trimmingCharacters(in: .whitespaces)
+                    try? modelContext.save()
+                }
+                renamingList = nil
+            }
+            Button("Cancel", role: .cancel) { renamingList = nil }
+        }
         .sheet(isPresented: $showAddList) {
             NameEntrySheet(
                 title: "New List in \(project.name)",
@@ -855,6 +890,22 @@ private struct ProjectDetailView: View {
                 showAddList = false
             }
         }
+        .onChange(of: scrollToPinUUID) { _, uuid in
+            guard let uuid,
+                  let pin = findPin(uuid: uuid.uuidString) else { return }
+            // If the pin is inside a list, make sure that list is expanded.
+            if let list = pin.list {
+                expandedListIDs.insert(list.persistentModelID)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    listProxy.scrollTo(pin.persistentModelID, anchor: .center)
+                }
+                selection.ids = [pin.persistentModelID]
+                selection.anchor = pin.persistentModelID
+            }
+        }
+        } // ScrollViewReader
     }
 
     private func importPhotos() {
@@ -950,6 +1001,7 @@ private struct ListRow: View {
     var onDoubleTap: (() -> Void)? = nil
     @Binding var activeListIDs: Set<PersistentIdentifier>
     var onFitToList: (([PinnedLocationData]) -> Void)?
+    var onRename: (() -> Void)? = nil
     @Environment(\.modelContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
@@ -1003,11 +1055,8 @@ private struct ListRow: View {
         .onTapGesture { onTap?(NSEvent.modifierFlags.contains(.shift)) }
         .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
         .contextMenu {
-            Button {
-                if isActive { activeListIDs.remove(list.persistentModelID) }
-                else { activeListIDs.insert(list.persistentModelID) }
-            } label: {
-                Label(isActive ? "Hide on Map" : "Show on Map", systemImage: isActive ? "eye.slash" : "eye")
+            Button { onRename?() } label: {
+                Label("Rename List", systemImage: "pencil")
             }
             if let onFitToList {
                 Button {

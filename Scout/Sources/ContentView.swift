@@ -84,6 +84,7 @@ struct ContentView: View {
     // Rebuilt only when the underlying SwiftData queries or activeListIDs actually change.
     @State private var cachedProjectPins: [(ScoutLocation, String)] = []
     @State private var cachedAllProjectPins: [ScoutLocation] = []
+    @State private var cachedGridSections: [PhotoGridView.Section] = []
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -130,7 +131,8 @@ struct ContentView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                             mapController.revealPins(coords: coords, order: ids, delay: 0.9)
                         }
-                    }
+                    },
+                    scrollToPinUUID: highlightedPinID
                 )
                     .frame(width: 240)
                     .transition(.move(edge: .leading))
@@ -200,6 +202,10 @@ struct ContentView: View {
                 photoViewer.isVisible = true
             }
             if newMode == .map { highlightedPinID = nil }
+            if newMode == .photos {
+                selectedLocation = nil
+                mapController.dismissPopover()
+            }
         }
     }
 
@@ -383,9 +389,10 @@ struct ContentView: View {
             scoutMap
             PhotoGridView(
                 locations: locations,
-                pinnedLocations: cachedAllProjectPins.filter { !$0.images.isEmpty },
+                pinnedSections: cachedGridSections,
                 highlightedLocationID: highlightedPinID,
-                onClearSearchResults: clearSearchResults
+                onClearSearchResults: clearSearchResults,
+                onSelectLocation: { id in highlightedPinID = id }
             )
                 .ignoresSafeArea()
                 .opacity(viewMode == .photos ? 1 : 0)
@@ -460,12 +467,60 @@ struct ContentView: View {
         mapPins += unfiledPins.filter { $0.hasGPS }.map { ($0.asScoutLocation(), Self.generalPinColor) }
         cachedProjectPins = mapPins
 
+        // Flat list kept for places that still need it (annotation building etc.)
         var gridPins: [ScoutLocation] = active.flatMap { $0.pins }.map { $0.asScoutLocation() }
         for project in allProjects {
             gridPins += project.importedPhotos.map { $0.asScoutLocation() }
         }
         gridPins += unfiledPins.map { $0.asScoutLocation() }
         cachedAllProjectPins = gridPins
+
+        // Sectioned grid matching sidebar order: lists inside projects, then unfiled.
+        var sections: [PhotoGridView.Section] = []
+        for project in allProjects.sorted(by: { $0.createdAt < $1.createdAt }) {
+            // Lists inside this project (sidebar panel order).
+            let sortedLists = project.lists.sorted { $0.panelOrder < $1.panelOrder }
+            for list in sortedLists {
+                let locs = list.pins
+                    .sorted { $0.sortOrder < $1.sortOrder }
+                    .map { $0.asScoutLocation() }
+                    .filter { !$0.images.isEmpty }
+                if !locs.isEmpty {
+                    sections.append(PhotoGridView.Section(
+                        title: project.lists.count > 1 ? "\(project.name) — \(list.name)" : project.name,
+                        locations: locs
+                    ))
+                }
+            }
+            // Directly-imported photos (no list).
+            let imported = project.importedPhotos
+                .sorted { $0.sortOrder < $1.sortOrder }
+                .map { $0.asScoutLocation() }
+                .filter { !$0.images.isEmpty }
+            if !imported.isEmpty {
+                let title = project.lists.isEmpty ? project.name : "\(project.name) — Uncategorized"
+                sections.append(PhotoGridView.Section(title: title, locations: imported))
+            }
+        }
+        // Active standalone lists not belonging to any project.
+        for list in active.filter({ $0.project == nil }).sorted(by: { $0.createdAt < $1.createdAt }) {
+            let locs = list.pins
+                .sorted { $0.sortOrder < $1.sortOrder }
+                .map { $0.asScoutLocation() }
+                .filter { !$0.images.isEmpty }
+            if !locs.isEmpty {
+                sections.append(PhotoGridView.Section(title: list.name, locations: locs))
+            }
+        }
+        // Unfiled pins.
+        let unfiled = unfiledPins
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .map { $0.asScoutLocation() }
+            .filter { !$0.images.isEmpty }
+        if !unfiled.isEmpty {
+            sections.append(PhotoGridView.Section(title: "Uncategorized", locations: unfiled))
+        }
+        cachedGridSections = sections
     }
 
     /// Tapping a saved pin in the sidebar selects it on the map and shows its popover —

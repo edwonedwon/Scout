@@ -2,11 +2,19 @@ import SwiftUI
 import ScoutKit
 
 struct PhotoGridView: View {
+    /// A named group of locations forming one visual section in the grid.
+    struct Section {
+        let title: String
+        let locations: [ScoutLocation]
+    }
+
     let locations: [ScoutLocation]
-    var pinnedLocations: [ScoutLocation] = []
+    var pinnedSections: [Section] = []
     /// UUID of the location (== PinnedLocationData.uuid) to scroll to and highlight.
     var highlightedLocationID: UUID? = nil
     var onClearSearchResults: (() -> Void)? = nil
+    /// Called with the location UUID when the user taps a cell (before the carousel opens).
+    var onSelectLocation: ((UUID) -> Void)? = nil
 
     struct PhotoItem: Identifiable {
         let id: Int
@@ -19,8 +27,6 @@ struct PhotoGridView: View {
         var result: [PhotoItem] = []
         var counter = startID
         for loc in locs {
-            // Only show the first photo per location in the grid. The rest are loaded
-            // lazily in the carousel when the user opens it.
             guard let img = loc.images.first else { counter += 1; continue }
             result.append(PhotoItem(id: counter, image: img, location: loc, indexInLocation: 0))
             counter += 1
@@ -29,8 +35,17 @@ struct PhotoGridView: View {
     }
 
     private var searchItems: [PhotoItem] { makeItems(from: locations) }
-    private var pinnedItems: [PhotoItem] { makeItems(from: pinnedLocations, startID: 1_000_000) }
-    private var hasAny: Bool { !searchItems.isEmpty || !pinnedItems.isEmpty }
+    // Build section items with non-overlapping IDs (sections use 0-based, search uses 2M+).
+    private var sectionItems: [(title: String, items: [PhotoItem])] {
+        var counter = 0
+        return pinnedSections.map { section in
+            let items = makeItems(from: section.locations, startID: counter)
+            counter += section.locations.count + 1
+            return (section.title, items)
+        }
+    }
+    private var allPinnedItems: [PhotoItem] { sectionItems.flatMap(\.items) }
+    private var hasAny: Bool { !searchItems.isEmpty || !allPinnedItems.isEmpty }
 
     private let columns = 3
     private let gap: CGFloat = 2
@@ -50,9 +65,12 @@ struct PhotoGridView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
-                            if !pinnedItems.isEmpty {
-                                sectionHeader("Saved Pins")
-                                masonryGrid(items: pinnedItems, colWidth: colWidth)
+                            ForEach(Array(sectionItems.enumerated()), id: \.offset) { _, pair in
+                                if !pair.items.isEmpty {
+                                    sectionHeader(pair.title)
+                                    masonryGrid(items: pair.items, colWidth: colWidth,
+                                                allItems: allPinnedItems + searchItems)
+                                }
                             }
                             if !searchItems.isEmpty {
                                 HStack {
@@ -68,14 +86,15 @@ struct PhotoGridView: View {
                                         .padding(.trailing, 10)
                                     }
                                 }
-                                masonryGrid(items: searchItems, colWidth: colWidth)
+                                masonryGrid(items: searchItems, colWidth: colWidth,
+                                            allItems: allPinnedItems + searchItems)
                             }
                         }
                         .padding(.bottom, 8)
                     }
                     .onChange(of: highlightedLocationID) { _, id in
                         guard let id,
-                              let first = (pinnedItems + searchItems).first(where: { $0.location.id == id })
+                              let first = (allPinnedItems + searchItems).first(where: { $0.location.id == id })
                         else { return }
                         withAnimation(.easeInOut(duration: 0.3)) {
                             proxy.scrollTo(first.id, anchor: .center)
@@ -98,7 +117,8 @@ struct PhotoGridView: View {
             .padding(.bottom, 6)
     }
 
-    private func masonryGrid(items: [PhotoItem], colWidth: CGFloat) -> some View {
+    private func masonryGrid(items: [PhotoItem], colWidth: CGFloat,
+                              allItems: [PhotoItem]) -> some View {
         HStack(alignment: .top, spacing: gap) {
             ForEach(0..<columns, id: \.self) { col in
                 LazyVStack(spacing: gap) {
@@ -108,7 +128,7 @@ struct PhotoGridView: View {
                             item: item,
                             width: colWidth,
                             isHighlighted: highlightedLocationID == item.location.id,
-                            onTap: { openCarousel(from: item) }
+                            onTap: { openCarousel(from: item, universe: allItems) }
                         )
                         .id(item.id)
                     }
@@ -117,16 +137,13 @@ struct PhotoGridView: View {
         }
     }
 
-    private func openCarousel(from item: PhotoItem) {
-        // Build the full ordered universe: pinned locations first, then search locations.
-        // Deduplicate by id so a location that appears in both doesn't get counted twice.
+    private func openCarousel(from item: PhotoItem, universe: [PhotoItem]) {
+        onSelectLocation?(item.location.id)
         var seen = Set<UUID>()
-        let all = (pinnedItems + searchItems).compactMap { i -> ScoutLocation? in
+        let all = universe.compactMap { i -> ScoutLocation? in
             guard seen.insert(i.location.id).inserted else { return nil }
             return i.location
         }
-        // Pass full-res images to the carousel (original file if available, else compressed full).
-        // item.location.images holds thumbnails for the grid; fullResImages has the originals.
         let carouselImages = item.location.fullResImages.isEmpty ? item.location.images : item.location.fullResImages
         PhotoViewerState.shared.show(
             images: carouselImages,
@@ -188,7 +205,10 @@ private struct MasonryCell: View {
 
 #if DEBUG
 #Preview("Photo grid") {
-    PhotoGridView(locations: [.preview], pinnedLocations: [.preview])
-        .frame(width: 700, height: 520)
+    PhotoGridView(
+        locations: [.preview],
+        pinnedSections: [PhotoGridView.Section(title: "Test Project", locations: [.preview])]
+    )
+    .frame(width: 700, height: 520)
 }
 #endif
