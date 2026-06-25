@@ -221,11 +221,8 @@ final class LocationAnnotation: NSObject, MKAnnotation {
 
     #if os(macOS)
     var tintColor: NSColor { tintHex.flatMap { NSColor(hexString: $0) } ?? .systemBlue }
-    /// One color per tag this pin belongs to — drawn as dots on photos, pie slices on dots.
-    var tagColors: [NSColor] { location.tagColorHexes.compactMap { NSColor(hexString: $0) } }
     #else
     var tintColor: UIColor { tintHex.flatMap { UIColor(hexString: $0) } ?? .systemBlue }
-    var tagColors: [UIColor] { location.tagColorHexes.compactMap { UIColor(hexString: $0) } }
     #endif
 }
 
@@ -627,11 +624,6 @@ final class ScoutDotAnnotationView: MKAnnotationView {
         didSet { needsDisplay = true }
     }
 
-    /// One color per tag — rendered as even pie slices. 0–1 colors fall back to a solid dot.
-    var tagColors: [NSColor] = [] {
-        didSet { needsDisplay = true }
-    }
-
     /// Driven by ZoomableMapView's mouseMoved — triggers a ring-pulse redraw.
     var isHovered: Bool = false {
         didSet { guard oldValue != isHovered else { return }; needsDisplay = true }
@@ -684,27 +676,11 @@ final class ScoutDotAnnotationView: MKAnnotationView {
         let rect = bounds.insetBy(dx: inset, dy: inset)
         let oval = NSBezierPath(ovalIn: rect)
 
-        // Fill: solid color for 0–1 tags, an even pie split for 2+.
-        if tagColors.count <= 1 {
-            (tagColors.first ?? dotColor).setFill()
-            oval.fill()
-        } else {
-            let center = CGPoint(x: rect.midX, y: rect.midY)
-            let radius = rect.width / 2
-            let sliceDeg = 360.0 / CGFloat(tagColors.count)
-            for (i, color) in tagColors.enumerated() {
-                let start = 90 - CGFloat(i) * sliceDeg          // first slice starts at top
-                let wedge = NSBezierPath()
-                wedge.move(to: center)
-                wedge.appendArc(withCenter: center, radius: radius,
-                                startAngle: start, endAngle: start - sliceDeg, clockwise: true)
-                wedge.close()
-                color.setFill()
-                wedge.fill()
-            }
-        }
+        // Solid fill.
+        dotColor.setFill()
+        oval.fill()
 
-        // White ring on top frames the dot/pie.
+        // White ring on top frames the dot.
         NSColor.white.withAlphaComponent(isHovered ? 1.0 : 0.9).setStroke()
         oval.lineWidth = ringWidth
         oval.stroke()
@@ -727,8 +703,6 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     /// CALayer used instead of NSImageView so we get contentsGravity = .resizeAspectFill
     /// (fill+crop) which NSImageView cannot do natively.
     private let photoLayer = CALayer()
-    /// Hosts the small per-tag color dots drawn along the bottom edge.
-    private let dotsLayer = CALayer()
     private var loadTask: Task<Void, Never>?
     private var currentScale: CGFloat = 1.0
 
@@ -737,10 +711,6 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     }
     var borderColor: NSColor = .white {
         didSet { guard oldValue != borderColor else { return }; applyBorder() }
-    }
-    /// One color per tag this photo belongs to — rendered as solid dots at the bottom.
-    var tagColors: [NSColor] = [] {
-        didSet { redrawTagDots() }
     }
     private func applyBorder() {
         let ratio = bounds.width / Self.baseSize
@@ -770,40 +740,8 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         photoLayer.cornerRadius = 6
         photoLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         layer?.addSublayer(photoLayer)
-
-        dotsLayer.frame = bounds
-        dotsLayer.zPosition = 1   // above the photo
-        dotsLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        layer?.addSublayer(dotsLayer)
     }
     required init?(coder: NSCoder) { fatalError() }
-
-    /// Draws a centered row of solid color dots along the bottom edge — one per tag.
-    /// Mimics macOS Finder tag dots: small, tight, no border.
-    private func redrawTagDots() {
-        dotsLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
-        guard !tagColors.isEmpty else { return }
-        let s = bounds.width
-        let d = s * 0.16                        // dot diameter
-        let gap = d * 0.25                      // tight gap like Finder
-        let margin = s * 0.10                   // inset from bottom edge
-        let total = CGFloat(tagColors.count) * d + CGFloat(tagColors.count - 1) * gap
-        var x = (s - total) / 2
-        let y = s - d - margin                  // bottom edge (y-down coordinate system)
-        for color in tagColors {
-            let dot = CALayer()
-            dot.frame = CGRect(x: x, y: y, width: d, height: d)
-            dot.cornerRadius = d / 2
-            dot.backgroundColor = color.cgColor
-            // no border — clean solid dots
-            dot.shadowColor = NSColor.black.cgColor
-            dot.shadowOpacity = 0.35
-            dot.shadowRadius = d * 0.15
-            dot.shadowOffset = CGSize(width: 0, height: 0.5)
-            dotsLayer.addSublayer(dot)
-            x += d + gap
-        }
-    }
 
     func reveal() {
         guard let layer else { return }
@@ -839,7 +777,6 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         layer?.shadowRadius = 4 * ratio
         photoLayer.cornerRadius = 6 * ratio
         applyBorder()
-        redrawTagDots()
     }
 
     override func prepareForReuse() {
@@ -849,7 +786,6 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         isHovered = false
         currentScale = 1.0
         photoLayer.contents = nil
-        tagColors = []
     }
 
     func configure(imageURL: URL?) {
@@ -977,7 +913,7 @@ final class MenuAction: NSObject {
 
 struct ScoutMapView {
     @Binding var selection: ScoutLocation?
-    /// Option-click multi-selection of pin location IDs (for batch "Add tag").
+    /// Option-click multi-selection of pin location IDs (for batch move-to-list).
     @Binding var mapSelection: Set<UUID>
     var locations: [ScoutLocation]
     var projectPins: [(ScoutLocation, String)] = []  // (location, colorHex)
@@ -1000,8 +936,8 @@ struct ScoutMapView {
     var pinScale: Double = 1.0
     var availableLists: [LocationListData] = []
     var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
-    /// Right-click "Add tag to N photos" on a multi-selection — opens the tag picker.
-    var onAddTagToSelection: (() -> Void)? = nil
+    /// Right-click "Move N photos to list…" on a multi-selection — opens the move picker.
+    var onMoveSelectionToList: (() -> Void)? = nil
     /// True when the currently-selected location is an already-saved pin — enables drag-to-list.
     var isSelectedPinned: Bool = false
     var boundaryPolygons: [BoundaryPolygon] = []
@@ -1418,19 +1354,19 @@ struct ScoutMapView {
             guard !parent.availableLists.isEmpty, let handler = parent.onSaveToList else { return nil }
             let menu = NSMenu()
 
-            // Multi-selection: one item that opens the tag picker for all selected pins.
+            // Multi-selection: one item that opens the move picker for all selected pins.
             let selectionCount = parent.mapSelection.count
-            if selectionCount >= 2, let addToSelection = parent.onAddTagToSelection {
-                let act = MenuAction { addToSelection() }
+            if selectionCount >= 2, let moveSelection = parent.onMoveSelectionToList {
+                let act = MenuAction { moveSelection() }
                 menuActions.append(act)
-                let item = NSMenuItem(title: "Add tag to \(selectionCount) photos…",
+                let item = NSMenuItem(title: "Move \(selectionCount) photos to list…",
                                       action: #selector(MenuAction.invoke), keyEquivalent: "")
                 item.target = act
                 menu.addItem(item)
                 return menu
             }
 
-            let saveItem = NSMenuItem(title: "Add tag", action: nil, keyEquivalent: "")
+            let saveItem = NSMenuItem(title: "Save to List", action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             for list in parent.availableLists {
                 let act = MenuAction { handler(location, list) }
@@ -1491,7 +1427,6 @@ struct ScoutMapView {
                     ?? ScoutDotAnnotationView(annotation: annotation, reuseIdentifier: id)
                 view.annotation = annotation
                 view.dotColor = .systemBlue
-                view.tagColors = []
                 view.setScale(CGFloat(parent.pinScale))
                 view.displayPriority = .required
                 // Always float above every other pin/photo (hover uses 100, so go far higher).
@@ -1517,7 +1452,6 @@ struct ScoutMapView {
                     // No colored frame normally; blue ring when in the multi-selection.
                     let selected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                     view.borderColor = selected ? .systemBlue : .clear
-                    view.tagColors = ann.tagColors
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {
@@ -1529,7 +1463,6 @@ struct ScoutMapView {
                         ?? ScoutDotAnnotationView(annotation: annotation, reuseIdentifier: ScoutDotAnnotationView.reuseID)
                     view.annotation = annotation
                     view.dotColor = ann.tintColor
-                    view.tagColors = ann.tagColors
                     view.isMultiSelected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                     view.setScale(scale)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {

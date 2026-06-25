@@ -68,40 +68,23 @@ struct LocationCalloutView: View {
                     }
                 }
 
-                // Add tag + current tags
+                // Save to list
                 if !availableLists.isEmpty, let onSave = onSaveToList {
                     Divider()
-                    HStack(spacing: 8) {
-                        Menu {
-                            ForEach(availableLists) { list in
-                                Button {
-                                    onSave(list)
-                                } label: {
-                                    Label(list.name, systemImage: "tag")
-                                }
+                    Menu {
+                        ForEach(availableLists) { list in
+                            Button {
+                                onSave(list)
+                            } label: {
+                                Label(list.name, systemImage: "folder")
                             }
-                        } label: {
-                            Label("Add tag", systemImage: "tag")
-                                .font(.caption.weight(.medium))
                         }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-
-                        // Current tags as colored chips.
-                        ForEach(Array(zip(location.tagNames, location.tagColorHexes).enumerated()), id: \.offset) { _, tag in
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(Color(hexString: tag.1))
-                                    .frame(width: 7, height: 7)
-                                Text(tag.0)
-                                    .font(.caption2.weight(.medium))
-                                    .lineLimit(1)
-                            }
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            .background(Color(hexString: tag.1).opacity(0.16), in: Capsule())
-                        }
+                    } label: {
+                        Label("Save to List", systemImage: "folder")
+                            .font(.caption.weight(.medium))
                     }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
             }
             .padding(.horizontal, 14)

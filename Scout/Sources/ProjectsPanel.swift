@@ -1729,11 +1729,19 @@ struct MoveToListSheet: View {
     @State private var query = ""
     @State private var highlighted = 0
     @FocusState private var fieldFocused: Bool
+    // Use @Query to fetch lists directly from the store so we always see the
+    // live data — reading via project.lists inside a computed property can miss
+    // updates if SwiftData's relationship observation doesn't re-fire on query changes.
+    @Query private var allLists: [LocationListData]
+
+    private var projectLists: [LocationListData] {
+        allLists.filter { $0.project?.persistentModelID == project.persistentModelID }
+    }
 
     private var filtered: [LocationListData] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return project.lists }
-        return project.lists.filter { $0.name.lowercased().contains(q) }
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return projectLists }
+        return projectLists.filter { $0.name.localizedCaseInsensitiveContains(q) }
     }
 
     var body: some View {
@@ -1801,7 +1809,13 @@ struct MoveToListSheet: View {
         }
         .frame(width: 280)
         .fixedSize(horizontal: false, vertical: true)
-        .onAppear { fieldFocused = true; highlighted = 0 }
+        .onAppear {
+            highlighted = 0
+            // Async focus: in a sheet the window isn't key yet during onAppear, so
+            // setting @FocusState synchronously shows a caret but the field never
+            // actually becomes first responder — keystrokes get dropped. Defer it.
+            DispatchQueue.main.async { fieldFocused = true }
+        }
         .onChange(of: query) { highlighted = 0 }
     }
 

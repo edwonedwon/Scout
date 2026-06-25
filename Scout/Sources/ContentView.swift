@@ -730,14 +730,9 @@ struct ContentView: View {
                 ))
             }
         }
-        // Unfiled pins.
-        let unfiled = unfiledPins
-            .sorted { $0.sortOrder < $1.sortOrder }
-            .map { $0.asScoutLocation() }
-            .filter { !$0.images.isEmpty }
-        if !unfiled.isEmpty {
-            sections.append(PhotoGridView.Section(title: "Uncategorized", locations: unfiled))
-        }
+        // unfiledPins (list==nil, owningProject==nil) are orphaned data from old builds.
+        // They have no sidebar entry and no visibility toggle, so exclude from the grid —
+        // the grid must show nothing when no list/uncategorized is visible.
         cachedGridSections = sections
     }
 
@@ -1020,7 +1015,7 @@ struct ContentView: View {
             pinScale: pinSize,
             availableLists: openProjectLists,
             onSaveToList: saveToList,
-            onAddTagToSelection: { if !mapSelection.isEmpty { externalMoveUUIDs = Array(mapSelection) } },
+            onMoveSelectionToList: { if !mapSelection.isEmpty { externalMoveUUIDs = Array(mapSelection) } },
             isSelectedPinned: allPins.contains(where: { $0.uuid == selectedLocation?.id }),
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,
