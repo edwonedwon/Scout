@@ -1,6 +1,17 @@
 import SwiftUI
 import ScoutKit
 
+/// Holds the photo grid's multi-selection as a reference type. Owned by the grid via plain
+/// @State (NOT @StateObject), so mutating it never re-renders the grid body — which would
+/// otherwise recompute the full PhotoItem arrays on every click. Only the visible cells
+/// observe it via @ObservedObject, so selecting (or shift-selecting thousands of) photos
+/// repaints only what's on screen.
+private final class GridSelection: ObservableObject {
+    @Published var ids: Set<UUID> = []
+    var anchor: UUID? = nil
+    func contains(_ id: UUID) -> Bool { ids.contains(id) }
+}
+
 struct PhotoGridView: View {
     /// A named group of locations forming one visual section in the grid.
     struct Section {
@@ -52,8 +63,8 @@ struct PhotoGridView: View {
     private var hasAny: Bool { !searchItems.isEmpty || !allPinnedItems.isEmpty }
 
     @State private var columns = 3
-    @State private var selectedIDs: Set<UUID> = []
-    @State private var anchorID: UUID? = nil
+    // Plain @State so selection changes don't re-run the body (see GridSelection docs).
+    @State private var gridSelection = GridSelection()
     @State private var scrollPositionID: UUID? = nil
     private let gap: CGFloat = 2
 
@@ -146,28 +157,12 @@ struct PhotoGridView: View {
                             item: item,
                             width: colWidth,
                             isHighlighted: highlightedLocationID == item.location.id,
-                            isSelected: selectedIDs.contains(item.location.id),
+                            selection: gridSelection,
                             onTap: { selectItem(item, allItems: allItems) },
                             onDoubleTap: { openCarousel(from: item, universe: allItems) },
-                            dragPayload: item.isPinned ? {
-                                let ids = selectedIDs.contains(item.location.id) && selectedIDs.count > 1
-                                    ? Array(selectedIDs)
-                                    : [item.location.id]
-                                let payload = ids.count == 1
-                                    ? "photo:\(ids[0].uuidString)"
-                                    : "photos:\(ids.map(\.uuidString).joined(separator: ","))"
-                                return NSItemProvider(object: payload as NSString)
-                            } : nil,
                             originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil,
-                            onMakeStack: (item.isPinned && selectedIDs.contains(item.location.id) && selectedIDs.count >= 2)
-                                ? { onMakeStackFromGrid?(Array(selectedIDs)) }
-                                : nil,
-                            onAddToList: item.isPinned ? {
-                                let ids = selectedIDs.contains(item.location.id) && !selectedIDs.isEmpty
-                                    ? Array(selectedIDs)
-                                    : [item.location.id]
-                                onMoveToList?(ids)
-                            } : nil
+                            onMakeStack: onMakeStackFromGrid,
+                            onMoveToList: onMoveToList
                         )
                         .id(item.id)
                     }
@@ -183,19 +178,19 @@ struct PhotoGridView: View {
 
         if option {
             // Option: toggle this item in/out of a disparate selection.
-            if selectedIDs.contains(id) { selectedIDs.remove(id) } else { selectedIDs.insert(id) }
-            anchorID = id
-        } else if shift, let anchor = anchorID {
+            if gridSelection.ids.contains(id) { gridSelection.ids.remove(id) } else { gridSelection.ids.insert(id) }
+            gridSelection.anchor = id
+        } else if shift, let anchor = gridSelection.anchor {
             // Shift: range select from anchor to this item in display order.
             let ids = allItems.map(\.location.id)
             if let a = ids.firstIndex(of: anchor), let b = ids.firstIndex(of: id) {
                 let range = ids[min(a,b)...max(a,b)]
-                selectedIDs = Set(range)
+                gridSelection.ids = Set(range)
             }
         } else {
             // Plain click: single select.
-            selectedIDs = [id]
-            anchorID = id
+            gridSelection.ids = [id]
+            gridSelection.anchor = id
         }
         onSelectLocation?(id)
     }
@@ -226,14 +221,31 @@ private struct MasonryCell: View {
     let item: PhotoGridView.PhotoItem
     let width: CGFloat
     var isHighlighted: Bool = false
-    var isSelected: Bool = false
+    @ObservedObject var selection: GridSelection
     var onTap: (() -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
-    var dragPayload: (() -> NSItemProvider)? = nil
     var originalFilePath: String? = nil
-    var onMakeStack: (() -> Void)? = nil
-    var onAddToList: (() -> Void)? = nil
+    var onMakeStack: (([UUID]) -> Void)? = nil
+    var onMoveToList: (([UUID]) -> Void)? = nil
     @State private var isHovered = false
+
+    private var isSelected: Bool { selection.contains(item.location.id) }
+
+    /// Resolves the UUIDs an action should target: the whole multi-selection if this item
+    /// is part of it, otherwise just this item. Evaluated at action time so it's always current.
+    private func actionIDs() -> [UUID] {
+        selection.contains(item.location.id) && selection.ids.count > 1
+            ? Array(selection.ids)
+            : [item.location.id]
+    }
+
+    private func dragProvider() -> NSItemProvider {
+        let ids = actionIDs()
+        let payload = ids.count == 1
+            ? "photo:\(ids[0].uuidString)"
+            : "photos:\(ids.map(\.uuidString).joined(separator: ","))"
+        return NSItemProvider(object: payload as NSString)
+    }
 
     var body: some View {
         GooglePhotoImage(url: item.image.url) {
@@ -278,8 +290,8 @@ private struct MasonryCell: View {
         }
         .onTapGesture(count: 2) { onDoubleTap?() }
         .onTapGesture { onTap?() }
-        .if(item.isPinned && dragPayload != nil) { view in
-            view.onDrag(dragPayload!, preview: {
+        .if(item.isPinned) { view in
+            view.onDrag(dragProvider, preview: {
                 if let url = item.image.url {
                     DragThumbnail(url: url)
                 } else {
@@ -288,19 +300,19 @@ private struct MasonryCell: View {
             })
         }
         .contextMenu {
-            if let addToList = onAddToList {
-                Button(action: addToList) {
+            if item.isPinned, let onMoveToList {
+                Button { onMoveToList(actionIDs()) } label: {
                     Label("Add to List…", systemImage: "arrow.right.square")
                 }
             }
-            if let makeStack = onMakeStack {
-                Button(action: makeStack) {
+            // Make Stack only when 2+ photos including this one are selected.
+            if item.isPinned, let onMakeStack,
+               selection.contains(item.location.id), selection.ids.count >= 2 {
+                Button { onMakeStack(Array(selection.ids)) } label: {
                     Label("Make Stack", systemImage: "square.3.layers.3d")
                 }
             }
-            if onAddToList != nil || onMakeStack != nil {
-                Divider()
-            }
+            if item.isPinned { Divider() }
             if let path = originalFilePath {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
