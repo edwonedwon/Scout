@@ -63,18 +63,21 @@ public struct ScoutImage: Identifiable, Codable, Hashable {
     public var caption: String
     public var source: ImageSource
     public var dateTaken: Date?
+    /// Counter-clockwise 90° rotation steps to apply when displaying (0–3).
+    public var rotationQuarterTurns: Int
 
     public enum ImageSource: String, Codable {
         case googleMaps, streetView, instagram, youtube, imported, scouting
     }
 
-    public init(id: UUID = UUID(), url: URL? = nil, localPath: String? = nil, caption: String = "", source: ImageSource, dateTaken: Date? = nil) {
+    public init(id: UUID = UUID(), url: URL? = nil, localPath: String? = nil, caption: String = "", source: ImageSource, dateTaken: Date? = nil, rotationQuarterTurns: Int = 0) {
         self.id = id
         self.url = url
         self.localPath = localPath
         self.caption = caption
         self.source = source
         self.dateTaken = dateTaken
+        self.rotationQuarterTurns = rotationQuarterTurns
     }
 }
 

@@ -33,6 +33,8 @@ struct PhotoGridView: View {
     var onMakeStackFromGrid: (([UUID]) -> Void)? = nil
     /// Called with selected UUIDs when "Add to List" is chosen from the grid context menu.
     var onMoveToList: (([UUID]) -> Void)? = nil
+    /// Called with selected UUIDs when "R" is pressed — rotate 90° counter-clockwise.
+    var onRotate: (([UUID]) -> Void)? = nil
     /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
     var originalFilePath: ((UUID) -> String?)? = nil
 
@@ -118,6 +120,16 @@ struct PhotoGridView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.black)
+            // Hidden R-key button: rotate the current selection 90° counter-clockwise.
+            .background {
+                Button("") {
+                    guard !gridSelection.ids.isEmpty else { return }
+                    onRotate?(Array(gridSelection.ids))
+                }
+                .keyboardShortcut("r", modifiers: [])
+                .opacity(0)
+                .allowsHitTesting(false)
+            }
         }
     }
 
@@ -248,7 +260,7 @@ private struct MasonryCell: View {
     }
 
     var body: some View {
-        GooglePhotoImage(url: item.image.url) {
+        GooglePhotoImage(url: item.image.url, rotationQuarterTurns: item.image.rotationQuarterTurns) {
             Color.gray.opacity(0.12)
                 .frame(width: width, height: width * 0.65)
                 .overlay(ProgressView().tint(.white).controlSize(.small))

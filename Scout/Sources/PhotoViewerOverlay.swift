@@ -181,13 +181,18 @@ enum PinPhotoStore {
 /// Async image view backed by `PhotoLoader` (Google header auth + shared cache).
 struct GooglePhotoImage<Placeholder: View>: View {
     let url: URL?
+    /// Counter-clockwise 90° steps applied to the loaded bitmap before display.
+    /// Rotating the bitmap (not the view) keeps the swapped aspect ratio correct
+    /// for layout — masonry sizing and aspect-fit all behave automatically.
+    var rotationQuarterTurns: Int = 0
     let placeholder: () -> Placeholder
 
     @State private var image: ScoutImageType? = nil
     @State private var loadTask: Task<Void, Never>? = nil
 
-    init(url: URL?, @ViewBuilder placeholder: @escaping () -> Placeholder) {
+    init(url: URL?, rotationQuarterTurns: Int = 0, @ViewBuilder placeholder: @escaping () -> Placeholder) {
         self.url = url
+        self.rotationQuarterTurns = rotationQuarterTurns
         self.placeholder = placeholder
     }
 
@@ -206,18 +211,58 @@ struct GooglePhotoImage<Placeholder: View>: View {
         .onAppear { load() }
         .onDisappear { loadTask?.cancel() }
         .onChange(of: url?.absoluteString ?? "") { _, _ in load() }
+        .onChange(of: rotationQuarterTurns) { _, _ in load() }
     }
 
     private func load() {
         loadTask?.cancel()
         guard let url else { image = nil; return }
-        if let cached = PhotoLoader.cached(url) { image = cached; return }
+        if let cached = PhotoLoader.cached(url) {
+            image = cached.rotatedCCW(quarterTurns: rotationQuarterTurns)
+            return
+        }
         image = nil
         loadTask = Task {
             let loaded = await PhotoLoader.load(url)
             guard !Task.isCancelled, let loaded else { return }
-            await MainActor.run { image = loaded }
+            let rotated = loaded.rotatedCCW(quarterTurns: rotationQuarterTurns)
+            await MainActor.run { image = rotated }
         }
+    }
+}
+
+extension ScoutImageType {
+    /// Returns a copy rotated counter-clockwise by `quarterTurns` × 90°.
+    /// `0` returns self unchanged. The returned image has swapped dimensions for odd turns.
+    func rotatedCCW(quarterTurns: Int) -> ScoutImageType {
+        let turns = ((quarterTurns % 4) + 4) % 4
+        guard turns != 0 else { return self }
+        let radians = CGFloat(turns) * (.pi / 2)
+        #if os(macOS)
+        let oldSize = size
+        let swapped = (turns % 2 == 1)
+        let newSize = swapped ? NSSize(width: oldSize.height, height: oldSize.width) : oldSize
+        let result = NSImage(size: newSize)
+        result.lockFocus()
+        let transform = NSAffineTransform()
+        transform.translateX(by: newSize.width / 2, yBy: newSize.height / 2)
+        transform.rotate(byRadians: radians)
+        transform.translateX(by: -oldSize.width / 2, yBy: -oldSize.height / 2)
+        transform.concat()
+        draw(at: .zero, from: NSRect(origin: .zero, size: oldSize), operation: .copy, fraction: 1)
+        result.unlockFocus()
+        return result
+        #else
+        let swapped = (turns % 2 == 1)
+        let newSize = swapped ? CGSize(width: size.height, height: size.width) : size
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { ctx in
+            let c = ctx.cgContext
+            c.translateBy(x: newSize.width / 2, y: newSize.height / 2)
+            c.rotate(by: radians)
+            draw(in: CGRect(x: -size.width / 2, y: -size.height / 2, width: size.width, height: size.height))
+        }
+        #endif
     }
 }
 
@@ -230,6 +275,8 @@ struct PhotoViewerOverlay: View {
     /// Lists available to save into. A nil list means a general (unfiled) pin.
     var availableLists: [LocationListData] = []
     var onSave: ((ScoutLocation, LocationListData?) -> Void)? = nil
+    /// Persists a 90° CCW rotation for the photo at the given file URL (the displayed image).
+    var onRotate: ((URL) -> Void)? = nil
     @State private var justSavedTo: String? = nil
 
     var body: some View {
@@ -265,7 +312,7 @@ struct PhotoViewerOverlay: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         LazyHStack(spacing: 0) {
                             ForEach(Array(viewer.images.enumerated()), id: \.offset) { idx, img in
-                                GooglePhotoImage(url: img.url) {
+                                GooglePhotoImage(url: img.url, rotationQuarterTurns: img.rotationQuarterTurns) {
                                     ProgressView().tint(.white)
                                 }
                                 .aspectRatio(contentMode: .fit)
@@ -374,7 +421,18 @@ struct PhotoViewerOverlay: View {
         .focused($focused)
         .onKeyPress(.leftArrow)  { viewer.previous(); return .handled }
         .onKeyPress(.rightArrow) { viewer.next();     return .handled }
+        .onKeyPress(KeyEquivalent("r")) { rotateCurrent(); return .handled }
         // Escape is handled app-wide in ContentView.handleEscape (carousel → grid).
+    }
+
+    /// Rotates the currently shown photo 90° counter-clockwise: updates the live image so it
+    /// re-renders immediately, then persists the rotation to the model via onRotate.
+    private func rotateCurrent() {
+        guard viewer.images.indices.contains(viewer.selectedIndex) else { return }
+        var img = viewer.images[viewer.selectedIndex]
+        img.rotationQuarterTurns = ((img.rotationQuarterTurns - 1) % 4 + 4) % 4
+        viewer.images[viewer.selectedIndex] = img
+        if let url = img.url { onRotate?(url) }
     }
 
     @ViewBuilder

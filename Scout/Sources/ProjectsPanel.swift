@@ -577,12 +577,17 @@ private struct ProjectDetailView: View {
         _ = provider.loadObject(ofClass: NSString.self) { object, _ in
             guard let dragID = object as? String else { return }
             Task { @MainActor in
-                if dragID.hasPrefix("photos:") {
-                    let uuids = dragID.dropFirst(7).split(separator: ",").map(String.init)
-                    if case .list(let list) = target {
-                        let pins = uuids.compactMap { findPin(uuid: $0) }
-                        pins.forEach { movePinsToList($0, intoList: list) }
-                    }
+                // Grid photo drag(s) onto a list header: move the pin(s) into the list.
+                // Handles both single "photo:<uuid>" and multi "photos:<uuid>,..." payloads,
+                // resolving pins directly (they may live inside another list, so they aren't
+                // top-level sidebar items that handleDrop's resolve() could find).
+                if case .list(let list) = target,
+                   dragID.hasPrefix("photo:") || dragID.hasPrefix("photos:") {
+                    let uuids = dragID.hasPrefix("photos:")
+                        ? dragID.dropFirst(7).split(separator: ",").map(String.init)
+                        : [String(dragID.dropFirst(6))]
+                    let pins = uuids.compactMap { findPin(uuid: $0) }
+                    pins.forEach { movePinsToList($0, intoList: list) }
                 } else {
                     _ = handleDrop(dragID, onto: target)
                 }
@@ -1472,7 +1477,7 @@ private struct PinRow: View {
         if let url {
             // GooglePhotoImage uses PhotoLoader's shared NSCache — thumbnails are decoded
             // once and reused on scroll, unlike AsyncImage which has no cache.
-            GooglePhotoImage(url: url) {
+            GooglePhotoImage(url: url, rotationQuarterTurns: pin.rotationQuarterTurns) {
                 Color.secondary.opacity(0.2)
             }
             .aspectRatio(contentMode: .fill)
@@ -1548,7 +1553,7 @@ private struct StackRow: View {
             ?? pin.photoFiles.first.map { PinPhotoStore.fileURL($0) }
             ?? pin.imageURL.flatMap { URL(string: $0) }
         if let url {
-            GooglePhotoImage(url: url) { Color.secondary.opacity(0.2) }
+            GooglePhotoImage(url: url, rotationQuarterTurns: pin.rotationQuarterTurns) { Color.secondary.opacity(0.2) }
                 .aspectRatio(contentMode: .fill)
         } else {
             RoundedRectangle(cornerRadius: 6)
@@ -1693,6 +1698,11 @@ private struct MoveToListSheet: View {
                     .textFieldStyle(.plain)
                     .focused($fieldFocused)
                     .onSubmit { commit() }
+                    // Arrow/escape handling lives on the TextField so it keeps keyboard
+                    // focus — letters keep flowing into the field to narrow the search.
+                    .onKeyPress(.downArrow) { move( 1); return .handled }
+                    .onKeyPress(.upArrow)   { move(-1); return .handled }
+                    .onKeyPress(.escape)    { onDismiss(); return .handled }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -1745,9 +1755,6 @@ private struct MoveToListSheet: View {
         .fixedSize(horizontal: false, vertical: true)
         .onAppear { fieldFocused = true; highlighted = 0 }
         .onChange(of: query) { highlighted = 0 }
-        .onKeyPress(.downArrow)  { move( 1); return .handled }
-        .onKeyPress(.upArrow)    { move(-1); return .handled }
-        .onKeyPress(.escape)     { onDismiss(); return .handled }
     }
 
     private func move(_ delta: Int) {

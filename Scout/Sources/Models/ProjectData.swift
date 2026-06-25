@@ -108,6 +108,9 @@ final class PinnedLocationData {
     var dateTaken: Date? = nil
     /// When set, this pin is part of a stack. All pins sharing a stackID form one visual unit.
     var stackID: UUID? = nil
+    /// Counter-clockwise 90° rotation steps applied when displaying this photo (0–3).
+    /// Set by the "R" rotate command; baked into every ScoutImage this pin produces.
+    var rotationQuarterTurns: Int = 0
     @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
     /// Set when this pin was imported directly into a project (not inside a list).
     var owningProject: ProjectData? = nil
@@ -136,7 +139,7 @@ final class PinnedLocationData {
     var thumbnailImages: [ScoutImage] {
         let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .imported
         let files = thumbnailFiles.isEmpty ? photoFiles : thumbnailFiles
-        return files.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken) }
+        return files.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken, rotationQuarterTurns: rotationQuarterTurns) }
     }
 
     /// Images for the full-screen carousel.
@@ -150,12 +153,12 @@ final class PinnedLocationData {
             // unlike fileExists which only stats the file (and returns true for
             // sandboxed-but-unreadable paths after user-selected access expires).
             if FileManager.default.isReadableFile(atPath: path) {
-                return [ScoutImage(url: url, source: source, dateTaken: dateTaken)]
+                return [ScoutImage(url: url, source: source, dateTaken: dateTaken, rotationQuarterTurns: rotationQuarterTurns)]
             }
         }
         // Fall back to compressed full-res files.
         if !photoFiles.isEmpty {
-            return photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken) }
+            return photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken, rotationQuarterTurns: rotationQuarterTurns) }
         }
         return []
     }

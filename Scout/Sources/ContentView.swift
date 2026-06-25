@@ -449,6 +449,7 @@ struct ContentView: View {
                     rebuildPinCaches()
                 },
                 onMoveToList: { uuids in externalMoveUUIDs = uuids },
+                onRotate: { uuids in rotatePins(uuids) },
                 originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
                 .ignoresSafeArea()
@@ -456,7 +457,8 @@ struct ContentView: View {
                 .allowsHitTesting(viewMode == .photos)
                 .zIndex(10)
             if photoViewer.isVisible {
-                PhotoViewerOverlay(availableLists: openProjectLists, onSave: savePinned)
+                PhotoViewerOverlay(availableLists: openProjectLists, onSave: savePinned,
+                                   onRotate: { url in rotatePin(forImageURL: url) })
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
                     .zIndex(20)
@@ -546,6 +548,32 @@ struct ContentView: View {
             let listHash = pin.list?.persistentModelID.hashValue ?? 0
             return acc ^ listHash ^ pin.sortOrder ^ pin.panelOrder
         }
+    }
+
+    /// Rotates the given pins 90° counter-clockwise (one quarter-turn) and refreshes caches.
+    private func rotatePins(_ uuids: [UUID]) {
+        let pins = uuids.compactMap { id in allPins.first(where: { $0.uuid == id }) }
+        guard !pins.isEmpty else { return }
+        for pin in pins {
+            pin.rotationQuarterTurns = ((pin.rotationQuarterTurns - 1) % 4 + 4) % 4
+        }
+        try? modelContext.save()
+        rebuildPinCaches()
+    }
+
+    /// Rotates the pin whose photo file matches `url` (used by the carousel's R key).
+    private func rotatePin(forImageURL url: URL) {
+        let path = url.path
+        let pin = allPins.first { pin in
+            if pin.originalFilePath == path { return true }
+            if pin.photoFiles.contains(where: { PinPhotoStore.fileURL($0).path == path }) { return true }
+            if pin.thumbnailFiles.contains(where: { PinPhotoStore.fileURL($0).path == path }) { return true }
+            return false
+        }
+        guard let pin else { return }
+        pin.rotationQuarterTurns = ((pin.rotationQuarterTurns - 1) % 4 + 4) % 4
+        try? modelContext.save()
+        rebuildPinCaches()
     }
 
     private func rebuildPinCaches() {

@@ -19,7 +19,7 @@ struct LocationCalloutView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 3) {
                         ForEach(Array(allImages.prefix(1).enumerated()), id: \.offset) { idx, img in
-                            GooglePhotoImage(url: img.url) {
+                            GooglePhotoImage(url: img.url, rotationQuarterTurns: img.rotationQuarterTurns) {
                                 Rectangle().fill(.quaternary)
                                     .overlay(ProgressView().controlSize(.small))
                             }
