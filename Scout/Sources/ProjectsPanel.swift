@@ -506,9 +506,29 @@ private struct ProjectDetailView: View {
         } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
             // Double-click toggles the list's visibility (eye on/off).
             if activeListIDs.contains(list.persistentModelID) {
+                // Toggling OFF — just hide this one.
                 activeListIDs.remove(list.persistentModelID)
             } else {
-                activeListIDs.insert(list.persistentModelID)
+                // Toggling ON — "solo" this list: hide every OTHER top-level list/folder.
+                // For folders we only flip the top-level gate (add/remove the folder itself);
+                // their nested children keep their own eye state ("don't change the insides").
+                // Find this list's top-level ancestor so we never hide its own parent folder.
+                var topAncestor = list
+                while let parent = topAncestor.parentList { topAncestor = parent }
+                for top in project.lists where top.parentList == nil {
+                    if top.persistentModelID == topAncestor.persistentModelID {
+                        activeListIDs.insert(top.persistentModelID)
+                    } else {
+                        activeListIDs.remove(top.persistentModelID)
+                    }
+                }
+                // Ensure the clicked list and its whole ancestor chain are active so the
+                // folder visibility gate lets it show through.
+                var node: LocationListData? = list
+                while let n = node {
+                    activeListIDs.insert(n.persistentModelID)
+                    node = n.parentList
+                }
             }
         }
     }
