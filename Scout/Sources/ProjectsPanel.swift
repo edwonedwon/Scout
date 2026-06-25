@@ -1083,9 +1083,14 @@ private struct ProjectDetailView: View {
         .onChange(of: scrollToPinUUID) { _, uuid in
             guard let uuid,
                   let pin = findPin(uuid: uuid.uuidString) else { return }
-            // Expand the containing list so the pin row is visible, but don't scroll.
+            // Expand the containing list so the row is visible.
             if let list = pin.list {
                 expandedListIDs.insert(list.persistentModelID)
+            }
+            // Select the row in the sidebar without scrolling.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                selection.ids = [pin.persistentModelID]
+                selection.anchor = pin.persistentModelID
             }
         }
         } // ScrollViewReader

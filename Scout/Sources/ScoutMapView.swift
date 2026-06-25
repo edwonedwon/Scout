@@ -1202,9 +1202,14 @@ struct ScoutMapView {
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? LocationAnnotation else { return }
+            // Blue selection ring — store original border color so we can restore it on deselect.
+            if let photo = view as? ScoutPhotoAnnotationView {
+                photo.borderColor = .systemBlue
+            } else if let dot = view as? ScoutDotAnnotationView {
+                dot.dotColor = .systemBlue
+            }
             DispatchQueue.main.async {
                 self.parent.selection = ann.location
-                // If this is a stack lead, notify ContentView to toggle expansion.
                 if let groupID = ann.location.groupID {
                     self.parent.onStackTapped?(groupID)
                 }
@@ -1215,6 +1220,14 @@ struct ScoutMapView {
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            // Restore the original border/dot color from the annotation's tintHex.
+            if let ann = view.annotation as? LocationAnnotation {
+                if let photo = view as? ScoutPhotoAnnotationView {
+                    photo.borderColor = ann.tintHex?.isEmpty == false ? ann.tintColor : .clear
+                } else if let dot = view as? ScoutDotAnnotationView {
+                    dot.dotColor = ann.tintColor
+                }
+            }
             DispatchQueue.main.async {
                 self.parent.selection = nil
                 self.parent.onMapDeselect?()

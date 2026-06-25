@@ -152,8 +152,10 @@ struct ContentView: View {
 
     @ViewBuilder private var rootLayoutWithSelectionObservers: some View {
         rootLayoutWithSetup
-            // NOTE: selectedLocation change intentionally does NOT set highlightedPinID.
-            // Map annotation clicks should not auto-scroll the sidebar list.
+            .onChange(of: selectedLocation) { _, loc in
+                guard viewMode == .map, let loc else { return }
+                highlightedPinID = loc.id
+            }
             .onChange(of: rightPanelTab) { _, _ in
                 locations = []
                 selectedLocation = nil
