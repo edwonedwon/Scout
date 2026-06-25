@@ -185,7 +185,9 @@ final class PinnedLocationData {
             fullResImages: fullResImages,
             googleMapsURL: googleMapsURLString.flatMap { URL(string: $0) },
             googlePlaceId: googlePlaceId,
-            status: LocationStatus(rawValue: statusRaw) ?? .scouted
+            status: LocationStatus(rawValue: statusRaw) ?? .scouted,
+            // A pin's tags are currently its single list; becomes pin.tags after the tags migration.
+            tagColorHexes: list.map { [$0.colorHex] } ?? []
         )
     }
 }
