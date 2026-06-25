@@ -19,9 +19,9 @@ def draw_icon(size: int) -> Image.Image:
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # --- Background: deep charcoal rounded square ---
-    bg_r = s * 0.22          # macOS icon corner radius proportion
-    bg_col = (22, 24, 30, 255)
+    # --- Background: bright aqua/blue rounded square ---
+    bg_r = s * 0.22
+    bg_col = (0, 195, 210, 255)   # vivid cyan-aqua
     draw.rounded_rectangle([0, 0, s - 1, s - 1], radius=bg_r, fill=bg_col)
 
     # --- Map pin shape (tear-drop) ---
@@ -74,25 +74,12 @@ def draw_icon(size: int) -> Image.Image:
     inner_r = circle_r * 0.30
     cx_f, cy_f = cx, circle_cy
 
-    # Subtle drop shadow for the aperture
-    shadow_off = s * 0.008
     draw2 = ImageDraw.Draw(img)
-    draw2.ellipse(
-        [cx_f - outer_r + shadow_off, cy_f - outer_r + shadow_off,
-         cx_f + outer_r + shadow_off, cy_f + outer_r + shadow_off],
-        fill=(0, 0, 0, 60)
-    )
 
-    # White outer ring
+    # Dark lens circle directly in the pin — no white ring
+    lens_col = (22, 24, 32, 255)
     draw2.ellipse(
         [cx_f - outer_r, cy_f - outer_r, cx_f + outer_r, cy_f + outer_r],
-        fill=(255, 255, 255, 255)
-    )
-
-    # Dark inner circle (the "lens")
-    lens_col = (30, 32, 40, 255)
-    draw2.ellipse(
-        [cx_f - inner_r, cy_f - inner_r, cx_f + inner_r, cy_f + inner_r],
         fill=lens_col
     )
 
