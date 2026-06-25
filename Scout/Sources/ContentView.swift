@@ -98,6 +98,9 @@ struct ContentView: View {
     @State private var cachedGridSections: [PhotoGridView.Section] = []
     /// UUIDs to move when the move sheet is triggered from the grid or M key outside sidebar.
     @State private var externalMoveUUIDs: [UUID] = []
+    // Mirror of the photo grid's current multi-selection, so the "m" Move shortcut can act
+    // on ALL selected photos (the grid owns its selection privately).
+    @State private var gridSelectedUUIDs: Set<UUID> = []
     /// Option-click multi-selection of map pins (location IDs).
     @State private var mapSelection: Set<UUID> = []
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
@@ -483,6 +486,7 @@ struct ContentView: View {
                     }
                 },
                 onMoveToList: { uuids in externalMoveUUIDs = uuids },
+                onSelectionChange: { gridSelectedUUIDs = $0 },
                 onRotate: { uuids in rotatePins(uuids) },
                 originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
@@ -503,6 +507,8 @@ struct ContentView: View {
         .background {
             Button("") {
                 let uuids: [UUID] = {
+                    // In Photos mode, the grid's full multi-selection wins so "m" moves them all.
+                    if viewMode == .photos, !gridSelectedUUIDs.isEmpty { return Array(gridSelectedUUIDs) }
                     // Map option-click multi-selection wins, then highlighted grid/map pin.
                     if !mapSelection.isEmpty { return Array(mapSelection) }
                     if let id = highlightedPinID { return [id] }
@@ -549,6 +555,7 @@ struct ContentView: View {
                         for (i, p) in list.pins.enumerated() { p.sortOrder = i }
                         try? modelContext.save()
                         externalMoveUUIDs = []
+                        gridSelectedUUIDs = []
                         showExternalMoveSheet = false
                     },
                     onDismiss: { externalMoveUUIDs = []; showExternalMoveSheet = false }

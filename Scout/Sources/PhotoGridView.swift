@@ -34,6 +34,9 @@ struct PhotoGridView: View {
     var onDoubleSelectLocation: ((UUID) -> Void)? = nil
     /// Called with selected UUIDs when "Add to List" is chosen from the grid context menu.
     var onMoveToList: (([UUID]) -> Void)? = nil
+    /// Called whenever the grid's multi-selection changes, so the host can drive the
+    /// "m" (move) shortcut with the FULL selection rather than just the last-tapped photo.
+    var onSelectionChange: ((Set<UUID>) -> Void)? = nil
     /// Called with selected UUIDs when "R" is pressed — rotate 90° counter-clockwise.
     var onRotate: (([UUID]) -> Void)? = nil
     /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
@@ -217,6 +220,7 @@ struct PhotoGridView: View {
             gridSelection.anchor = id
         }
         onSelectLocation?(id)
+        onSelectionChange?(gridSelection.ids)
     }
 
     private func openCarousel(from item: PhotoItem, universe: [PhotoItem]) {
