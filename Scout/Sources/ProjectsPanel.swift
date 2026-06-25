@@ -309,11 +309,15 @@ private final class SidebarSelection: ObservableObject {
 private enum SidebarItem: Identifiable {
     case photo(PinnedLocationData)
     case list(LocationListData)
+    /// The virtual "Uncategorized" row — a reorderable, collapsible top-level pseudo-list
+    /// that holds every loose photo (no list). Identified by its owning project.
+    case uncategorized(ProjectData)
 
     var id: PersistentIdentifier {
         switch self {
         case .photo(let p): return p.persistentModelID
         case .list(let l): return l.persistentModelID
+        case .uncategorized(let proj): return proj.persistentModelID
         }
     }
 
@@ -321,6 +325,7 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return p.panelOrder
         case .list(let l): return l.panelOrder
+        case .uncategorized(let proj): return proj.uncategorizedPanelOrder
         }
     }
 
@@ -328,6 +333,7 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return p.createdAt
         case .list(let l): return l.createdAt
+        case .uncategorized: return .distantPast
         }
     }
 
@@ -335,6 +341,7 @@ private enum SidebarItem: Identifiable {
         switch self {
         case .photo(let p): return "photo:\(p.uuid.uuidString)"
         case .list(let l): return "list:\(l.uuid.uuidString)"
+        case .uncategorized: return "uncategorized"
         }
     }
 }
@@ -412,7 +419,8 @@ private struct ProjectDetailView: View {
     @State private var showAddList = false
     @State private var newListName = ""
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
-    @State private var topLevelDropTargeted = false
+    // Whether the Uncategorized pseudo-list is expanded to show its loose photos.
+    @State private var uncategorizedExpanded = false
     @State private var renamingList: LocationListData? = nil
     @State private var renameListText = ""
     @State private var isBackfilling = false
@@ -466,6 +474,11 @@ private struct ProjectDetailView: View {
                 if expandedListIDs.contains(list.persistentModelID) {
                     result.append(contentsOf:
                         list.pins.sorted { $0.sortOrder < $1.sortOrder }.map(\.persistentModelID))
+                }
+            case .uncategorized(let proj):
+                result.append(proj.persistentModelID)
+                if uncategorizedExpanded {
+                    result.append(contentsOf: loosePhotos.map(\.persistentModelID))
                 }
             }
         }
@@ -612,15 +625,23 @@ private struct ProjectDetailView: View {
     }
 
     private func rebuildSidebarItems() {
-        // Each imported photo is its own row (trashed photos are excluded — they live
-        // only in the Trash section at the bottom).
-        let photoItems: [SidebarItem] = project.importedPhotos
-            .filter { $0.deletedAt == nil }
-            .map { .photo($0) }
-        let lists = project.lists.filter { $0.parentList == nil }.map { SidebarItem.list($0) }
-        cachedSidebarItems = (photoItems + lists).sorted {
+        // Top-level rows are the lists/folders plus the virtual "Uncategorized" row, which
+        // holds every loose photo and is itself a reorderable top-level item. Loose photos
+        // are NOT individual top-level rows anymore — they render nested under Uncategorized.
+        var items = project.lists.filter { $0.parentList == nil }.map { SidebarItem.list($0) }
+        if !loosePhotos.isEmpty {
+            items.append(.uncategorized(project))
+        }
+        cachedSidebarItems = items.sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
         }
+    }
+
+    /// This project's live (non-trashed) loose photos — the contents of Uncategorized.
+    private var loosePhotos: [PinnedLocationData] {
+        project.importedPhotos
+            .filter { $0.deletedAt == nil }
+            .sorted { $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt }
     }
 
     // Use cachedSidebarItems everywhere the old sidebarItems was used.
@@ -685,8 +706,9 @@ private struct ProjectDetailView: View {
         // Normalize panelOrder values — only write when stale to avoid cascading updates.
         for (i, item) in cachedSidebarItems.enumerated() {
             switch item {
-            case .photo(let p):          if p.panelOrder != i { p.panelOrder = i }
-            case .list(let l):           if l.panelOrder != i { l.panelOrder = i }
+            case .photo(let p):            if p.panelOrder != i { p.panelOrder = i }
+            case .list(let l):             if l.panelOrder != i { l.panelOrder = i }
+            case .uncategorized(let proj): if proj.uncategorizedPanelOrder != i { proj.uncategorizedPanelOrder = i }
             }
         }
     }
@@ -825,6 +847,28 @@ private struct ProjectDetailView: View {
         try? modelContext.save()
     }
 
+    /// Moves a pin (and any other selected pins) out of its list into Uncategorized (loose).
+    private func moveSelectedPinsToUncategorized(primary: PinnedLocationData) {
+        var pins: [PinnedLocationData] = [primary]
+        if selection.contains(primary.persistentModelID) {
+            for id in selection.ids where id != primary.persistentModelID {
+                if let p = findPin(byID: id) { pins.append(p) }
+            }
+        }
+        for pin in pins { movePinToUncategorized(pin) }
+    }
+
+    /// Detaches a single pin from wherever it lives and makes it a loose (Uncategorized) photo.
+    private func movePinToUncategorized(_ pin: PinnedLocationData) {
+        guard pin.list != nil else { return }   // already loose
+        detach(pin)
+        pin.owningProject = project
+        pin.panelOrder = (loosePhotos.map(\.panelOrder).max() ?? -1) + 1
+        project.importedPhotos.append(pin)
+        normalizeOrder()
+        try? modelContext.save()
+    }
+
     /// Finds a pin anywhere in the project by its PersistentIdentifier.
     private func findPin(byID id: PersistentIdentifier) -> PinnedLocationData? {
         if let p = project.importedPhotos.first(where: { $0.persistentModelID == id }) { return p }
@@ -880,6 +924,9 @@ private struct ProjectDetailView: View {
                 project.importedPhotos.append(pin)
                 normalizeOrder()
                 try? modelContext.save()
+            case .uncategorized:
+                // Dropping a list pin onto Uncategorized removes it from its list.
+                moveSelectedPinsToUncategorized(primary: pin)
             }
             return true
         }
@@ -928,8 +975,9 @@ private struct ProjectDetailView: View {
         items.insert(moving, at: after ? to + 1 : to)
         for (i, item) in items.enumerated() {
             switch item {
-            case .photo(let p):       p.panelOrder = i
-            case .list(let l):        l.panelOrder = i
+            case .photo(let p):            p.panelOrder = i
+            case .list(let l):             l.panelOrder = i
+            case .uncategorized(let proj): proj.uncategorizedPanelOrder = i
             }
         }
         try? modelContext.save()
@@ -1076,6 +1124,9 @@ private struct ProjectDetailView: View {
                     nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) }
                 }
                 return childMatch ? item : nil
+            case .uncategorized:
+                // Keep Uncategorized visible while searching if any loose photo matches.
+                return loosePhotos.contains { nameMatches($0.name) } ? item : nil
             }
         }
     }
@@ -1180,6 +1231,16 @@ private struct ProjectDetailView: View {
 
     @MainActor
     private func dispatchRowDrop(dragID: String, target: SidebarItem, mode: DropMode) {
+        // Drop photos/pins onto the Uncategorized row → remove them from their list (loose).
+        if case .uncategorized = target,
+           dragID.hasPrefix("photo:") || dragID.hasPrefix("photos:") || dragID.hasPrefix("pin:") {
+            let uuids: [String]
+            if dragID.hasPrefix("photos:") { uuids = dragID.dropFirst(7).split(separator: ",").map(String.init) }
+            else if dragID.hasPrefix("photo:") { uuids = [String(dragID.dropFirst(6))] }
+            else { uuids = [String(dragID.dropFirst(4))] }
+            for pin in uuids.compactMap({ findPin(uuid: $0) }) { movePinToUncategorized(pin) }
+            return
+        }
         // Nest-into a list.
         if mode == .into, case .list(let folder) = target {
             // Dragged list → nest as a child folder.
@@ -1216,6 +1277,116 @@ private struct ProjectDetailView: View {
             node = n.parentList
         }
         return false
+    }
+
+    /// The Uncategorized pseudo-list row + its loose photos. Behaves like a normal list:
+    /// collapsible, reorderable among top-level rows, eye toggle. It can't be nested into a
+    /// folder, always holds the project's loose photos, and is the default import target.
+    @ViewBuilder
+    private func uncategorizedSection(_ proj: ProjectData, itemID: PersistentIdentifier) -> some View {
+        let searching = !trimmedSearch.isEmpty
+        let isExpanded = searching || uncategorizedExpanded
+        let photos = searching ? loosePhotos.filter { nameMatches($0.name) } : loosePhotos
+
+        HStack(spacing: 6) {
+            Button { uncategorizedExpanded.toggle() } label: {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 28, height: 32).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Image(systemName: "tray.full")
+                .font(.caption).foregroundStyle(.secondary).frame(width: 14)
+            Text("Uncategorized").font(.callout)
+            Spacer()
+            Text("\(loosePhotos.count)").font(.caption).foregroundStyle(.secondary)
+            Button {
+                let pid = proj.persistentModelID
+                if currentModifierFlags().option {
+                    setProjectVisibility(!uncategorizedVisible)
+                } else if uncategorizedVisible {
+                    hiddenUncategorizedProjectIDs.insert(pid)
+                } else {
+                    hiddenUncategorizedProjectIDs.remove(pid)
+                }
+            } label: {
+                Image(systemName: uncategorizedVisible ? "eye.fill" : "eye")
+                    .font(.caption)
+                    .foregroundStyle(uncategorizedVisible ? Color.accentColor : .secondary)
+                    .frame(width: 28, height: 32).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Show/hide uncategorized photos on the map and grid (⌥ toggles everything)")
+        }
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            searchFieldFocused = false
+            onClearPin?()
+            onFitToList?(loosePhotos.filter { $0.hasGPS })
+        }
+        .background { rowHeightReader(itemID) }
+        .overlay { dropIndicator(for: itemID) }
+        .onDrag { NSItemProvider(object: "uncategorized" as NSString) }
+        .onDrop(of: [.text, .fileURL, .image],
+                delegate: SidebarRowDropDelegate(
+                    targetID: itemID,
+                    allowNest: false,
+                    height: { rowHeights[itemID] ?? 36 },
+                    onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                    onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                    onPerform: { mode, providers in performRowDrop(target: .uncategorized(proj), mode: mode, providers: providers) }
+                ))
+
+        if isExpanded {
+            ForEach(photos) { pin in
+                PinRow(
+                    pin: pin,
+                    selection: selection,
+                    onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
+                    onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
+                )
+                .padding(.leading, 24)
+                .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+                .contextMenu {
+                    let multi = isInMultiSelection(pin.persistentModelID)
+                    #if os(macOS)
+                    if let path = pin.originalFilePath {
+                        Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
+                            Label("Reveal in Finder", systemImage: "folder")
+                        }
+                        Divider()
+                    }
+                    #endif
+                    Button(role: .destructive) {
+                        if multi { deleteSelectedItems() } else { deletePin(pin) }
+                    } label: {
+                        Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
+                    }
+                }
+                .onDrag { NSItemProvider(object: "photo:\(pin.uuid.uuidString)" as NSString) }
+                .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
+                    tryImportDrop(providers, into: nil) || loadDropPinToUncategorized(providers)
+                }
+            }
+        }
+    }
+
+    /// Loads a drag payload and moves the dragged pin(s) into Uncategorized (loose photos).
+    private func loadDropPinToUncategorized(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return false }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let dragID = object as? String else { return }
+            Task { @MainActor in
+                let uuids: [String]
+                if dragID.hasPrefix("photos:") { uuids = dragID.dropFirst(7).split(separator: ",").map(String.init) }
+                else if dragID.hasPrefix("photo:") { uuids = [String(dragID.dropFirst(6))] }
+                else if dragID.hasPrefix("pin:") { uuids = [String(dragID.dropFirst(4))] }
+                else { return }
+                for pin in uuids.compactMap({ findPin(uuid: $0) }) { movePinToUncategorized(pin) }
+            }
+        }
+        return true
     }
 
     /// One child-list row inside a folder, with drag-to-reorder and its pin expansion.
@@ -1291,62 +1462,6 @@ private struct ProjectDetailView: View {
         VStack(spacing: 0) {
         sidebarSearchField
         List {
-            // Drop zone: drag any list pin here to move it to the top-level project.
-            HStack(spacing: 6) {
-                Image(systemName: "tray.and.arrow.up")
-                    .font(.caption)
-                Text("Drop here to remove from list")
-                    .font(.caption)
-            }
-            .foregroundStyle(topLevelDropTargeted ? Color.accentColor : Color.secondary.opacity(0.5))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 6)
-            .padding(.horizontal, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(topLevelDropTargeted ? Color.accentColor : Color.secondary.opacity(0.3),
-                            style: StrokeStyle(lineWidth: 1, dash: [4]))
-                    .padding(.horizontal, 4)
-            )
-            .listRowBackground(Color.clear)
-            .onDrop(of: [.text, .fileURL, .image], isTargeted: $topLevelDropTargeted) { providers in
-                tryImportDrop(providers, into: nil) || loadDropToTopLevel(providers, atTop: true)
-            }
-
-            // Visibility toggle for this project's uncategorized (loose) photos.
-            if !project.importedPhotos.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "tray.full")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28)
-                    Text("Uncategorized")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button {
-                        let pid = project.persistentModelID
-                        if currentModifierFlags().option {
-                            setProjectVisibility(!uncategorizedVisible)
-                        } else if uncategorizedVisible {
-                            hiddenUncategorizedProjectIDs.insert(pid)
-                        } else {
-                            hiddenUncategorizedProjectIDs.remove(pid)
-                        }
-                    } label: {
-                        Image(systemName: uncategorizedVisible ? "eye.fill" : "eye")
-                            .font(.caption)
-                            .foregroundStyle(uncategorizedVisible ? Color.accentColor : .secondary)
-                            .frame(width: 28, height: 32)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show/hide uncategorized photos on the map and grid (⌥ toggles everything)")
-                }
-                .padding(.horizontal, 4)
-                .listRowBackground(Color.clear)
-            }
-
             ForEach(displayedItems) { item in
                 switch item {
                 case .photo(let pin):
@@ -1463,6 +1578,8 @@ private struct ProjectDetailView: View {
                             }
                         }
                     }
+                case .uncategorized(let proj):
+                    uncategorizedSection(proj, itemID: item.id)
                 }
             }
 

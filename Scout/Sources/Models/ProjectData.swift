@@ -11,6 +11,9 @@ final class ProjectData {
     var notes: String
     var createdAt: Date
     var uuid: UUID = UUID()
+    /// Sidebar order of the virtual "Uncategorized" row, in the same namespace as each
+    /// top-level list's panelOrder. Lets Uncategorized be dragged among the lists.
+    var uncategorizedPanelOrder: Int = 0
     @Relationship(deleteRule: .cascade, inverse: \LocationListData.project) var lists: [LocationListData] = []
     /// Photos imported directly into this project (not inside any list).
     @Relationship(deleteRule: .cascade, inverse: \PinnedLocationData.owningProject)
