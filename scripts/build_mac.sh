@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="${1:-$HOME/Applications}"
+OUT_DIR="${1:-/Applications}"
 BUILD_DIR="$PROJECT_ROOT/.build/mac"
 
 echo "▶ Building Scout (macOS, Debug)…"
@@ -19,7 +19,6 @@ xcodebuild \
     DEVELOPMENT_TEAM=2J8M8Z4QCX \
     CODE_SIGN_STYLE=Automatic \
     CODE_SIGN_IDENTITY="Apple Development" \
-    | xcpretty --simple 2>/dev/null || cat  # fall back to raw output if xcpretty absent
 
 APP_PATH=$(find "$BUILD_DIR/Build/Products/Debug" -maxdepth 1 -name "*.app" | head -1)
 

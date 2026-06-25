@@ -39,11 +39,9 @@ struct ScoutApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if apiKeyState.anthropicKeyIsSet {
-                ContentView()
-            } else {
-                APIKeySetupView()
-            }
+            // No onboarding gate — open straight into the app. The Anthropic key (and any
+            // other keys) can be set anytime in Settings; AI features prompt if it's missing.
+            ContentView()
         }
         .environmentObject(apiKeyState)
         .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self])
