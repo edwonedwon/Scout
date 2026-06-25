@@ -197,6 +197,10 @@ struct ContentView: View {
                 rebuildPinCaches()
             }
             .onChange(of: hiddenUncategorizedProjectIDs) { _, _ in rebuildPinCaches() }
+            // Switching projects loads that project's own saved region filters.
+            .onChange(of: openProjectUUID) { _, _ in loadSavedRegions() }
+            // Persist whenever a region is added, toggled, or removed.
+            .onChange(of: savedRegions) { _, _ in persistSavedRegions() }
     }
 
     /// Sidebar width clamped to the current debug min/max, so changing the limits never
@@ -286,6 +290,7 @@ struct ContentView: View {
 
     private func setupOnAppear() {
         rebuildPinCaches()
+        loadSavedRegions()   // restore this project's region filters
         locations = []
         modelContext.undoManager = undoManager
         locationManager.requestIfNeeded()
@@ -1224,6 +1229,37 @@ struct ContentView: View {
         isRegionSearching = false
     }
 
+    // MARK: - Per-project saved-region persistence
+
+    /// UserDefaults key for the currently open project's saved regions. Returns nil when no
+    /// project is open (regions are project-scoped — different projects keep different filters).
+    private var savedRegionsKey: String? {
+        openProjectUUID.isEmpty ? nil : "regions.\(openProjectUUID)"
+    }
+
+    /// Loads the open project's saved regions from UserDefaults and applies the active ones.
+    private func loadSavedRegions() {
+        guard let key = savedRegionsKey,
+              let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([SavedRegion].self, from: data) else {
+            savedRegions = []
+            applyActiveRegions()
+            return
+        }
+        savedRegions = decoded
+        applyActiveRegions()
+    }
+
+    /// Persists the current saved regions under the open project's key.
+    private func persistSavedRegions() {
+        guard let key = savedRegionsKey else { return }
+        if savedRegions.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else if let data = try? JSONEncoder().encode(savedRegions) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
     /// Syncs active saved regions → searchArea polygon + boundary polygon cache.
     private func applyActiveRegions() {
         let active = savedRegions.filter(\.isActive)
@@ -1577,14 +1613,47 @@ struct ContentView: View {
 
 // MARK: - Saved region model
 
-struct SavedRegion: Identifiable, Equatable {
-    let id = UUID()
+struct SavedRegion: Identifiable, Equatable, Codable {
+    var id = UUID()
     var name: String
     var polygon: [CLLocationCoordinate2D]
     var isActive: Bool
 
+    init(name: String, polygon: [CLLocationCoordinate2D], isActive: Bool) {
+        self.name = name
+        self.polygon = polygon
+        self.isActive = isActive
+    }
+
     static func == (lhs: SavedRegion, rhs: SavedRegion) -> Bool {
         lhs.id == rhs.id && lhs.isActive == rhs.isActive
+    }
+
+    // CLLocationCoordinate2D isn't Codable, so the polygon is stored as a flat
+    // [lat, lng, lat, lng, …] array for persistence.
+    enum CodingKeys: String, CodingKey { case id, name, polygon, isActive }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        name = try c.decode(String.self, forKey: .name)
+        isActive = try c.decode(Bool.self, forKey: .isActive)
+        let flat = (try? c.decode([Double].self, forKey: .polygon)) ?? []
+        var coords: [CLLocationCoordinate2D] = []
+        var i = 0
+        while i + 1 < flat.count {
+            coords.append(.init(latitude: flat[i], longitude: flat[i + 1]))
+            i += 2
+        }
+        polygon = coords
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(isActive, forKey: .isActive)
+        try c.encode(polygon.flatMap { [$0.latitude, $0.longitude] }, forKey: .polygon)
     }
 }
 
