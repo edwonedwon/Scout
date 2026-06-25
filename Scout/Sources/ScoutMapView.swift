@@ -552,7 +552,14 @@ final class ZoomableMapView: MKMapView {
         (av as? ScoutDotAnnotationView)?.isHovered = hover
         if let photo = av as? ScoutPhotoAnnotationView {
             photo.isHovered = hover
-            photo.layer?.zPosition = hover ? 60 : 0   // float the hovered photo above overlaps
+            // Raise the NSView in its parent (view-tree order) AND set CALayer zPosition
+            // so the hovered photo is unambiguously above all siblings.
+            if hover {
+                photo.layer?.zPosition = 100
+                photo.superview?.addSubview(photo)   // moves to last (topmost) sibling
+            } else {
+                photo.layer?.zPosition = 0
+            }
         }
     }
 
@@ -943,6 +950,10 @@ struct ScoutMapView {
                 default: break
                 }
             }
+            // Also resize the user location dot so it matches other pins.
+            if let userLocView = map.view(for: map.userLocation) as? ScoutDotAnnotationView {
+                userLocView.setScale(scale)
+            }
             #endif
         }
         coord.lastPinScale = pinScale
@@ -1150,7 +1161,9 @@ struct ScoutMapView {
             let bucket = spanKm < 80 ? 0 : 1
             if bucket != lastSpanKmBucket {
                 lastSpanKmBucket = bucket
-                // Recycle only visible annotations to avoid touching all 1000+.
+                // Update the stable flag BEFORE recycling so every viewFor: call in this
+                // batch sees the same decision — prevents mixed photo/dot states.
+                currentShowPhotoSpan = (bucket == 0)
                 let visible: [LocationAnnotation] = mapView.annotations(in: mapView.visibleMapRect)
                     .compactMap { $0 as? LocationAnnotation }
                 if !visible.isEmpty {
@@ -1297,8 +1310,22 @@ struct ScoutMapView {
         var lastPhotoAnnotationsMode: Bool = false
         var lastPinScale: Double = 1.0
         var lastSpanKmBucket: Int = 0   // tracks coarse zoom bucket to trigger photo↔dot swap
+        /// Stable show-photo decision used by viewFor: — set in regionDidChangeAnimated BEFORE
+        /// the recycle pass so every view created in that batch sees the same value.
+        var currentShowPhotoSpan: Bool = true
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            // User location: render as a standard blue dot at the same scale as other pins.
+            if annotation is MKUserLocation {
+                let id = "userLocationDot"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: id) as? ScoutDotAnnotationView)
+                    ?? ScoutDotAnnotationView(annotation: annotation, reuseIdentifier: id)
+                view.annotation = annotation
+                view.dotColor = .systemBlue
+                view.setScale(CGFloat(parent.pinScale))
+                view.displayPriority = .required
+                return view
+            }
             if let ann = annotation as? LocationAnnotation {
                 #if os(macOS)
                 let scale = CGFloat(parent.pinScale)
@@ -1306,15 +1333,17 @@ struct ScoutMapView {
                 // Suppress photo loading when zoomed far out — loading hundreds of
                 // thumbnail images simultaneously tanks frame rate. Switch to dots below
                 // ~10 km span; photos look like blobs at that scale anyway.
-                let spanKm = mapView.region.span.latitudeDelta * 111
+                // Use the stable flag set in regionDidChangeAnimated — NOT live span —
+                // so every view created in one batch sees the same photo/dot decision.
                 let showPhoto = parent.showPhotoAnnotations
                     && ann.location.images.first?.url != nil
-                    && spanKm < 80
+                    && currentShowPhotoSpan
                 if showPhoto {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutPhotoAnnotationView.reuseID) as? ScoutPhotoAnnotationView)
                         ?? ScoutPhotoAnnotationView(annotation: annotation, reuseIdentifier: ScoutPhotoAnnotationView.reuseID)
                     view.annotation = annotation
-                    view.borderColor = ann.tintColor
+                    // Empty tintHex = uncategorized pin → no border
+                    view.borderColor = ann.tintHex?.isEmpty == false ? ann.tintColor : .clear
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {

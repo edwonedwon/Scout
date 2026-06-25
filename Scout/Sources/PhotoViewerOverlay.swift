@@ -475,7 +475,7 @@ struct PhotoViewerOverlay: View {
     }
 
     private func listLabel(_ list: LocationListData) -> String {
-        list.project.map { "\($0.name) › \(list.name)" } ?? list.name
+        list.name
     }
 
     private func flashSaved(_ name: String) {

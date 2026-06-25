@@ -150,10 +150,8 @@ struct ContentView: View {
 
     @ViewBuilder private var rootLayoutWithSelectionObservers: some View {
         rootLayoutWithSetup
-            .onChange(of: selectedLocation) { _, loc in
-                guard viewMode == .map, let loc else { return }
-                highlightedPinID = loc.id
-            }
+            // NOTE: selectedLocation change intentionally does NOT set highlightedPinID.
+            // Map annotation clicks should not auto-scroll the sidebar list.
             .onChange(of: rightPanelTab) { _, _ in
                 locations = []
                 selectedLocation = nil
@@ -427,6 +425,19 @@ struct ContentView: View {
                 highlightedLocationID: highlightedPinID,
                 onClearSearchResults: clearSearchResults,
                 onSelectLocation: { id in highlightedPinID = id },
+                onDoubleSelectLocation: { id in
+                    if let pin = allPins.first(where: { $0.uuid == id }) {
+                        openInCarousel(pin)
+                    }
+                },
+                onMakeStackFromGrid: { uuids in
+                    let pins = uuids.compactMap { id in allPins.first(where: { $0.uuid == id }) }
+                    guard pins.count >= 2 else { return }
+                    let stackID = UUID()
+                    for pin in pins { pin.stackID = stackID }
+                    try? modelContext.save()
+                    rebuildPinCaches()
+                },
                 originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
                 .ignoresSafeArea()
@@ -500,7 +511,7 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    private static let generalPinColor = "#E53935"   // red for unfiled pins
+    private static let generalPinColor = ""   // empty = no border for uncategorized pins
 
     /// Changes whenever any pin's list membership or sort order changes, even when total
     /// counts are unchanged — used to trigger a grid rebuild after drag-reorder.
@@ -518,11 +529,33 @@ struct ContentView: View {
         }
         for project in allProjects {
             var seenStacks: Set<UUID> = []
+            // Pre-group expanded stack members so we can index them for radial spread.
+            let expandedMembers: [UUID: [PinnedLocationData]] = {
+                guard let sid = expandedStackID else { return [:] }
+                let members = project.importedPhotos.filter { $0.stackID == sid && $0.hasGPS }
+                    .sorted { $0.sortOrder < $1.sortOrder }
+                return members.isEmpty ? [:] : [sid: members]
+            }()
             for pin in project.importedPhotos where pin.hasGPS {
                 if let sid = pin.stackID {
-                    if sid == expandedStackID {
-                        // Stack is expanded — show every member individually.
-                        mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
+                    if sid == expandedStackID, let members = expandedMembers[sid] {
+                        // Spread members in a small circle so pins don't stack on one point.
+                        let idx = members.firstIndex(where: { $0.uuid == pin.uuid }) ?? 0
+                        let count = members.count
+                        let spreadMeters: Double = count > 1 ? 8.0 : 0
+                        let angle = (2 * Double.pi / Double(count)) * Double(idx)
+                        let dLat = (spreadMeters / 111_000) * cos(angle)
+                        let dLng = (spreadMeters / (111_000 * cos(pin.latitude * .pi / 180))) * sin(angle)
+                        var loc = pin.asScoutLocation()
+                        let coord = CLLocationCoordinate2D(latitude: loc.coordinate.latitude + dLat,
+                                                           longitude: loc.coordinate.longitude + dLng)
+                        loc = ScoutLocation(id: loc.id, name: loc.name, description: loc.description,
+                                            coordinate: coord, groupID: loc.groupID,
+                                            sourceURL: loc.sourceURL, images: loc.images,
+                                            fullResImages: loc.fullResImages,
+                                            googleMapsURL: loc.googleMapsURL,
+                                            googlePlaceId: loc.googlePlaceId)
+                        mapPins.append((loc, Self.generalPinColor))
                     } else {
                         // Stack is collapsed — only show the lead pin once.
                         guard seenStacks.insert(sid).inserted else { continue }

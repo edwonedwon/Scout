@@ -358,7 +358,7 @@ private struct ProjectDetailView: View {
     // Selection lives in a reference-type model owned via plain @State (not @StateObject),
     // so changing it never re-renders this view or rebuilds the row list. Only the visible
     // rows observe it, so shift-selecting thousands of off-screen rows is instant.
-    @State private var selection = SidebarSelection()
+    @StateObject private var selection = SidebarSelection()
     // Cached sidebar items — rebuilt only when photos/lists actually change,
     // not on every render triggered by selection or scroll state.
     @State private var cachedSidebarItems: [SidebarItem] = []
@@ -469,9 +469,8 @@ private struct ProjectDetailView: View {
             onSelectPin?(pin)
         }
 
-        withAnimation(.easeInOut(duration: 0.2)) {
-            listProxyHolder?.scrollTo(targetID, anchor: .center)
-        }
+        // .none anchor: only scrolls enough to make the row visible; doesn't re-center.
+        listProxyHolder?.scrollTo(targetID, anchor: .none)
     }
 
     private func rebuildSidebarItems() {
@@ -808,7 +807,7 @@ private struct ProjectDetailView: View {
 
     /// Groups selected top-level photos into a stack (shared stackID).
     private func makeStack(from ids: Set<PersistentIdentifier>) {
-        let pins = ids.compactMap { findPin(byID: $0) }.filter { $0.list == nil }
+        let pins = ids.compactMap { findPin(byID: $0) }
         guard pins.count >= 2 else { return }
         let stackID = UUID()
         for pin in pins { pin.stackID = stackID }
@@ -857,7 +856,7 @@ private struct ProjectDetailView: View {
                 case .photo(let pin):
                     PinRow(
                         pin: pin,
-                        selection: selection,
+                        isSelected: selection.contains(pin.persistentModelID),
                         onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
                         onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
                     )
@@ -889,7 +888,7 @@ private struct ProjectDetailView: View {
                     StackRow(
                         lead: lead,
                         members: members,
-                        selection: selection,
+                        isSelected: selection.contains(lead.persistentModelID),
                         onTap: { shift, option in handleTap(lead.persistentModelID, shift: shift, option: option) },
                         onDoubleTap: { onOpenCarousel?(lead) }
                     )
@@ -913,7 +912,7 @@ private struct ProjectDetailView: View {
                     ListRow(
                         list: list,
                         isExpanded: isExpanded,
-                        selection: selection,
+                        isSelected: selection.contains(list.persistentModelID),
                         onToggleExpand: {
                             if isExpanded { expandedListIDs.remove(list.persistentModelID) }
                             else { expandedListIDs.insert(list.persistentModelID) }
@@ -944,7 +943,7 @@ private struct ProjectDetailView: View {
                         ForEach(pins) { pin in
                             PinRow(
                                 pin: pin,
-                                selection: selection,
+                                isSelected: selection.contains(pin.persistentModelID),
                                 listColor: Color(hexString: list.colorHex),
                                 onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
                                 onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
@@ -953,6 +952,12 @@ private struct ProjectDetailView: View {
                             .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
                             .contextMenu {
                                 let multi = isInMultiSelection(pin.persistentModelID)
+                                if multi && selectedPhotoCount >= 2 {
+                                    Button { makeStack(from: selection.ids) } label: {
+                                        Label("Make Stack", systemImage: "square.3.layers.3d")
+                                    }
+                                    Divider()
+                                }
                                 Button(role: .destructive) {
                                     if multi { deleteSelectedItems() } else { deletePin(pin) }
                                 } label: {
@@ -1058,7 +1063,10 @@ private struct ProjectDetailView: View {
             ) { name in
                 let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
                 let list = LocationListData(name: name, colorHex: colorHex)
-                list.panelOrder = sidebarItems.count
+                // Shift every existing item down to make room at the top.
+                for existing in project.lists { existing.panelOrder += 1 }
+                project.importedPhotos.forEach { $0.panelOrder += 1 }
+                list.panelOrder = 0
                 modelContext.insert(list)
                 list.project = project
                 project.lists.append(list)
@@ -1076,7 +1084,7 @@ private struct ProjectDetailView: View {
             // Wait long enough for SwiftUI to insert the newly-expanded rows before scrolling.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 withAnimation(.easeInOut(duration: 0.3)) {
-                    listProxy.scrollTo(pin.persistentModelID, anchor: .center)
+                    listProxy.scrollTo(pin.persistentModelID, anchor: .none)
                 }
                 selection.ids = [pin.persistentModelID]
                 selection.anchor = pin.persistentModelID
@@ -1214,7 +1222,7 @@ private struct ProjectDetailView: View {
 private struct ListRow: View {
     let list: LocationListData
     let isExpanded: Bool
-    @ObservedObject var selection: SidebarSelection
+    var isSelected: Bool = false
     let onToggleExpand: () -> Void
     var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
@@ -1230,7 +1238,6 @@ private struct ListRow: View {
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
     private var listColor: Color { Color(hexString: list.colorHex) }
-    private var isSelected: Bool { selection.contains(list.persistentModelID) }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1332,12 +1339,10 @@ private struct OptionalDrag: ViewModifier {
 
 private struct PinRow: View {
     let pin: PinnedLocationData
-    @ObservedObject var selection: SidebarSelection
+    var isSelected: Bool = false
     var listColor: Color? = nil
     var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
-
-    private var isSelected: Bool { selection.contains(pin.persistentModelID) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1413,11 +1418,9 @@ private struct PinRow: View {
 private struct StackRow: View {
     let lead: PinnedLocationData
     let members: [PinnedLocationData]
-    @ObservedObject var selection: SidebarSelection
+    var isSelected: Bool = false
     var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
-
-    private var isSelected: Bool { selection.contains(lead.persistentModelID) }
 
     var body: some View {
         HStack(spacing: 10) {
