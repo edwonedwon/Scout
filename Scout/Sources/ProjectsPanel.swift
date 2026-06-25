@@ -606,6 +606,37 @@ private struct ProjectDetailView: View {
         rebuildSidebarItems()
     }
 
+    /// Drop handler for child-list rows inside a folder.
+    private func performChildDrop(_ providers: [NSItemProvider], folder: LocationListData,
+                                   target: LocationListData, after: Bool) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return false }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let dragID = object as? String, dragID.hasPrefix("list:") else { return }
+            let uuid = String(dragID.dropFirst(5))
+            Task { @MainActor in
+                guard let dragged = folder.childLists.first(where: { $0.uuid.uuidString == uuid }) else { return }
+                reorderChild(dragged, in: folder, before: target, after: after)
+            }
+        }
+        return true
+    }
+
+    /// Reorders a child list within its folder — same pattern as `reorder(_:before:after:)`
+    /// but scoped to the folder's `childLists` array.
+    private func reorderChild(_ dragged: LocationListData, in folder: LocationListData,
+                               before target: LocationListData, after: Bool) {
+        var children = folder.childLists.sorted {
+            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+        }
+        guard let from = children.firstIndex(where: { $0.persistentModelID == dragged.persistentModelID }),
+              dragged.persistentModelID != target.persistentModelID else { return }
+        let moving = children.remove(at: from)
+        guard let to = children.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) else { return }
+        children.insert(moving, at: after ? to + 1 : to)
+        for (i, child) in children.enumerated() { child.panelOrder = i }
+        try? modelContext.save()
+    }
+
 
     /// Assigns sequential panelOrder values. Debounced so rapid imports (200 photos)
     /// don't fire 200 consecutive full-list writes.
@@ -1147,6 +1178,73 @@ private struct ProjectDetailView: View {
         return false
     }
 
+    /// One child-list row inside a folder, with drag-to-reorder and its pin expansion.
+    @ViewBuilder
+    private func childListRow(_ child: LocationListData, folder: LocationListData) -> some View {
+        let childExpanded = expandedListIDs.contains(child.persistentModelID)
+        ListRow(
+            list: child,
+            isExpanded: childExpanded,
+            isFolder: false,
+            isNested: true,
+            selection: selection,
+            onToggleExpand: {
+                if childExpanded { expandedListIDs.remove(child.persistentModelID) }
+                else { expandedListIDs.insert(child.persistentModelID) }
+            },
+            onTap: { shift, option in handleTap(child.persistentModelID, shift: shift, option: option) },
+            onDoubleTap: { handleDoubleTap(child.persistentModelID) },
+            activeListIDs: $activeListIDs,
+            onFitToList: onFitToList,
+            onRename: {
+                renameListText = child.name
+                renamingList = child
+            },
+            onMoveToTopLevel: { unnestList(child) },
+            dragProvider: { NSItemProvider(object: "list:\(child.uuid.uuidString)" as NSString) }
+        )
+        .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
+        .padding(.leading, 18)
+        .background { rowHeightReader(child.persistentModelID) }
+        .overlay { dropIndicator(for: child.persistentModelID) }
+        .onDrop(of: [.text],
+                delegate: SidebarRowDropDelegate(
+                    targetID: child.persistentModelID,
+                    allowNest: false,
+                    height: { rowHeights[child.persistentModelID] ?? 36 },
+                    onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                    onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                    onPerform: { mode, providers in
+                        performChildDrop(providers, folder: folder, target: child, after: mode == .after)
+                    }
+                ))
+
+        if childExpanded {
+            let childPins = child.pins
+                .filter { $0.deletedAt == nil }
+                .sorted { $0.sortOrder < $1.sortOrder }
+            ForEach(childPins) { pin in
+                PinRow(
+                    pin: pin,
+                    selection: selection,
+                    listColor: Color(hexString: child.colorHex),
+                    onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
+                    onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
+                )
+                .padding(.leading, 42)
+                .listRowInsets(EdgeInsets(top: 0, leading: 42, bottom: 0, trailing: 0))
+                .contextMenu {
+                    let multi = isInMultiSelection(pin.persistentModelID)
+                    Button(role: .destructive) {
+                        if multi { deleteSelectedItems() } else { deletePin(pin) }
+                    } label: {
+                        Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
+                    }
+                }
+            }
+        }
+    }
+
     var body: some View {
         ScrollViewReader { listProxy in
         let _ = { listProxyHolder = listProxy }()
@@ -1294,54 +1392,7 @@ private struct ProjectDetailView: View {
                             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
                         }.filter { !searching || nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) } }
                         ForEach(childLists, id: \.persistentModelID) { child in
-                            let childExpanded = searching || expandedListIDs.contains(child.persistentModelID)
-                            ListRow(
-                                list: child,
-                                isExpanded: childExpanded,
-                                isFolder: false,
-                                isNested: true,
-                                selection: selection,
-                                onToggleExpand: {
-                                    if childExpanded { expandedListIDs.remove(child.persistentModelID) }
-                                    else { expandedListIDs.insert(child.persistentModelID) }
-                                },
-                                onTap: { shift, option in handleTap(child.persistentModelID, shift: shift, option: option) },
-                                onDoubleTap: { handleDoubleTap(child.persistentModelID) },
-                                activeListIDs: $activeListIDs,
-                                onFitToList: onFitToList,
-                                onRename: {
-                                    renameListText = child.name
-                                    renamingList = child
-                                },
-                                onMoveToTopLevel: { unnestList(child) }
-                            )
-                            .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
-                            .padding(.leading, 18)
-
-                            if childExpanded {
-                                let childPins = child.pins
-                                    .filter { $0.deletedAt == nil }
-                                    .sorted { $0.sortOrder < $1.sortOrder }
-                                ForEach(childPins) { pin in
-                                    PinRow(
-                                        pin: pin,
-                                        selection: selection,
-                                        listColor: Color(hexString: child.colorHex),
-                                        onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
-                                        onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
-                                    )
-                                    .padding(.leading, 42)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 42, bottom: 0, trailing: 0))
-                                    .contextMenu {
-                                        let multi = isInMultiSelection(pin.persistentModelID)
-                                        Button(role: .destructive) {
-                                            if multi { deleteSelectedItems() } else { deletePin(pin) }
-                                        } label: {
-                                            Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
-                                        }
-                                    }
-                                }
-                            }
+                            childListRow(child, folder: list)
                         }
 
                         let pins = list.pins
