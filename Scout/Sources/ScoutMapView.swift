@@ -812,10 +812,11 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         photoLayer.contents = nil
     }
 
-    func configure(imageURL: URL?) {
+    func configure(imageURL: URL?, rotationQuarterTurns: Int = 0) {
         loadTask?.cancel()
         if let url = imageURL, let cached = PhotoLoader.cached(url) {
-            photoLayer.contents = cached.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            let rotated = cached.rotatedCCW(quarterTurns: rotationQuarterTurns)
+            photoLayer.contents = rotated.cgImage(forProposedRect: nil, context: nil, hints: nil)
             return
         }
         photoLayer.contents = NSImage(systemSymbolName: "photo", accessibilityDescription: nil)?
@@ -825,7 +826,8 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
             let img = await PhotoLoader.load(url)
             guard !Task.isCancelled, let img else { return }
             await MainActor.run {
-                self.photoLayer.contents = img.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                let rotated = img.rotatedCCW(quarterTurns: rotationQuarterTurns)
+                self.photoLayer.contents = rotated.cgImage(forProposedRect: nil, context: nil, hints: nil)
             }
         }
     }
@@ -1490,7 +1492,8 @@ struct ScoutMapView {
                     let selected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                     view.borderColor = selected ? .systemBlue : .clear
                     view.setScale(scale)
-                    view.configure(imageURL: ann.location.images.first?.url)
+                    view.configure(imageURL: ann.location.images.first?.url,
+                                   rotationQuarterTurns: ann.location.images.first?.rotationQuarterTurns ?? 0)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {
                         view.reveal()
                     }

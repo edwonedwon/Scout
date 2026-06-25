@@ -522,6 +522,31 @@ private struct ProjectDetailView: View {
     // Use cachedSidebarItems everywhere the old sidebarItems was used.
     private var sidebarItems: [SidebarItem] { cachedSidebarItems }
 
+    // MARK: - Folder nesting
+
+    private func nestList(_ list: LocationListData, into folder: LocationListData) {
+        list.parentList?.childLists.removeAll { $0.persistentModelID == list.persistentModelID }
+        list.parentList = folder
+        if !folder.childLists.contains(where: { $0.persistentModelID == list.persistentModelID }) {
+            folder.childLists.append(list)
+        }
+        try? modelContext.save()
+        rebuildSidebarItems()
+    }
+
+    private func unnestList(_ list: LocationListData) {
+        list.parentList?.childLists.removeAll { $0.persistentModelID == list.persistentModelID }
+        list.parentList = nil
+        try? modelContext.save()
+        rebuildSidebarItems()
+    }
+
+    private func folderCandidates(for list: LocationListData) -> [LocationListData] {
+        project.lists.filter {
+            $0.persistentModelID != list.persistentModelID && $0.parentList == nil
+        }
+    }
+
     /// Assigns sequential panelOrder values. Debounced so rapid imports (200 photos)
     /// don't fire 200 consecutive full-list writes.
     private func normalizeOrder() {
@@ -898,7 +923,12 @@ private struct ProjectDetailView: View {
                 return nameMatches(p.name) ? item : nil
             case .list(let list):
                 if nameMatches(list.name) { return item }
-                return list.pins.contains { nameMatches($0.name) } ? item : nil
+                if list.pins.contains(where: { nameMatches($0.name) }) { return item }
+                // Also match if any child list name or its pins match.
+                let childMatch = list.childLists.contains {
+                    nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) }
+                }
+                return childMatch ? item : nil
             }
         }
     }
@@ -1047,9 +1077,13 @@ private struct ProjectDetailView: View {
                     // While searching, force lists open so matching photos are visible.
                     let searching = !trimmedSearch.isEmpty
                     let isExpanded = searching || expandedListIDs.contains(list.persistentModelID)
+                    let isFolder = !list.childLists.isEmpty
+                    let isNested = list.parentList != nil
                     ListRow(
                         list: list,
                         isExpanded: isExpanded,
+                        isFolder: isFolder,
+                        isNested: isNested,
                         selection: selection,
                         onToggleExpand: {
                             if isExpanded { expandedListIDs.remove(list.persistentModelID) }
@@ -1066,6 +1100,9 @@ private struct ProjectDetailView: View {
                         onToggleAllVisibility: { makeAllActive in
                             setProjectVisibility(makeAllActive)
                         },
+                        folderCandidates: folderCandidates(for: list),
+                        onMoveToFolder: { folder in nestList(list, into: folder) },
+                        onMoveToTopLevel: { unnestList(list) },
                         dragProvider: { NSItemProvider(object: item.dragID as NSString) }
                     )
                     .overlay(alignment: .top) { dropLine(for: item.id) }
@@ -1076,6 +1113,63 @@ private struct ProjectDetailView: View {
                     }
 
                     if isExpanded {
+                        // Child lists (folders) shown before pins.
+                        let childLists = list.childLists.sorted {
+                            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+                        }.filter { !searching || nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) } }
+                        ForEach(childLists, id: \.persistentModelID) { child in
+                            let childExpanded = searching || expandedListIDs.contains(child.persistentModelID)
+                            ListRow(
+                                list: child,
+                                isExpanded: childExpanded,
+                                isFolder: false,
+                                isNested: true,
+                                selection: selection,
+                                onToggleExpand: {
+                                    if childExpanded { expandedListIDs.remove(child.persistentModelID) }
+                                    else { expandedListIDs.insert(child.persistentModelID) }
+                                },
+                                onTap: { shift, option in handleTap(child.persistentModelID, shift: shift, option: option) },
+                                onDoubleTap: { handleDoubleTap(child.persistentModelID) },
+                                activeListIDs: $activeListIDs,
+                                onFitToList: onFitToList,
+                                onRename: {
+                                    renameListText = child.name
+                                    renamingList = child
+                                },
+                                folderCandidates: [],
+                                onMoveToFolder: nil,
+                                onMoveToTopLevel: { unnestList(child) }
+                            )
+                            .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
+                            .padding(.leading, 18)
+
+                            if childExpanded {
+                                let childPins = child.pins
+                                    .filter { $0.deletedAt == nil }
+                                    .sorted { $0.sortOrder < $1.sortOrder }
+                                ForEach(childPins) { pin in
+                                    PinRow(
+                                        pin: pin,
+                                        selection: selection,
+                                        listColor: Color(hexString: child.colorHex),
+                                        onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
+                                        onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
+                                    )
+                                    .padding(.leading, 42)
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 42, bottom: 0, trailing: 0))
+                                    .contextMenu {
+                                        let multi = isInMultiSelection(pin.persistentModelID)
+                                        Button(role: .destructive) {
+                                            if multi { deleteSelectedItems() } else { deletePin(pin) }
+                                        } label: {
+                                            Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         let pins = list.pins
                             .filter { $0.deletedAt == nil }
                             .sorted { $0.sortOrder < $1.sortOrder }
@@ -1437,6 +1531,8 @@ private struct ProjectDetailView: View {
 private struct ListRow: View {
     let list: LocationListData
     let isExpanded: Bool
+    var isFolder: Bool = false
+    var isNested: Bool = false
     @ObservedObject var selection: SidebarSelection
     let onToggleExpand: () -> Void
     var onTap: ((Bool, Bool) -> Void)? = nil
@@ -1446,6 +1542,9 @@ private struct ListRow: View {
     var onRename: (() -> Void)? = nil
     /// Called when the user Option+clicks the eye. `true` = show all, `false` = hide all.
     var onToggleAllVisibility: ((Bool) -> Void)? = nil
+    var folderCandidates: [LocationListData] = []
+    var onMoveToFolder: ((LocationListData) -> Void)? = nil
+    var onMoveToTopLevel: (() -> Void)? = nil
     /// Supply a drag provider to make the name area a drag handle. Buttons are
     /// excluded so accidental drag on chevron/eye never triggers a reorder.
     var dragProvider: (() -> NSItemProvider)? = nil
@@ -1471,15 +1570,23 @@ private struct ListRow: View {
             // Drag handle: only this region initiates a reorder drag, keeping the
             // chevron and eye buttons free from accidental drag triggers.
             HStack(spacing: 6) {
-                Circle()
-                    .fill(listColor)
-                    .frame(width: 10, height: 10)
+                if isFolder {
+                    Image(systemName: isExpanded ? "folder.fill" : "folder")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                } else {
+                    Circle()
+                        .fill(listColor)
+                        .frame(width: 10, height: 10)
+                }
                 Text(list.name)
                     .font(.body)
                     .foregroundStyle(.primary)
                 Spacer()
-                if !list.pins.isEmpty {
-                    Text("\(list.pins.count)")
+                let pinCount = list.pins.count + list.childLists.reduce(0) { $0 + $1.pins.count }
+                if pinCount > 0 {
+                    Text("\(pinCount)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1521,9 +1628,27 @@ private struct ListRow: View {
             }
             if let onFitToList {
                 Button {
-                    onFitToList(list.pins.filter { $0.hasGPS })
+                    let allPins = list.pins.filter { $0.hasGPS }
+                        + list.childLists.flatMap { $0.pins.filter { $0.hasGPS } }
+                    onFitToList(allPins)
                 } label: {
                     Label("Fit Map to List", systemImage: "mappin.and.ellipse")
+                }
+            }
+            // Folder nesting options.
+            if isNested {
+                Divider()
+                Button { onMoveToTopLevel?() } label: {
+                    Label("Move to Top Level", systemImage: "arrow.up.to.line")
+                }
+            } else if let onMoveToFolder, !folderCandidates.isEmpty {
+                Divider()
+                Menu {
+                    ForEach(folderCandidates, id: \.persistentModelID) { candidate in
+                        Button(candidate.name) { onMoveToFolder(candidate) }
+                    }
+                } label: {
+                    Label("Move to Folder", systemImage: "folder.badge.plus")
                 }
             }
             Divider()
@@ -1901,7 +2026,7 @@ struct MoveToListSheet: View {
 private enum SidebarPreviewData {
     /// A handful of Creative-Commons image URLs so thumbnails render when online
     /// (they fall back to the mappin placeholder offline — layout still looks right).
-    static let imageURLs = [
+    nonisolated static let imageURLs = [
         "https://upload.wikimedia.org/wikipedia/commons/thumb/3/30/Vasquez_Rocks_2013.jpg/320px-Vasquez_Rocks_2013.jpg",
         "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Vasquez_Rocks_County_Park_2.jpg/320px-Vasquez_Rocks_County_Park_2.jpg",
         "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Vasquez_Rocks.jpg/320px-Vasquez_Rocks.jpg",
