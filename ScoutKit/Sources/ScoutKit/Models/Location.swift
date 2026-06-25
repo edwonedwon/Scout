@@ -9,6 +9,9 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
     public var groupID: UUID?
     public var sourceURL: URL?
     public var images: [ScoutImage]
+    /// Full-resolution images for carousel display. For imported photos this may include
+    /// the original file URL when it's still on disk. Falls back to `images` when empty.
+    public var fullResImages: [ScoutImage]
     public var googleMapsURL: URL?
     public var googlePlaceId: String?
     public var notes: String
@@ -23,6 +26,7 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         groupID: UUID? = nil,
         sourceURL: URL? = nil,
         images: [ScoutImage] = [],
+        fullResImages: [ScoutImage] = [],
         googleMapsURL: URL? = nil,
         googlePlaceId: String? = nil,
         notes: String = "",
@@ -36,6 +40,7 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         self.groupID = groupID
         self.sourceURL = sourceURL
         self.images = images
+        self.fullResImages = fullResImages
         self.googleMapsURL = googleMapsURL
         self.googlePlaceId = googlePlaceId
         self.notes = notes

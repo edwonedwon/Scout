@@ -125,8 +125,11 @@ struct PhotoGridView: View {
             guard seen.insert(i.location.id).inserted else { return nil }
             return i.location
         }
+        // Pass full-res images to the carousel (original file if available, else compressed full).
+        // item.location.images holds thumbnails for the grid; fullResImages has the originals.
+        let carouselImages = item.location.fullResImages.isEmpty ? item.location.images : item.location.fullResImages
         PhotoViewerState.shared.show(
-            images: item.location.images,
+            images: carouselImages,
             startingAt: item.indexInLocation,
             location: item.location,
             allLocations: all

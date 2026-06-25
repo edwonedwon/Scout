@@ -1168,10 +1168,11 @@ enum RightPanelTab: String, CaseIterable, Identifiable {
 
     var emptyIcon: String {
         switch self {
-        case .ai:        "sparkles"
-        case .google:    "mappin.slash"
-        case .flickr:    "camera"
-        case .wikimedia: "globe"
+        case .ai:         "sparkles"
+        case .google:     "mappin.slash"
+        case .foursquare: "mappin.and.ellipse"
+        case .flickr:     "camera"
+        case .wikimedia:  "globe"
         }
     }
 }

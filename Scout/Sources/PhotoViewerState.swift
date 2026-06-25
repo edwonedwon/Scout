@@ -25,7 +25,10 @@ final class PhotoViewerState: ObservableObject {
     func show(images: [ScoutImage], startingAt index: Int,
               location: ScoutLocation? = nil,
               allLocations: [ScoutLocation] = []) {
-        self.images = images
+        // If the location carries full-res images, prefer those over whatever was passed
+        // (guards against callsites accidentally passing thumbnail-sized images).
+        let fullRes = location?.fullResImages ?? []
+        self.images = fullRes.isEmpty ? images : fullRes
         self.location = location
         self.selectedIndex = index
         self.isVisible = true
@@ -108,7 +111,11 @@ final class PhotoViewerState: ObservableObject {
         let nextLoc = allLocations[next]
         globalLocationIndex = next
         location = nextLoc
-        images = nextLoc.images
+        // Prefer full-res images (original file or 2048px JPEG) over thumbnails.
+        images = nextLoc.fullResImages.isEmpty ? nextLoc.images : nextLoc.fullResImages
+        if let placeId = nextLoc.googlePlaceId, images.count <= 1 {
+            fetchRemainingPhotos(placeId: placeId, alreadyLoaded: images)
+        }
         // When going back, land on the last photo of the previous location.
         selectedIndex = delta < 0 ? max(0, images.count - 1) : 0
     }

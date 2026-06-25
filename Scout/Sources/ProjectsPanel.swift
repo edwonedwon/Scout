@@ -123,6 +123,8 @@ struct ProjectsPanel: View {
     @State private var navPath: [ProjectData] = []
     @State private var showAddProject = false
     @State private var newProjectName = ""
+    @State private var renamingProject: ProjectData? = nil
+    @State private var renameText = ""
 
     var body: some View {
         NavigationStack(path: $navPath) {
@@ -205,6 +207,13 @@ struct ProjectsPanel: View {
                     .padding(.vertical, 4)
                 }
                 .contextMenu {
+                    Button {
+                        renameText = project.name
+                        renamingProject = project
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
+                    Divider()
                     Button(role: .destructive) {
                         // Pop nav first so NavigationStack doesn't hold a reference
                         // to the deleted project and crash when SwiftUI re-renders.
@@ -239,6 +248,20 @@ struct ProjectsPanel: View {
                     Image(systemName: "plus")
                 }
             }
+        }
+        .alert("Rename Project", isPresented: Binding(
+            get: { renamingProject != nil },
+            set: { if !$0 { renamingProject = nil } }
+        )) {
+            TextField("Project name", text: $renameText)
+            Button("Rename") {
+                let trimmed = renameText.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty { renamingProject?.name = trimmed }
+                try? modelContext.save()
+                renamingProject = nil
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) { renamingProject = nil }
         }
     }
 }
@@ -835,7 +858,12 @@ private struct ProjectDetailView: View {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.image]
+        panel.allowedContentTypes = [
+            .image,
+            .rawImage,           // .cr2, .cr3, .nef, .arw, .dng, .orf, .rw2, etc.
+            UTType("public.heif-standard") ?? .heic,  // .heif container
+        ]
+        panel.allowsOtherFileTypes = true  // fallback for any format CGImageSource can decode
         guard panel.runModal() == .OK else { return }
         let urls = panel.urls
         Task { @MainActor in await importImageURLs(urls, into: nil) }
@@ -1047,7 +1075,8 @@ private struct PinRow: View {
 
     @ViewBuilder
     private var thumbnail: some View {
-        let url: URL? = pin.photoFiles.first.map { PinPhotoStore.fileURL($0) }
+        let url: URL? = pin.thumbnailImages.first?.url
+            ?? pin.photoFiles.first.map { PinPhotoStore.fileURL($0) }
             ?? pin.imageURL.flatMap { URL(string: $0) }
         if let url {
             // GooglePhotoImage uses PhotoLoader's shared NSCache — thumbnails are decoded

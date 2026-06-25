@@ -11,8 +11,9 @@ struct LocationCalloutView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Photos
             if !location.images.isEmpty {
-                // Show 1 thumbnail in the callout. Opening the carousel lazy-loads more.
+                // Show 1 thumbnail in the callout. Opening the carousel uses full-res.
                 let allImages = location.images
+                let carouselImages = location.fullResImages.isEmpty ? allImages : location.fullResImages
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 3) {
                         ForEach(Array(allImages.prefix(1).enumerated()), id: \.offset) { idx, img in
@@ -26,7 +27,7 @@ struct LocationCalloutView: View {
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 PhotoViewerState.shared.openedFromMap = true
-                                PhotoViewerState.shared.show(images: allImages, startingAt: idx, location: location)
+                                PhotoViewerState.shared.show(images: carouselImages, startingAt: idx, location: location)
                             }
                             .cursor(.pointingHand)
                         }

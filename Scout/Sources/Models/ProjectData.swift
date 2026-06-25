@@ -85,8 +85,17 @@ final class PinnedLocationData {
     var sourceURLString: String? = nil
     var googleMapsURLString: String? = nil
     var imageSourceRaw: String? = nil
-    // Filenames (in PinPhotoStore.directory) of photos downloaded for offline display.
+    // Compressed full-res versions (2048px JPEG) stored in PinPhotoStore.directory.
+    // For imported photos these are derived from the original; for Google places they
+    // are the downloaded remote images. Used in the carousel when the original is absent.
     var photoFiles: [String] = []
+    // Small thumbnail versions (300px JPEG) stored in PinPhotoStore.directory.
+    // Used everywhere except the full-screen carousel (sidebar, map, photo grid).
+    var thumbnailFiles: [String] = []
+    // Absolute path to the original file on disk (only set for imported photos).
+    // Not copied into the app container — read directly when the file is available.
+    // The carousel prefers this over photoFiles when the path resolves.
+    var originalFilePath: String? = nil
     // Whether this pin has a real GPS coordinate. False for photos imported without EXIF GPS.
     // GPS-less pins appear in the list sidebar but not on the map.
     var hasGPS: Bool = true
@@ -120,13 +129,38 @@ final class PinnedLocationData {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 
+    /// Images sized for thumbnails — sidebar rows, photo grid, map pins.
+    /// Uses thumbnailFiles when available, falls back to photoFiles.
+    var thumbnailImages: [ScoutImage] {
+        let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .imported
+        let files = thumbnailFiles.isEmpty ? photoFiles : thumbnailFiles
+        return files.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken) }
+    }
+
+    /// Images for the full-screen carousel.
+    /// Prefers the original file on disk (if it still exists), then falls back to photoFiles.
+    var fullResImages: [ScoutImage] {
+        let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .imported
+        // Try the original file first.
+        if let path = originalFilePath {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: path) {
+                return [ScoutImage(url: url, source: source, dateTaken: dateTaken)]
+            }
+        }
+        // Fall back to compressed full-res files.
+        if !photoFiles.isEmpty {
+            return photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken) }
+        }
+        return []
+    }
+
     func asScoutLocation() -> ScoutLocation {
         let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .googleMaps
         let images: [ScoutImage]
-        if !photoFiles.isEmpty {
-            // Offline: serve the downloaded files as file:// URLs through the usual loader.
-            // dateTaken is stored per-pin (from EXIF), so all images in the pin share it.
-            images = photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken) }
+        if !photoFiles.isEmpty || !thumbnailFiles.isEmpty {
+            // Use thumbnails for all non-carousel display (grid, sidebar, map pins).
+            images = thumbnailImages
         } else if let imageURL, let url = URL(string: imageURL) {
             images = [ScoutImage(url: url, source: source)]
         } else {
@@ -139,6 +173,7 @@ final class PinnedLocationData {
             coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
             sourceURL: sourceURLString.flatMap { URL(string: $0) },
             images: images,
+            fullResImages: fullResImages,
             googleMapsURL: googleMapsURLString.flatMap { URL(string: $0) },
             googlePlaceId: googlePlaceId,
             status: LocationStatus(rawValue: statusRaw) ?? .scouted
