@@ -75,6 +75,10 @@ struct ContentView: View {
     @State private var viewMode: ViewMode = .map
     @AppStorage("ui.showProjectsPanel") private var showProjectsPanel = true
     @AppStorage("ui.showRightPanel") private var showRightPanel = true
+    // Left sidebar width — user-draggable, persisted. Min/max are tweakable in the Debug panel.
+    @AppStorage("ui.sidebarWidth") private var sidebarWidth: Double = 280
+    @AppStorage("debug.sidebarMinWidth") private var sidebarMinWidth: Double = 200
+    @AppStorage("debug.sidebarMaxWidth") private var sidebarMaxWidth: Double = 480
     @State private var activeListIDs: Set<PersistentIdentifier> = []
     // Projects whose uncategorized (loose) photos are hidden from map + grid.
     // Empty = all visible (default). Toggled by the sidebar "Uncategorized" eye.
@@ -195,6 +199,12 @@ struct ContentView: View {
             .onChange(of: hiddenUncategorizedProjectIDs) { _, _ in rebuildPinCaches() }
     }
 
+    /// Sidebar width clamped to the current debug min/max, so changing the limits never
+    /// leaves the panel stuck outside the allowed range.
+    private var clampedSidebarWidth: CGFloat {
+        CGFloat(min(max(sidebarWidth, sidebarMinWidth), sidebarMaxWidth))
+    }
+
     @ViewBuilder private var rootLayout: some View {
         HStack(spacing: 0) {
             if showProjectsPanel {
@@ -224,9 +234,13 @@ struct ContentView: View {
                     scrollToPinUUID: highlightedPinID,
                     externalMoveUUIDs: $externalMoveUUIDs
                 )
-                .frame(width: 240)
+                .frame(width: clampedSidebarWidth)
                 .transition(.move(edge: .leading))
-                Divider()
+                SidebarResizeHandle(
+                    width: $sidebarWidth,
+                    minWidth: sidebarMinWidth,
+                    maxWidth: sidebarMaxWidth
+                )
             }
             centerPanel
             if showRightPanel {
@@ -596,13 +610,19 @@ struct ContentView: View {
 
     /// Changes whenever any pin's list membership, sort order, or trashed state changes,
     /// even when total counts are unchanged — used to trigger a grid/map rebuild after a
-    /// drag-reorder or a soft-delete (trashing a pin doesn't change any count).
+    /// drag-reorder or a soft-delete (trashing a pin doesn't change any count). Also folds in
+    /// each list's parent-folder so nesting/unnesting (which changes effective visibility)
+    /// rebuilds too.
     private var pinListAssignmentHash: Int {
-        allPins.reduce(0) { acc, pin in
+        var h = allPins.reduce(0) { acc, pin in
             let listHash = pin.list?.persistentModelID.hashValue ?? 0
             let trashed = pin.deletedAt == nil ? 0 : 1
             return acc ^ listHash ^ pin.sortOrder ^ pin.panelOrder ^ trashed
         }
+        for list in allLists {
+            h ^= (list.parentList?.persistentModelID.hashValue ?? 0)
+        }
+        return h
     }
 
     /// Rotates the given pins 90° counter-clockwise (one quarter-turn) and refreshes caches.
@@ -631,8 +651,20 @@ struct ContentView: View {
         rebuildPinCaches()
     }
 
+    /// A list is *effectively* visible only if its own eye is on AND every ancestor folder's
+    /// eye is on. A folder thus acts as a master switch: turning it off hides everything
+    /// inside it on the map/grid without changing the children's own eye states.
+    private func isEffectivelyActive(_ list: LocationListData) -> Bool {
+        var node: LocationListData? = list
+        while let n = node {
+            if !activeListIDs.contains(n.persistentModelID) { return false }
+            node = n.parentList
+        }
+        return true
+    }
+
     private func rebuildPinCaches() {
-        let active = allLists.filter { activeListIDs.contains($0.persistentModelID) }
+        let active = allLists.filter { isEffectivelyActive($0) }
         var mapPins: [(ScoutLocation, String)] = active.flatMap { list in
             list.pins.filter { $0.hasGPS && $0.deletedAt == nil }.map { ($0.asScoutLocation(), list.colorHex) }
         }
@@ -661,7 +693,7 @@ struct ContentView: View {
         for project in allProjects.sorted(by: { $0.createdAt < $1.createdAt }) {
             // Lists inside this project (sidebar panel order). Only visible lists (eye on).
             let sortedLists = project.lists
-                .filter { activeListIDs.contains($0.persistentModelID) }
+                .filter { isEffectivelyActive($0) }
                 .sorted { $0.panelOrder < $1.panelOrder }
             for list in sortedLists {
                 let locs = proximityOrdered(list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder })
@@ -1583,6 +1615,40 @@ private struct RegionChip: View {
                     in: Capsule())
         .overlay(Capsule().stroke(isActive ? Color.clear : Color.primary.opacity(0.15), lineWidth: 0.5))
         .onTapGesture(perform: onToggle)
+    }
+}
+
+/// A thin draggable divider between the left sidebar and the center panel. Hovering shows
+/// the horizontal-resize cursor (macOS); dragging adjusts the bound width within [min, max].
+private struct SidebarResizeHandle: View {
+    @Binding var width: Double
+    let minWidth: Double
+    let maxWidth: Double
+    @State private var dragStartWidth: Double? = nil
+
+    var body: some View {
+        Divider()
+            .frame(width: 1)
+            .overlay(
+                // Wider invisible hit area so the 1px line is easy to grab.
+                Color.clear
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+                    #if os(macOS)
+                    .onHover { inside in
+                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    #endif
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                let base = dragStartWidth ?? width
+                                if dragStartWidth == nil { dragStartWidth = width }
+                                width = min(max(base + value.translation.width, minWidth), maxWidth)
+                            }
+                            .onEnded { _ in dragStartWidth = nil }
+                    )
+            )
     }
 }
 

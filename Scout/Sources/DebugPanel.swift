@@ -6,6 +6,9 @@ struct DebugPanelOverlay: View {
     @ObservedObject private var logger = DebugLogger.shared
     @State private var isExpanded = false
     @State private var showDeleteConfirm = false
+    // Left-sidebar resize limits — same AppStorage keys ContentView reads.
+    @AppStorage("debug.sidebarMinWidth") private var sidebarMinWidth: Double = 200
+    @AppStorage("debug.sidebarMaxWidth") private var sidebarMaxWidth: Double = 480
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -68,6 +71,25 @@ struct DebugPanelOverlay: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial)
+
+            Divider()
+
+            // Sidebar width limits
+            HStack(spacing: 12) {
+                Text("Sidebar width")
+                    .font(.caption.bold())
+                Stepper(value: $sidebarMinWidth, in: 120...sidebarMaxWidth, step: 10) {
+                    Text("Min \(Int(sidebarMinWidth))")
+                        .font(.system(size: 10, design: .monospaced))
+                }
+                Stepper(value: $sidebarMaxWidth, in: sidebarMinWidth...900, step: 10) {
+                    Text("Max \(Int(sidebarMaxWidth))")
+                        .font(.system(size: 10, design: .monospaced))
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)

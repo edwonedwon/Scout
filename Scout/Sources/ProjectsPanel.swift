@@ -328,6 +328,55 @@ private enum SidebarItem: Identifiable {
     }
 }
 
+// MARK: - Drag-to-reorder / nest
+
+/// Which zone of a row the drag cursor is over: reorder before/after the row, or nest the
+/// dragged item into it (lists only).
+private enum DropMode { case before, into, after }
+
+/// Drop delegate that maps the cursor's vertical position within a row to a drop zone. Rows
+/// that accept nesting (lists) carve out a center "into" band; all rows have before/after
+/// edge bands for reordering. Reports the live zone for preview and performs the drop.
+private struct SidebarRowDropDelegate: DropDelegate {
+    let targetID: PersistentIdentifier
+    let allowNest: Bool
+    let height: () -> CGFloat
+    let onTargetChange: (PersistentIdentifier?, DropMode) -> Void
+    /// Clear the highlight only if this row still owns it — avoids a race where the old row's
+    /// dropExited fires after the new row's dropEntered and wipes the fresh target.
+    let onExit: (PersistentIdentifier) -> Void
+    let onPerform: (DropMode, [NSItemProvider]) -> Bool
+
+    func dropEntered(info: DropInfo) { onTargetChange(targetID, mode(info)) }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let m = mode(info)
+        onTargetChange(targetID, m)
+        // `.copy` shows the green "+" badge on the cursor (signals "nest into"); `.move`
+        // shows no badge (plain reorder between rows).
+        return DropProposal(operation: m == .into ? .copy : .move)
+    }
+
+    func dropExited(info: DropInfo) { onExit(targetID) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let m = mode(info)
+        onTargetChange(nil, .before)
+        return onPerform(m, info.itemProviders(for: [.text, .fileURL, .image]))
+    }
+
+    private func mode(_ info: DropInfo) -> DropMode {
+        let h = max(height(), 1)
+        let y = info.location.y
+        if allowNest {
+            if y < h * 0.30 { return .before }
+            if y > h * 0.70 { return .after }
+            return .into
+        }
+        return y < h * 0.5 ? .before : .after
+    }
+}
+
 // MARK: - Project detail (unified reorderable list)
 
 private struct ProjectDetailView: View {
@@ -377,6 +426,11 @@ private struct ProjectDetailView: View {
     // Top-level row currently under a reorder drag — a blue insertion line is drawn at its
     // top edge to preview where the dragged item will land (it inserts before this row).
     @State private var dropTargetID: PersistentIdentifier? = nil
+    // Whether the current drag will reorder (line before/after the row) or nest into a list
+    // (the whole row highlights). Decided from the cursor's vertical position within the row.
+    @State private var dropMode: DropMode = .before
+    // Measured heights per row so the drop delegate can map cursor-Y to a drop zone.
+    @State private var rowHeights: [PersistentIdentifier: CGFloat] = [:]
 
     /// Flat ordered list of every currently visible row id (including expanded list pins),
     /// used to resolve a shift-click range.
@@ -541,11 +595,6 @@ private struct ProjectDetailView: View {
         rebuildSidebarItems()
     }
 
-    private func folderCandidates(for list: LocationListData) -> [LocationListData] {
-        project.lists.filter {
-            $0.persistentModelID != list.persistentModelID && $0.parentList == nil
-        }
-    }
 
     /// Assigns sequential panelOrder values. Debounced so rapid imports (200 photos)
     /// don't fire 200 consecutive full-list writes.
@@ -732,7 +781,7 @@ private struct ProjectDetailView: View {
     // MARK: - Drop handling
 
     /// Central drop handler for top-level sidebar items.
-    private func handleDrop(_ dragID: String, onto target: SidebarItem) -> Bool {
+    private func handleDrop(_ dragID: String, onto target: SidebarItem, after: Bool = false) -> Bool {
         // Pin dragged from inside a list onto a top-level target.
         if dragID.hasPrefix("pin:") {
             let uuid = String(dragID.dropFirst(4))
@@ -754,31 +803,48 @@ private struct ProjectDetailView: View {
             return true
         }
 
+        // A nested list dragged onto a top-level row → unnest it to the top level, ordered
+        // next to the target. (resolve() only finds top-level items, so handle lists first.)
+        if dragID.hasPrefix("list:") {
+            let uuid = String(dragID.dropFirst(5))
+            if let list = project.lists.first(where: { $0.uuid.uuidString == uuid }),
+               list.parentList != nil {
+                list.parentList?.childLists.removeAll { $0.persistentModelID == list.persistentModelID }
+                list.parentList = nil
+                reorderToTopLevel(list, near: target, after: after)
+                return true
+            }
+        }
+
         // Top-level item dragged onto another top-level item.
         guard let dragged = resolve(dragID) else { return false }
         if dragged.id == target.id { return false }
 
         // Top-level photo dragged onto a list → move into list (with multi-select support).
-        if case .photo(let pin) = dragged, case .list(let list) = target {
+        if case .photo(let pin) = dragged, case .list(let list) = target, !after {
             movePinsToList(pin, intoList: list)
             return true
         }
 
         // Otherwise reorder.
-        reorder(dragged, before: target)
+        reorder(dragged, before: target, after: after)
         return true
     }
 
-    /// Reorders `dragged` next to `target`. Inserts before target when moving up,
-    /// after target when moving down, so every slot is reachable.
-    private func reorder(_ dragged: SidebarItem, before target: SidebarItem) {
+    /// Re-inserts a now-top-level model (e.g. a just-unnested list) next to `target`.
+    private func reorderToTopLevel(_ list: LocationListData, near target: SidebarItem, after: Bool) {
+        rebuildSidebarItems()
+        reorder(.list(list), before: target, after: after)
+    }
+
+    /// Reorders `dragged` next to `target`. Inserts before the target row (or after it when
+    /// `after` is true), so every slot — including just below the last row — is reachable.
+    private func reorder(_ dragged: SidebarItem, before target: SidebarItem, after: Bool = false) {
         var items = sidebarItems
         guard let from = items.firstIndex(where: { $0.id == dragged.id }) else { return }
         let moving = items.remove(at: from)
-        // Insert immediately BEFORE the target in visual order — matches the blue insertion
-        // line drawn at the target row's top edge, so the drop lands exactly where shown.
         guard let to = items.firstIndex(where: { $0.id == target.id }) else { return }
-        items.insert(moving, at: to)
+        items.insert(moving, at: after ? to + 1 : to)
         for (i, item) in items.enumerated() {
             switch item {
             case .photo(let p):       p.panelOrder = i
@@ -957,28 +1023,117 @@ private struct ProjectDetailView: View {
         .padding(.bottom, 6)
     }
 
-    /// `isTargeted` binding for a top-level row that records which row the drag is over,
-    /// so a blue insertion line can be drawn at its top edge.
-    private func dropTargetBinding(_ id: PersistentIdentifier) -> Binding<Bool> {
-        Binding(
-            get: { dropTargetID == id },
-            set: { inside in
-                if inside { dropTargetID = id }
-                else if dropTargetID == id { dropTargetID = nil }
+    /// Drag-to-reorder/nest overlay for one row. Shows a blue insertion line at the top
+    /// edge (mode `.before`), bottom edge (mode `.after`), or a full-row highlight when the
+    /// drag will nest the dragged list into this list (mode `.into`).
+    @ViewBuilder
+    private func dropIndicator(for id: PersistentIdentifier) -> some View {
+        if dropTargetID == id {
+            switch dropMode {
+            case .before:
+                VStack(spacing: 0) {
+                    Rectangle().fill(Color.accentColor).frame(height: 2).padding(.horizontal, 4)
+                    Spacer(minLength: 0)
+                }
+            case .after:
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    Rectangle().fill(Color.accentColor).frame(height: 2).padding(.horizontal, 4)
+                }
+            case .into:
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.accentColor.opacity(0.18))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.accentColor, lineWidth: 1.5)
+                    )
+                    .padding(.horizontal, 2)
             }
-        )
+        }
     }
 
-    /// The blue insertion line, shown at the top of the row the drag is currently over.
-    @ViewBuilder
-    private func dropLine(for id: PersistentIdentifier) -> some View {
-        if dropTargetID == id {
-            Rectangle()
-                .fill(Color.accentColor)
-                .frame(height: 2)
-                .padding(.horizontal, 4)
-                .transition(.opacity)
+    /// Transparent background view that measures and records a row's height, so the drop
+    /// delegate can map the cursor's vertical position to a before/into/after zone.
+    private func rowHeightReader(_ id: PersistentIdentifier) -> some View {
+        GeometryReader { geo in
+            Color.clear
+                .onAppear { rowHeights[id] = geo.size.height }
+                .onChange(of: geo.size.height) { _, h in rowHeights[id] = h }
         }
+    }
+
+    /// Records the row currently under the drag and which zone (before/into/after) the cursor
+    /// is in, so `dropIndicator` can preview the result.
+    private func setDropTarget(_ id: PersistentIdentifier?, mode: DropMode) {
+        if dropTargetID != id { dropTargetID = id }
+        if dropMode != mode { dropMode = mode }
+    }
+
+    /// Clears the drag highlight only if `id` is still the active target (see onExit docs).
+    private func clearDropTarget(ifOwnedBy id: PersistentIdentifier) {
+        if dropTargetID == id { dropTargetID = nil }
+    }
+
+    /// Performs a row drop based on the resolved zone. `.into` a list nests a dragged list or
+    /// moves a dragged photo into it; `.before`/`.after` reorder at the top level.
+    private func performRowDrop(target: SidebarItem, mode: DropMode, providers: [NSItemProvider]) -> Bool {
+        // External files/images: import into the list when dropped onto it, else top-level.
+        let importList: LocationListData? = {
+            if case .list(let l) = target { return l }
+            return nil
+        }()
+        if tryImportDrop(providers, into: mode == .into ? importList : nil) { return true }
+
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
+        }
+        _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let dragID = object as? String else { return }
+            Task { @MainActor in
+                self.dispatchRowDrop(dragID: dragID, target: target, mode: mode)
+            }
+        }
+        return true
+    }
+
+    @MainActor
+    private func dispatchRowDrop(dragID: String, target: SidebarItem, mode: DropMode) {
+        // Nest-into a list.
+        if mode == .into, case .list(let folder) = target {
+            // Dragged list → nest as a child folder.
+            if dragID.hasPrefix("list:") {
+                let uuid = String(dragID.dropFirst(5))
+                guard let dragged = project.lists.first(where: { $0.uuid.uuidString == uuid }),
+                      dragged.persistentModelID != folder.persistentModelID else { return }
+                // Prevent nesting a folder into its own descendant.
+                guard !isDescendant(folder, of: dragged) else { return }
+                nestList(dragged, into: folder)
+                return
+            }
+            // Dragged photo(s) → move into the list.
+            if dragID.hasPrefix("photo:") || dragID.hasPrefix("photos:") || dragID.hasPrefix("pin:") {
+                let uuids: [String]
+                if dragID.hasPrefix("photos:") { uuids = dragID.dropFirst(7).split(separator: ",").map(String.init) }
+                else if dragID.hasPrefix("photo:") { uuids = [String(dragID.dropFirst(6))] }
+                else { uuids = [String(dragID.dropFirst(4))] }
+                let pins = uuids.compactMap { findPin(uuid: $0) }
+                pins.forEach { movePinsToList($0, intoList: folder) }
+                return
+            }
+            return
+        }
+        // Reorder before/after the target at the top level.
+        _ = handleDrop(dragID, onto: target, after: mode == .after)
+    }
+
+    /// True if `candidate` is `ancestor` or a descendant of `ancestor` (guards nesting cycles).
+    private func isDescendant(_ candidate: LocationListData, of ancestor: LocationListData) -> Bool {
+        var node: LocationListData? = candidate
+        while let n = node {
+            if n.persistentModelID == ancestor.persistentModelID { return true }
+            node = n.parentList
+        }
+        return false
     }
 
     var body: some View {
@@ -1066,13 +1221,18 @@ private struct ProjectDetailView: View {
                             Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
                         }
                     }
-                    .overlay(alignment: .top) { dropLine(for: item.id) }
+                    .background { rowHeightReader(item.id) }
+                    .overlay { dropIndicator(for: item.id) }
                     .onDrag { NSItemProvider(object: item.dragID as NSString) }
-                    .onDrop(of: [.text, .fileURL, .image], isTargeted: dropTargetBinding(item.id)) { providers in
-                        let handled = tryImportDrop(providers, into: nil) || loadDrop(providers, onto: .photo(pin))
-                        dropTargetID = nil
-                        return handled
-                    }
+                    .onDrop(of: [.text, .fileURL, .image],
+                            delegate: SidebarRowDropDelegate(
+                                targetID: item.id,
+                                allowNest: false,
+                                height: { rowHeights[item.id] ?? 60 },
+                                onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                                onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                                onPerform: { mode, providers in performRowDrop(target: .photo(pin), mode: mode, providers: providers) }
+                            ))
                 case .list(let list):
                     // While searching, force lists open so matching photos are visible.
                     let searching = !trimmedSearch.isEmpty
@@ -1100,17 +1260,20 @@ private struct ProjectDetailView: View {
                         onToggleAllVisibility: { makeAllActive in
                             setProjectVisibility(makeAllActive)
                         },
-                        folderCandidates: folderCandidates(for: list),
-                        onMoveToFolder: { folder in nestList(list, into: folder) },
                         onMoveToTopLevel: { unnestList(list) },
                         dragProvider: { NSItemProvider(object: item.dragID as NSString) }
                     )
-                    .overlay(alignment: .top) { dropLine(for: item.id) }
-                    .onDrop(of: [.text, .fileURL, .image], isTargeted: dropTargetBinding(item.id)) { providers in
-                        let handled = tryImportDrop(providers, into: list) || loadDrop(providers, onto: .list(list))
-                        dropTargetID = nil
-                        return handled
-                    }
+                    .background { rowHeightReader(item.id) }
+                    .overlay { dropIndicator(for: item.id) }
+                    .onDrop(of: [.text, .fileURL, .image],
+                            delegate: SidebarRowDropDelegate(
+                                targetID: item.id,
+                                allowNest: true,
+                                height: { rowHeights[item.id] ?? 36 },
+                                onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                                onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                                onPerform: { mode, providers in performRowDrop(target: .list(list), mode: mode, providers: providers) }
+                            ))
 
                     if isExpanded {
                         // Child lists (folders) shown before pins.
@@ -1137,8 +1300,6 @@ private struct ProjectDetailView: View {
                                     renameListText = child.name
                                     renamingList = child
                                 },
-                                folderCandidates: [],
-                                onMoveToFolder: nil,
                                 onMoveToTopLevel: { unnestList(child) }
                             )
                             .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
@@ -1542,8 +1703,6 @@ private struct ListRow: View {
     var onRename: (() -> Void)? = nil
     /// Called when the user Option+clicks the eye. `true` = show all, `false` = hide all.
     var onToggleAllVisibility: ((Bool) -> Void)? = nil
-    var folderCandidates: [LocationListData] = []
-    var onMoveToFolder: ((LocationListData) -> Void)? = nil
     var onMoveToTopLevel: (() -> Void)? = nil
     /// Supply a drag provider to make the name area a drag handle. Buttons are
     /// excluded so accidental drag on chevron/eye never triggers a reorder.
@@ -1635,20 +1794,11 @@ private struct ListRow: View {
                     Label("Fit Map to List", systemImage: "mappin.and.ellipse")
                 }
             }
-            // Folder nesting options.
+            // Unnest a folder child back to the top level. (Nesting is drag-only.)
             if isNested {
                 Divider()
                 Button { onMoveToTopLevel?() } label: {
                     Label("Move to Top Level", systemImage: "arrow.up.to.line")
-                }
-            } else if let onMoveToFolder, !folderCandidates.isEmpty {
-                Divider()
-                Menu {
-                    ForEach(folderCandidates, id: \.persistentModelID) { candidate in
-                        Button(candidate.name) { onMoveToFolder(candidate) }
-                    }
-                } label: {
-                    Label("Move to Folder", systemImage: "folder.badge.plus")
                 }
             }
             Divider()
