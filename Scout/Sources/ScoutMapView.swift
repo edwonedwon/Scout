@@ -1223,7 +1223,7 @@ struct ScoutMapView {
             // Restore the original border/dot color from the annotation's tintHex.
             if let ann = view.annotation as? LocationAnnotation {
                 if let photo = view as? ScoutPhotoAnnotationView {
-                    photo.borderColor = ann.tintHex?.isEmpty == false ? ann.tintColor : .clear
+                    photo.borderColor = .clear   // no colored frame on map photos
                 } else if let dot = view as? ScoutDotAnnotationView {
                     dot.dotColor = ann.tintColor
                 }
@@ -1357,8 +1357,8 @@ struct ScoutMapView {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutPhotoAnnotationView.reuseID) as? ScoutPhotoAnnotationView)
                         ?? ScoutPhotoAnnotationView(annotation: annotation, reuseIdentifier: ScoutPhotoAnnotationView.reuseID)
                     view.annotation = annotation
-                    // Empty tintHex = uncategorized pin → no border
-                    view.borderColor = ann.tintHex?.isEmpty == false ? ann.tintColor : .clear
+                    // No colored frame on map photos — keep the square, no border tint.
+                    view.borderColor = .clear
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {
