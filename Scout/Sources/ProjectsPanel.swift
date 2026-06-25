@@ -1125,6 +1125,8 @@ private struct ProjectDetailView: View {
                         ?? project.importedPhotos.first(where: { $0.uuid == uuid })
                     }
                     pins.forEach { movePinsToList($0, intoList: list) }
+                    selection.ids = []
+                    selection.anchor = nil
                     showMovePopup = false
                     externalMoveUUIDs = []
                 },
