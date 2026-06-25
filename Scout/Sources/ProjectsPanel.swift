@@ -1083,17 +1083,9 @@ private struct ProjectDetailView: View {
         .onChange(of: scrollToPinUUID) { _, uuid in
             guard let uuid,
                   let pin = findPin(uuid: uuid.uuidString) else { return }
-            // Expand the containing list first so its pins are in the List hierarchy.
+            // Expand the containing list so the pin row is visible, but don't scroll.
             if let list = pin.list {
                 expandedListIDs.insert(list.persistentModelID)
-            }
-            // Wait long enough for SwiftUI to insert the newly-expanded rows before scrolling.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    listProxy.scrollTo(pin.persistentModelID, anchor: .none)
-                }
-                selection.ids = [pin.persistentModelID]
-                selection.anchor = pin.persistentModelID
             }
         }
         } // ScrollViewReader
