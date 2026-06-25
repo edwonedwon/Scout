@@ -29,8 +29,8 @@ struct ContentView: View {
     @AppStorage("map.showPhotoAnnotations") private var showPhotoAnnotations = false
     @AppStorage("map.pinSize") private var pinSize: Double = 1.0
     @State private var regionQuery = ""
-    @State private var regionName: String? = nil
     @State private var isRegionSearching = false
+    @State private var savedRegions: [SavedRegion] = []
 
     // Boundary overlay state
     @AppStorage("boundary.showPrefectures") private var showPrefectures = false
@@ -107,6 +107,49 @@ struct ContentView: View {
     }
 
     var body: some View {
+        rootLayoutWithObservers
+    }
+
+    @ViewBuilder private var rootLayoutWithObservers: some View {
+        rootLayoutWithSetup
+            .onChange(of: allPins.count)         { rebuildPinCaches() }
+            .onChange(of: unfiledPins.count)     { rebuildPinCaches() }
+            .onChange(of: allLists.count)        { rebuildPinCaches() }
+            .onChange(of: allProjects.count)     { rebuildPinCaches() }
+            .onChange(of: pinListAssignmentHash) { rebuildPinCaches() }
+            .onChange(of: selectedLocation) { _, loc in
+                guard viewMode == .map, let loc else { return }
+                highlightedPinID = loc.id
+            }
+            .onChange(of: rightPanelTab) { _, _ in
+                locations = []
+                selectedLocation = nil
+            }
+            .onChange(of: viewMode) { _, newMode in
+                if newMode == .photos && photoViewer.restoreOnPhotoMode {
+                    photoViewer.restoreOnPhotoMode = false
+                    photoViewer.isVisible = true
+                }
+                if newMode == .map { highlightedPinID = nil }
+                if newMode == .photos {
+                    selectedLocation = nil
+                    mapController.dismissPopover()
+                }
+            }
+    }
+
+    @ViewBuilder private var rootLayoutWithSetup: some View {
+        rootLayout
+            .onAppear { setupOnAppear() }
+            .onChange(of: locationManager.currentLocation?.latitude) { _, _ in centerOnUserIfNeeded() }
+            .onChange(of: activeListIDs) { _, ids in
+                let uuids = allLists.filter { ids.contains($0.persistentModelID) }.map(\.uuid.uuidString)
+                activeListUUIDs = uuids.joined(separator: ",")
+                rebuildPinCaches()
+            }
+    }
+
+    @ViewBuilder private var rootLayout: some View {
         HStack(spacing: 0) {
             if showProjectsPanel {
                 ProjectsPanel(
@@ -123,19 +166,17 @@ struct ContentView: View {
                     onRevealPins: { pins in
                         let gps = pins.filter { $0.hasGPS }
                         guard !gps.isEmpty else { return }
-                        // Switch to map so the user sees the animation.
                         withAnimation(.spring(duration: 0.3)) { viewMode = .map }
                         let coords = gps.map(\.coordinate)
                         let ids = gps.map(\.uuid)
-                        // Small delay so the map mode switch settles before panning.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                             mapController.revealPins(coords: coords, order: ids, delay: 0.9)
                         }
                     },
                     scrollToPinUUID: highlightedPinID
                 )
-                    .frame(width: 240)
-                    .transition(.move(edge: .leading))
+                .frame(width: 240)
+                .transition(.move(edge: .leading))
                 Divider()
             }
             centerPanel
@@ -150,69 +191,10 @@ struct ContentView: View {
         .animation(.spring(duration: 0.3), value: showRightPanel)
         .ignoresSafeArea()
         .background {
-            // App-wide Escape handler (hidden). Carousel → grid → map → grid…
             Button("", action: handleEscape)
                 .keyboardShortcut(.cancelAction)
                 .opacity(0)
                 .allowsHitTesting(false)
-        }
-        .onAppear {
-            rebuildPinCaches()
-            locations = []   // clear any stale search results from prior session
-            modelContext.undoManager = undoManager
-            locationManager.requestIfNeeded()
-            centerOnUserIfNeeded()
-            backfillPhotos()
-            // allLists is already populated here (SwiftData @Query delivers synchronously).
-            if !activeListUUIDs.isEmpty {
-                let uuids = Set(activeListUUIDs.split(separator: ",").map(String.init))
-                activeListIDs = Set(allLists.filter { uuids.contains($0.uuid.uuidString) }
-                                            .map(\.persistentModelID))
-            }
-            photoViewer.onViewOnMap = { loc in
-                withAnimation(.spring(duration: 0.3)) { viewMode = .map }
-                selectedLocation = loc
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    mapController.center(on: loc.coordinate, animated: true)
-                }
-            }
-        }
-        .onChange(of: locationManager.currentLocation?.latitude) { _, _ in
-            centerOnUserIfNeeded()
-        }
-        .onChange(of: activeListIDs) { _, ids in
-            let uuids = allLists.filter { ids.contains($0.persistentModelID) }
-                                .map(\.uuid.uuidString)
-            activeListUUIDs = uuids.joined(separator: ",")
-            rebuildPinCaches()
-        }
-        // Rebuild pin caches when SwiftData delivers new query results (inserts, deletes,
-        // property changes like hasGPS flipping after timeline backfill).
-        .onChange(of: allPins.count)           { rebuildPinCaches() }
-        .onChange(of: unfiledPins.count)       { rebuildPinCaches() }
-        .onChange(of: allLists.count)          { rebuildPinCaches() }
-        .onChange(of: allProjects.count)       { rebuildPinCaches() }
-        // Fires when any pin moves between lists or changes sort order (count unchanged).
-        .onChange(of: pinListAssignmentHash)   { rebuildPinCaches() }
-        .onChange(of: selectedLocation) { _, loc in
-            // When the user taps a map pin, highlight and scroll the sidebar to it.
-            guard viewMode == .map, let loc else { return }
-            highlightedPinID = loc.id
-        }
-        .onChange(of: rightPanelTab) { _, _ in
-            locations = []
-            selectedLocation = nil
-        }
-        .onChange(of: viewMode) { _, newMode in
-            if newMode == .photos && photoViewer.restoreOnPhotoMode {
-                photoViewer.restoreOnPhotoMode = false
-                photoViewer.isVisible = true
-            }
-            if newMode == .map { highlightedPinID = nil }
-            if newMode == .photos {
-                selectedLocation = nil
-                mapController.dismissPopover()
-            }
         }
     }
 
@@ -236,6 +218,27 @@ struct ContentView: View {
         }
         withAnimation(.spring(duration: 0.3)) {
             viewMode = (viewMode == .map) ? .photos : .map
+        }
+    }
+
+    private func setupOnAppear() {
+        rebuildPinCaches()
+        locations = []
+        modelContext.undoManager = undoManager
+        locationManager.requestIfNeeded()
+        centerOnUserIfNeeded()
+        backfillPhotos()
+        if !activeListUUIDs.isEmpty {
+            let uuids = Set(activeListUUIDs.split(separator: ",").map(String.init))
+            activeListIDs = Set(allLists.filter { uuids.contains($0.uuid.uuidString) }
+                                        .map(\.persistentModelID))
+        }
+        photoViewer.onViewOnMap = { [self] loc in
+            withAnimation(.spring(duration: 0.3)) { viewMode = .map }
+            selectedLocation = loc
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                mapController.center(on: loc.coordinate, animated: true)
+            }
         }
     }
 
@@ -394,6 +397,7 @@ struct ContentView: View {
         // - PhotoGrid: never torn down so scroll position survives "Show on Map" round-trips
         ZStack {
             scoutMap
+                .zIndex(0)
             PhotoGridView(
                 locations: locations,
                 pinnedSections: cachedGridSections,
@@ -404,6 +408,13 @@ struct ContentView: View {
                 .ignoresSafeArea()
                 .opacity(viewMode == .photos ? 1 : 0)
                 .allowsHitTesting(viewMode == .photos)
+                .zIndex(10)
+            if photoViewer.isVisible {
+                PhotoViewerOverlay(availableLists: openProjectLists, onSave: savePinned)
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
+                    .zIndex(20)
+            }
         }
         .overlay(alignment: .top) {
             HStack {
@@ -424,13 +435,6 @@ struct ContentView: View {
             }
             .padding(.top, 14)
             .padding(.horizontal, 8)
-        }
-        .overlay {
-            if photoViewer.isVisible {
-                PhotoViewerOverlay(availableLists: openProjectLists, onSave: savePinned)
-                    .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
-            }
         }
     }
 
@@ -466,8 +470,9 @@ struct ContentView: View {
     /// Changes whenever any pin's list membership or sort order changes, even when total
     /// counts are unchanged — used to trigger a grid rebuild after drag-reorder.
     private var pinListAssignmentHash: Int {
-        allPins.reduce(0) {
-            $0 ^ ($1.list?.persistentModelID.hashValue ?? 0) ^ $1.sortOrder ^ $1.panelOrder
+        allPins.reduce(0) { acc, pin in
+            let listHash = pin.list?.persistentModelID.hashValue ?? 0
+            return acc ^ listHash ^ pin.sortOrder ^ pin.panelOrder
         }
     }
 
@@ -741,63 +746,71 @@ struct ContentView: View {
     }
 
     private var regionSearchOverlay: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "globe.europe.africa")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(regionName != nil ? .blue : .primary)
-
-            TextField("Country, state, city…", text: $regionQuery)
-                .textFieldStyle(.plain)
-                .font(.caption)
-                .frame(width: 140)
-                .onSubmit { Task { await runRegionSearch() } }
-
-            if isRegionSearching {
-                ProgressView().controlSize(.mini)
-            } else if !regionQuery.isEmpty || regionName != nil {
-                Button {
-                    regionQuery = ""
-                    regionName = nil
-                    searchArea.clear()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        let hasActive = savedRegions.contains(where: \.isActive)
+        return VStack(alignment: .leading, spacing: 6) {
+            // Toggle chips for saved regions
+            if !savedRegions.isEmpty {
+                HStack(spacing: 5) {
+                    ForEach(savedRegions.indices, id: \.self) { i in
+                        RegionChip(
+                            name: savedRegions[i].name,
+                            isActive: savedRegions[i].isActive,
+                            onToggle: {
+                                savedRegions[i].isActive.toggle()
+                                applyActiveRegions()
+                            },
+                            onDelete: {
+                                savedRegions.remove(at: i)
+                                applyActiveRegions()
+                            }
+                        )
+                    }
                 }
-                .buttonStyle(.plain)
-            } else {
-                Button { Task { await runRegionSearch() } } label: {
-                    Image(systemName: "return")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
+            // Search field pill
+            HStack(spacing: 4) {
+                Image(systemName: "globe.europe.africa")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(hasActive ? .blue : .primary)
+
+                TextField("Country, state, city…", text: $regionQuery)
+                    .textFieldStyle(.plain)
+                    .font(.caption)
+                    .frame(width: 140)
+                    .onSubmit { Task { await runRegionSearch() } }
+
+                if isRegionSearching {
+                    ProgressView().controlSize(.mini)
+                } else if !regionQuery.isEmpty {
+                    Button {
+                        regionQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button { Task { await runRegionSearch() } } label: {
+                        Image(systemName: "return")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(regionQuery.isEmpty)
                 }
-                .buttonStyle(.plain)
-                .disabled(regionQuery.isEmpty)
             }
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(hasActive ? Color.blue.opacity(0.5) : Color.clear, lineWidth: 1.5)
+            )
         }
-        .padding(.horizontal, 10)
-        .frame(height: 36)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .shadow(color: .black.opacity(0.10), radius: 3, y: 1)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(regionName != nil ? Color.blue.opacity(0.5) : Color.clear, lineWidth: 1.5)
-        )
-        // Found-region label floats above the pill without changing the row height
-        .overlay(alignment: .topLeading) {
-            if let name = regionName {
-                Text(name)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.blue)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.regularMaterial, in: Capsule())
-                    .fixedSize()
-                    .offset(y: -22)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: regionName)
+        .animation(.easeInOut(duration: 0.2), value: savedRegions.count)
     }
 
     @MainActor
@@ -807,24 +820,40 @@ struct ContentView: View {
         isRegionSearching = true
         do {
             let result = try await NominatimService.shared.search(q)
-            searchArea.setPolygon(result.polygon)
-            regionName = result.name
             regionQuery = ""
-            // Fit map to the boundary bounding box
+            let newRegion = SavedRegion(name: result.name, polygon: result.polygon, isActive: true)
+            // Deduplicate by name; if already saved just reactivate it
+            if let existing = savedRegions.firstIndex(where: { $0.name == newRegion.name }) {
+                savedRegions[existing].isActive = true
+            } else {
+                if savedRegions.count >= 3 { savedRegions.removeFirst() }
+                savedRegions.append(newRegion)
+            }
+            applyActiveRegions()
+            // Fit map to the new region's bounding box
             let b = result.bbox
-            let center = CLLocationCoordinate2D(
-                latitude:  (b.minLat + b.maxLat) / 2,
-                longitude: (b.minLng + b.maxLng) / 2
-            )
-            let span = MKCoordinateSpan(
-                latitudeDelta:  (b.maxLat - b.minLat) * 1.15,
-                longitudeDelta: (b.maxLng - b.minLng) * 1.15
-            )
+            let center = CLLocationCoordinate2D(latitude: (b.minLat + b.maxLat) / 2,
+                                                longitude: (b.minLng + b.maxLng) / 2)
+            let span = MKCoordinateSpan(latitudeDelta: (b.maxLat - b.minLat) * 1.15,
+                                        longitudeDelta: (b.maxLng - b.minLng) * 1.15)
             mapController.setRegion(MKCoordinateRegion(center: center, span: span), animated: true)
         } catch {
             searchError = error.localizedDescription
         }
         isRegionSearching = false
+    }
+
+    /// Syncs active saved regions → searchArea polygon + boundary polygon cache.
+    private func applyActiveRegions() {
+        let active = savedRegions.filter(\.isActive)
+        if active.isEmpty {
+            searchArea.clear()
+        } else {
+            // Union all active region polygons into one combined point cloud for containment tests
+            let combined = active.flatMap(\.polygon)
+            searchArea.setPolygon(combined)
+        }
+        rebuildBoundaryPolygons()
     }
 
     private var cyclOSMLegend: some View {
@@ -962,9 +991,9 @@ struct ContentView: View {
 
     private func rebuildBoundaryPolygons() {
         var result: [BoundaryPolygon] = []
-        let active: [JapanBoundaryService.BoundaryData] = (showPrefectures ? prefectureBoundaries : [])
+        let japanActive: [JapanBoundaryService.BoundaryData] = (showPrefectures ? prefectureBoundaries : [])
             + (showMunicipalities ? municipalityBoundaries : [])
-        for (idx, boundary) in active.enumerated() {
+        for (idx, boundary) in japanActive.enumerated() {
             for ring in boundary.rings {
                 guard ring.count >= 3 else { continue }
                 var coords = ring
@@ -974,6 +1003,16 @@ struct ContentView: View {
                 poly.colorIndex = idx
                 result.append(poly)
             }
+        }
+        // Active saved regions drawn as boundary overlays
+        let activeRegions = savedRegions.filter(\.isActive)
+        for (idx, region) in activeRegions.enumerated() {
+            var coords = region.polygon
+            guard coords.count >= 3 else { continue }
+            let poly = BoundaryPolygon(coordinates: &coords, count: coords.count)
+            poly.boundaryName = region.name
+            poly.colorIndex = japanActive.count + idx
+            result.append(poly)
         }
         cachedBoundaryPolygons = result
     }
@@ -1154,6 +1193,49 @@ struct ContentView: View {
 }
 
 // MARK: - Supporting Views
+
+// MARK: - Saved region model
+
+struct SavedRegion: Identifiable, Equatable {
+    let id = UUID()
+    var name: String
+    var polygon: [CLLocationCoordinate2D]
+    var isActive: Bool
+
+    static func == (lhs: SavedRegion, rhs: SavedRegion) -> Bool {
+        lhs.id == rhs.id && lhs.isActive == rhs.isActive
+    }
+}
+
+// MARK: - Region toggle chip
+
+private struct RegionChip: View {
+    let name: String
+    let isActive: Bool
+    let onToggle: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text(name)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(isActive ? .white : .primary)
+                .lineLimit(1)
+            Button(action: onDelete) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(isActive ? .white.opacity(0.8) : .secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(isActive ? Color.blue : Color.primary.opacity(0.08),
+                    in: Capsule())
+        .overlay(Capsule().stroke(isActive ? Color.clear : Color.primary.opacity(0.15), lineWidth: 0.5))
+        .onTapGesture(perform: onToggle)
+    }
+}
 
 /// The one card used to show a location everywhere — sidebar search results and
 /// saved-list rows alike. Purely visual and driven by a `ScoutLocation`; callers

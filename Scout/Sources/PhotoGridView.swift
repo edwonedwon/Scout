@@ -208,7 +208,11 @@ private struct MasonryCell: View {
         .if(item.isPinned) { $0.onDrag({
             NSItemProvider(object: "pin:\(item.location.id.uuidString)" as NSString)
         }, preview: {
-            DragThumbnail(url: item.image.url)
+            if let url = item.image.url {
+                DragThumbnail(url: url)
+            } else {
+                Color.gray.opacity(0.25).frame(width: 72, height: 72)
+            }
         }) }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.2), value: isHighlighted)

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import CoreLocation
+import ScoutKit
 
 // MARK: - Backup manifest (Codable mirror of the SwiftData models)
 
@@ -316,8 +317,6 @@ enum BackupService {
     private static func zip(sourceDir: URL, to dest: URL) throws {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-        // -r recursive, -j junk paths (store files flat under the source dir entries)
-        // We want to preserve the directory structure, so don't use -j.
         proc.arguments = ["-r", dest.path, "."]
         proc.currentDirectoryURL = sourceDir
         try proc.run()
