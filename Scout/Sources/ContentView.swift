@@ -94,6 +94,8 @@ struct ContentView: View {
     @State private var expandedStackID: UUID? = nil
     /// UUIDs to move when the move sheet is triggered from the grid or M key outside sidebar.
     @State private var externalMoveUUIDs: [UUID] = []
+    /// Option-click multi-selection of map pins (location IDs).
+    @State private var mapSelection: Set<UUID> = []
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -467,17 +469,22 @@ struct ContentView: View {
         // M key: open move sheet from photo grid or map selection (sidebar handles its own M).
         .background {
             Button("") {
-                let gridUUIDs: [UUID] = {
-                    // Use highlighted grid pin if any
+                let uuids: [UUID] = {
+                    // Map option-click multi-selection wins, then highlighted grid/map pin.
+                    if !mapSelection.isEmpty { return Array(mapSelection) }
                     if let id = highlightedPinID { return [id] }
                     if let id = selectedLocation?.id { return [id] }
                     return []
                 }()
-                if !gridUUIDs.isEmpty { externalMoveUUIDs = gridUUIDs }
+                if !uuids.isEmpty { externalMoveUUIDs = uuids }
             }
             .keyboardShortcut("m", modifiers: [])
             .opacity(0)
             .allowsHitTesting(false)
+        }
+        // Clear the map multi-selection once the move sheet has closed.
+        .onChange(of: externalMoveUUIDs) { _, ids in
+            if ids.isEmpty { mapSelection = [] }
         }
         .overlay(alignment: .top) {
             HStack {
@@ -941,6 +948,7 @@ struct ContentView: View {
     private var scoutMap: some View {
         ScoutMapView(
             selection: $selectedLocation,
+            mapSelection: $mapSelection,
             locations: locations,
             projectPins: cachedProjectPins,
             scrollToZoom: scrollToZoom,
@@ -976,6 +984,7 @@ struct ContentView: View {
             pinScale: pinSize,
             availableLists: openProjectLists,
             onSaveToList: saveToList,
+            onAddTagToSelection: { if !mapSelection.isEmpty { externalMoveUUIDs = Array(mapSelection) } },
             isSelectedPinned: allPins.contains(where: { $0.uuid == selectedLocation?.id }),
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,

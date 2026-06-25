@@ -285,6 +285,42 @@ final class ZoomableMapView: MKMapView {
     /// Fired when the user presses "f" with the map focused (frame all project pins).
     var onFrameAllPins: (() -> Void)?
 
+    // MARK: - Option-click multi-selection
+    /// Location IDs currently in the multi-selection (mirrors ContentView's binding).
+    var multiSelectedIDs: Set<UUID> = []
+    /// Called whenever the multi-selection changes so the SwiftUI binding can update.
+    var onMultiSelectionChanged: ((Set<UUID>) -> Void)?
+
+    /// Toggles a pin in/out of the multi-selection and updates its selection ring.
+    private func toggleMultiSelect(_ ann: LocationAnnotation) {
+        let id = ann.location.id
+        if multiSelectedIDs.contains(id) { multiSelectedIDs.remove(id) }
+        else { multiSelectedIDs.insert(id) }
+        applySelectionRing(to: ann, selected: multiSelectedIDs.contains(id))
+        onMultiSelectionChanged?(multiSelectedIDs)
+    }
+
+    /// Clears the whole multi-selection and removes every selection ring.
+    func clearMultiSelection() {
+        guard !multiSelectedIDs.isEmpty else { return }
+        let cleared = multiSelectedIDs
+        multiSelectedIDs.removeAll()
+        for ann in annotations.compactMap({ $0 as? LocationAnnotation }) where cleared.contains(ann.location.id) {
+            applySelectionRing(to: ann, selected: false)
+        }
+        onMultiSelectionChanged?(multiSelectedIDs)
+    }
+
+    /// Applies/removes the blue selection ring on a pin's annotation view.
+    func applySelectionRing(to ann: LocationAnnotation, selected: Bool) {
+        guard let v = view(for: ann) else { return }
+        if let photo = v as? ScoutPhotoAnnotationView {
+            photo.borderColor = selected ? .systemBlue : .clear
+        } else if let dot = v as? ScoutDotAnnotationView {
+            dot.isMultiSelected = selected
+        }
+    }
+
     // The map accepts key events so "f" works when the map (not a text field) is focused.
     // When a TextField elsewhere is first responder, this view isn't, so typing "f" there
     // is unaffected.
@@ -321,7 +357,16 @@ final class ZoomableMapView: MKMapView {
             // Select the highlighted pin directly so overlapping photos always resolve to
             // the one under the cursor (MapKit's own hit-testing can miss or pick the wrong one).
             applyHover(at: pt)
+            let optionHeld = event.modifierFlags.contains(.option)
             if let ann = pinUnderCursor?.annotation as? LocationAnnotation {
+                // Option-click builds a multi-selection (no popover); plain click opens the popover.
+                if optionHeld {
+                    if let sel = selectedAnnotations.first { deselectAnnotation(sel, animated: false) }
+                    toggleMultiSelect(ann)
+                    return
+                }
+                // Plain click on a pin clears any existing multi-selection first.
+                clearMultiSelection()
                 // Toggle: clicking the open pin closes its popover, clicking a closed pin opens it.
                 let isSelected = selectedAnnotations.contains {
                     ($0 as? LocationAnnotation)?.location.id == ann.location.id
@@ -330,7 +375,8 @@ final class ZoomableMapView: MKMapView {
                 else { selectAnnotation(ann, animated: false) }
                 return
             }
-            // Click on empty map: close any open popover, then let the map pan as usual.
+            // Click on empty map: clear multi-selection, close any open popover, then pan.
+            clearMultiSelection()
             if let sel = selectedAnnotations.first { deselectAnnotation(sel, animated: false) }
             super.mouseDown(with: event)
             return
@@ -590,6 +636,10 @@ final class ScoutDotAnnotationView: MKAnnotationView {
     var isHovered: Bool = false {
         didSet { guard oldValue != isHovered else { return }; needsDisplay = true }
     }
+    /// True when part of the map multi-selection — draws a blue outer ring.
+    var isMultiSelected: Bool = false {
+        didSet { guard oldValue != isMultiSelected else { return }; needsDisplay = true }
+    }
 
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
@@ -658,6 +708,14 @@ final class ScoutDotAnnotationView: MKAnnotationView {
         NSColor.white.withAlphaComponent(isHovered ? 1.0 : 0.9).setStroke()
         oval.lineWidth = ringWidth
         oval.stroke()
+
+        // Blue selection ring drawn just outside the white ring.
+        if isMultiSelected {
+            let selPath = NSBezierPath(ovalIn: bounds.insetBy(dx: inset * 0.2, dy: inset * 0.2))
+            NSColor.systemBlue.setStroke()
+            selPath.lineWidth = ringWidth * 1.1
+            selPath.stroke()
+        }
     }
 }
 
@@ -918,6 +976,8 @@ final class MenuAction: NSObject {
 
 struct ScoutMapView {
     @Binding var selection: ScoutLocation?
+    /// Option-click multi-selection of pin location IDs (for batch "Add tag").
+    @Binding var mapSelection: Set<UUID>
     var locations: [ScoutLocation]
     var projectPins: [(ScoutLocation, String)] = []  // (location, colorHex)
     var scrollToZoom: Bool
@@ -939,6 +999,8 @@ struct ScoutMapView {
     var pinScale: Double = 1.0
     var availableLists: [LocationListData] = []
     var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
+    /// Right-click "Add tag to N photos" on a multi-selection — opens the tag picker.
+    var onAddTagToSelection: (() -> Void)? = nil
     /// True when the currently-selected location is an already-saved pin — enables drag-to-list.
     var isSelectedPinned: Bool = false
     var boundaryPolygons: [BoundaryPolygon] = []
@@ -986,6 +1048,18 @@ struct ScoutMapView {
             zoomable.onFrameAllPins = onFrameAllPins
             zoomable.onBuildAnnotationMenu = { [weak coordinator = context.coordinator] location in
                 coordinator?.buildAnnotationMenu(for: location)
+            }
+            zoomable.onMultiSelectionChanged = { ids in
+                DispatchQueue.main.async { mapSelection = ids }
+            }
+            // Keep the view's mirror in sync when the binding changes externally (e.g. cleared
+            // after a batch move). Re-apply rings if the set was emptied elsewhere.
+            if zoomable.multiSelectedIDs != mapSelection {
+                let removed = zoomable.multiSelectedIDs.subtracting(mapSelection)
+                zoomable.multiSelectedIDs = mapSelection
+                for ann in zoomable.annotations.compactMap({ $0 as? LocationAnnotation }) where removed.contains(ann.location.id) {
+                    zoomable.applySelectionRing(to: ann, selected: false)
+                }
             }
         }
         #endif
@@ -1342,7 +1416,20 @@ struct ScoutMapView {
         func buildAnnotationMenu(for location: ScoutLocation) -> NSMenu? {
             guard !parent.availableLists.isEmpty, let handler = parent.onSaveToList else { return nil }
             let menu = NSMenu()
-            let saveItem = NSMenuItem(title: "Save to List", action: nil, keyEquivalent: "")
+
+            // Multi-selection: one item that opens the tag picker for all selected pins.
+            let selectionCount = parent.mapSelection.count
+            if selectionCount >= 2, let addToSelection = parent.onAddTagToSelection {
+                let act = MenuAction { addToSelection() }
+                menuActions.append(act)
+                let item = NSMenuItem(title: "Add tag to \(selectionCount) photos…",
+                                      action: #selector(MenuAction.invoke), keyEquivalent: "")
+                item.target = act
+                menu.addItem(item)
+                return menu
+            }
+
+            let saveItem = NSMenuItem(title: "Add tag", action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             for list in parent.availableLists {
                 let act = MenuAction { handler(location, list) }
@@ -1426,8 +1513,9 @@ struct ScoutMapView {
                     let view = (mapView.dequeueReusableAnnotationView(withIdentifier: ScoutPhotoAnnotationView.reuseID) as? ScoutPhotoAnnotationView)
                         ?? ScoutPhotoAnnotationView(annotation: annotation, reuseIdentifier: ScoutPhotoAnnotationView.reuseID)
                     view.annotation = annotation
-                    // No colored frame on map photos — keep the square, no border tint.
-                    view.borderColor = .clear
+                    // No colored frame normally; blue ring when in the multi-selection.
+                    let selected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
+                    view.borderColor = selected ? .systemBlue : .clear
                     view.tagColors = ann.tagColors
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url)
@@ -1441,6 +1529,7 @@ struct ScoutMapView {
                     view.annotation = annotation
                     view.dotColor = ann.tintColor
                     view.tagColors = ann.tagColors
+                    view.isMultiSelected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                     view.setScale(scale)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {
                         view.reveal()
