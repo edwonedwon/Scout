@@ -76,10 +76,13 @@ enum BackupService {
         // --- Collect all pins for this project ---
         let allPins = project.lists.flatMap(\.pins) + project.importedPhotos
 
-        // --- Copy photo files ---
+        // --- Copy thumbnail files only (not full-res photoFiles) ---
+        // Full-res photoFiles are 2048px JPEGs that dominate export size.
+        // Thumbnails (300px) are sufficient for the app to run after restore;
+        // carousel falls back to thumbnails until the user relinks originals.
         var copiedFiles: Set<String> = []
         for pin in allPins {
-            for f in pin.photoFiles + pin.thumbnailFiles where !copiedFiles.contains(f) {
+            for f in pin.thumbnailFiles where !copiedFiles.contains(f) {
                 let src = PinPhotoStore.fileURL(f)
                 if fm.fileExists(atPath: src.path) {
                     try? fm.copyItem(at: src, to: photosDir.appendingPathComponent(f))
@@ -270,6 +273,8 @@ enum BackupService {
     // MARK: - Helpers
 
     private static func backupPin(_ pin: PinnedLocationData) -> BackupPin {
+        // photoFiles (2048px) are omitted from exports — thumbnailFiles only.
+        // Carousel falls back to thumbnails on restore; originals can be relinked.
         BackupPin(
             uuid: pin.uuid,
             name: pin.name,
@@ -281,7 +286,7 @@ enum BackupService {
             sortOrder: pin.sortOrder,
             panelOrder: pin.panelOrder,
             imageSourceRaw: pin.imageSourceRaw,
-            photoFiles: pin.photoFiles,
+            photoFiles: [],
             thumbnailFiles: pin.thumbnailFiles,
             originalFileBasename: pin.originalFilePath.map { URL(fileURLWithPath: $0).lastPathComponent },
             hasGPS: pin.hasGPS,

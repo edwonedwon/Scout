@@ -1225,7 +1225,7 @@ private struct ProjectDetailView: View {
                 return selection.ids.compactMap { findPin(byID: $0)?.uuid }
             }()
             MoveToListSheet(
-                lists: project.lists,
+                project: project,
                 onMove: { list in
                     let pins = moveIDs.compactMap { uuid in
                         project.lists.flatMap(\.pins).first(where: { $0.uuid == uuid })
@@ -1477,10 +1477,6 @@ private struct PinRow: View {
             thumbnail
                 .frame(width: 56, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(listColor ?? .clear, lineWidth: 2)
-                )
                 .allowsHitTesting(false)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -1726,7 +1722,7 @@ private struct TimelineProgressOverlay: View {
 // MARK: - Move-to-list popup
 
 private struct MoveToListSheet: View {
-    let lists: [LocationListData]
+    let project: ProjectData
     let onMove: (LocationListData) -> Void
     let onDismiss: () -> Void
 
@@ -1736,8 +1732,8 @@ private struct MoveToListSheet: View {
 
     private var filtered: [LocationListData] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return lists }
-        return lists.filter { $0.name.lowercased().contains(q) }
+        guard !q.isEmpty else { return project.lists }
+        return project.lists.filter { $0.name.lowercased().contains(q) }
     }
 
     var body: some View {
