@@ -18,11 +18,38 @@ final class ProjectData {
     /// Photos imported directly into this project (not inside any list).
     @Relationship(deleteRule: .cascade, inverse: \PinnedLocationData.owningProject)
     var importedPhotos: [PinnedLocationData] = []
+    /// Imported `.fountain` scripts (full text copied in, not referenced) — synced with the rest.
+    @Relationship(deleteRule: .cascade, inverse: \ScriptData.project) var scripts: [ScriptData] = []
 
     init(name: String, notes: String = "") {
         self.name = name
         self.notes = notes
         self.createdAt = Date()
+    }
+}
+
+// MARK: - Script
+
+@Model
+final class ScriptData {
+    /// Display name (the imported filename without extension).
+    var name: String
+    /// Full `.fountain` source text, copied into the store so it syncs (files are small).
+    var rawText: String
+    var uuid: UUID = UUID()
+    var importedAt: Date
+    /// Bumped whenever a newer version is imported over this script.
+    var updatedAt: Date
+    /// Order within the sidebar "Scripts" section.
+    var sortOrder: Int = 0
+    var project: ProjectData?
+
+    init(name: String, rawText: String, sortOrder: Int = 0) {
+        self.name = name
+        self.rawText = rawText
+        self.importedAt = Date()
+        self.updatedAt = Date()
+        self.sortOrder = sortOrder
     }
 }
 

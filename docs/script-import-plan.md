@@ -1,6 +1,8 @@
 # Plan: Fountain Script Import & Scene → List Linking
 
-Status: PLANNING (not started). Owner: Edwon. Last updated: 2026-06-26.
+Status: Phases 1–2 DONE (import + sidebar + Script view + third island toggle).
+Phases 3–5 (highlights, list-side visualization, re-import/merge) not started.
+Owner: Edwon. Last updated: 2026-06-26.
 
 ## Goal
 

@@ -168,6 +168,8 @@ struct ProjectsPanel: View {
     var onClearPin: (() -> Void)? = nil
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
     var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
+    /// Opens a script in the Script view (third island mode).
+    var onOpenScript: ((ScriptData) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView): show the pin in the grid / on the map.
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -205,6 +207,7 @@ struct ProjectsPanel: View {
                         onClearPin: onClearPin,
                         onRevealPins: onRevealPins,
                         onOpenCarousel: onOpenCarousel,
+                        onOpenScript: onOpenScript,
                         onRevealInGrid: onRevealInGrid,
                         onRevealOnMap: onRevealOnMap,
                         onExpandedChanged: { uuids in
@@ -468,6 +471,7 @@ private struct ProjectDetailView: View {
     var onClearPin: (() -> Void)?
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
     var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
+    var onOpenScript: ((ScriptData) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView).
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -486,6 +490,8 @@ private struct ProjectDetailView: View {
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
     // Whether the Uncategorized pseudo-list is expanded to show its loose photos.
     @State private var uncategorizedExpanded = false
+    // Whether the "Scripts" pseudo-list is expanded to show imported scripts.
+    @State private var scriptsExpanded = false
     @State private var renamingList: LocationListData? = nil
     @State private var renameListText = ""
     @State private var isBackfilling = false
@@ -1630,6 +1636,63 @@ private struct ProjectDetailView: View {
         return false
     }
 
+    /// Auto "Scripts" section (like Uncategorized/Trash): imported .fountain scripts.
+    @ViewBuilder
+    private var scriptsSection: some View {
+        let scripts = project.scripts.sorted { $0.sortOrder < $1.sortOrder }
+        if !scripts.isEmpty {
+            HStack(spacing: 6) {
+                Button {
+                    var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                    withTransaction(tx) { scriptsExpanded.toggle() }
+                } label: {
+                    Image(systemName: scriptsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(width: 28, height: 32).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Image(systemName: "doc.text").font(.caption).foregroundStyle(.secondary)
+                Text("Scripts").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(scripts.count)").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 4)
+            .listRowBackground(Color.clear)
+
+            if scriptsExpanded {
+                ForEach(scripts, id: \.persistentModelID) { script in
+                    scriptRow(script)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func scriptRow(_ script: ScriptData) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.plaintext").font(.caption).foregroundStyle(.secondary).frame(width: 16)
+            Text(script.name).font(.body).lineLimit(1)
+            Spacer()
+        }
+        .padding(.vertical, 4)
+        .padding(.leading, 24)
+        .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+        .contentShape(Rectangle())
+        .onTapGesture { onOpenScript?(script) }
+        .contextMenu {
+            Button { onOpenScript?(script) } label: { Label("Open Script", systemImage: "doc.text") }
+            Divider()
+            Button(role: .destructive) { deleteScript(script) } label: {
+                Label("Delete Script", systemImage: "trash")
+            }
+        }
+    }
+
+    private func deleteScript(_ script: ScriptData) {
+        modelContext.delete(script)
+        try? modelContext.save()
+    }
+
     /// Trash section — soft-deleted lists and photos, with Empty Trash. Auto-purged at 30 days.
     @ViewBuilder
     private var trashSection: some View {
@@ -2059,6 +2122,8 @@ private struct ProjectDetailView: View {
                 sidebarRow(item)
             }
 
+            scriptsSection
+
             trashSection
 
             // Bottom drop zone — same as the top one, for when the list is scrolled down.
@@ -2145,6 +2210,9 @@ private struct ProjectDetailView: View {
                     }
                     Button { importPhotos() } label: {
                         Label("Import Photos", systemImage: "photo.badge.plus")
+                    }
+                    Button { importScript() } label: {
+                        Label("Import Script…", systemImage: "doc.text")
                     }
                     Divider()
                     Button { pickTimelineAndBackfill() } label: {
@@ -2291,6 +2359,31 @@ private struct ProjectDetailView: View {
         Task { @MainActor in await importImageURLs(urls, into: nil) }
         #endif
         // iOS uses PhotosPicker instead — see IOS_PLAN.md (not wired into this Mac sidebar).
+    }
+
+    /// Imports one or more `.fountain` scripts: reads each file's text into a new ScriptData
+    /// (copied in, not referenced) under the project's "Scripts" section.
+    private func importScript() {
+        #if os(macOS)
+        let panel = NSOpenPanel()
+        panel.title = "Import Script"
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "fountain") ?? .plainText, .plainText, .text]
+        panel.allowsOtherFileTypes = true
+        guard panel.runModal() == .OK else { return }
+        var nextOrder = (project.scripts.map(\.sortOrder).max() ?? -1) + 1
+        for url in panel.urls {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let name = url.deletingPathExtension().lastPathComponent
+            let script = ScriptData(name: name, rawText: text, sortOrder: nextOrder)
+            nextOrder += 1
+            modelContext.insert(script)
+            script.project = project
+        }
+        try? modelContext.save()
+        scriptsExpanded = true
+        #endif
     }
 
     /// Picks a Google Maps Timeline JSON export and backfills GPS onto photos that lack it

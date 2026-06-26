@@ -255,6 +255,15 @@ struct ContentView: View {
     /// the pin's list/folder chain and scroll to its row. A fresh value each time so re-revealing
     /// the same pin still fires the sidebar's onChange.
     @State private var revealInListUUID: UUID? = nil
+    /// The script currently shown in Script mode (selected from the sidebar). Resolved against
+    /// the open project's scripts; falls back to the first script.
+    @State private var activeScriptUUID: UUID? = nil
+
+    private var activeScript: ScriptData? {
+        let scripts = allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })?.scripts ?? []
+        if let id = activeScriptUUID, let s = scripts.first(where: { $0.uuid == id }) { return s }
+        return scripts.sorted { $0.sortOrder < $1.sortOrder }.first
+    }
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
     @State private var showExternalMoveSheet = false
     /// Duplicate pins found by the debug "Find Duplicates" scan, awaiting confirmation to trash.
@@ -424,6 +433,10 @@ struct ContentView: View {
                         }
                     },
                     onOpenCarousel: openInCarousel,
+                    onOpenScript: { script in
+                        activeScriptUUID = script.uuid
+                        withAnimation(.spring(duration: 0.3)) { viewMode = .script }
+                    },
                     onRevealInGrid: { id in revealInGrid(id) },
                     onRevealOnMap: { id in revealOnMap(id) },
                     scrollToPinUUID: highlightedPinID,
@@ -697,6 +710,10 @@ struct ContentView: View {
                 .opacity(viewMode == .photos ? 1 : 0)
                 .allowsHitTesting(viewMode == .photos)
                 .zIndex(10)
+            ScriptView(script: activeScript)
+                .opacity(viewMode == .script ? 1 : 0)
+                .allowsHitTesting(viewMode == .script)
+                .zIndex(15)
             if photoViewer.isVisible {
                 PhotoViewerOverlay(availableLists: openProjectLists, onSave: savePinned,
                                    onRotate: { url in rotatePin(forImageURL: url) },
@@ -1153,6 +1170,8 @@ struct ContentView: View {
         for pin in allPins where !seenPins.insert(pin.uuid).inserted { pin.uuid = UUID(); changed = true }
         var seenProjects = Set<UUID>()
         for project in allProjects where !seenProjects.insert(project.uuid).inserted { project.uuid = UUID(); changed = true }
+        var seenScripts = Set<UUID>()
+        for script in allProjects.flatMap(\.scripts) where !seenScripts.insert(script.uuid).inserted { script.uuid = UUID(); changed = true }
         if changed { try? modelContext.save() }
     }
 
@@ -1728,17 +1747,33 @@ struct ContentView: View {
         LegendItem(color: Color(red: 0.83, green: 0.83, blue: 0.83), label: "No cycling"),
     ]
 
+    private func viewModeIcon(_ mode: ViewMode) -> String {
+        switch mode { case .map: "map"; case .photos: "photo.stack"; case .script: "doc.text" }
+    }
+    private func viewModeLabel(_ mode: ViewMode, photoCount: Int) -> String {
+        switch mode {
+        case .map: "Map"
+        case .photos: photoCount > 0 ? "Photos (\(photoCount))" : "Photos"
+        case .script: "Script"
+        }
+    }
+    /// Scripts only appear in the toggle when the open project actually has one.
+    private var hasScripts: Bool {
+        !(allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })?.scripts.isEmpty ?? true)
+    }
+
     private var viewModeToggle: some View {
         let photoCount = locations.reduce(0) { $0 + $1.images.count }
+        let modes: [ViewMode] = hasScripts ? [.map, .photos, .script] : [.map, .photos]
         return HStack(spacing: 2) {
-            ForEach([ViewMode.map, .photos], id: \.self) { mode in
+            ForEach(modes, id: \.self) { mode in
                 Button {
                     withAnimation(.spring(duration: 0.3)) { viewMode = mode }
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: mode == .map ? "map" : "photo.stack")
+                        Image(systemName: viewModeIcon(mode))
                             .font(.subheadline.weight(.medium))
-                        Text(mode == .map ? "Map" : (photoCount > 0 ? "Photos (\(photoCount))" : "Photos"))
+                        Text(viewModeLabel(mode, photoCount: photoCount))
                             .font(.subheadline.weight(.medium))
                     }
                     .foregroundStyle(viewMode == mode ? .white : .white.opacity(0.4))
@@ -2300,7 +2335,7 @@ enum RightPanelTab: String, CaseIterable, Identifiable {
 // MARK: - View mode
 
 enum ViewMode: CaseIterable {
-    case map, photos
+    case map, photos, script
 }
 
 // MARK: - Map style
