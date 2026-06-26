@@ -2157,19 +2157,23 @@ private struct ProjectDetailView: View {
                 }
             }
         }
-        .alert("Rename List", isPresented: Binding(
-            get: { renamingList != nil },
-            set: { if !$0 { renamingList = nil } }
-        )) {
-            TextField("List name", text: $renameListText)
-            Button("Rename") {
-                if let list = renamingList, !renameListText.trimmingCharacters(in: .whitespaces).isEmpty {
-                    list.name = renameListText.trimmingCharacters(in: .whitespaces)
+        // A sheet (not .alert) so the field reliably shows the existing name pre-filled — a
+        // TextField inside a macOS .alert doesn't reflect a pre-set binding value.
+        .sheet(item: $renamingList) { list in
+            NameEntrySheet(
+                title: "Rename List",
+                placeholder: "List name",
+                text: $renameListText,
+                confirmLabel: "Rename",
+                onDismiss: { renamingList = nil }
+            ) { name in
+                let trimmed = name.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty {
+                    list.name = trimmed
                     try? modelContext.save()
                 }
                 renamingList = nil
             }
-            Button("Cancel", role: .cancel) { renamingList = nil }
         }
         .confirmationDialog(
             "Delete List",
@@ -2624,6 +2628,7 @@ struct NameEntrySheet: View {
     let title: String
     let placeholder: String
     @Binding var text: String
+    var confirmLabel: String = "Create"
     let onDismiss: () -> Void
     let onConfirm: (String) -> Void
 
@@ -2636,7 +2641,7 @@ struct NameEntrySheet: View {
             HStack {
                 Button("Cancel", action: onDismiss)
                 Spacer()
-                Button("Create") { onConfirm(text) }
+                Button(confirmLabel) { onConfirm(text) }
                     .buttonStyle(.borderedProminent)
                     .disabled(text.isEmpty)
             }

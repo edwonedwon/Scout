@@ -463,14 +463,19 @@ final class ZoomableMapView: MKMapView {
 
     override func rightMouseDown(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
-        // Walk up the view hierarchy from the hit view to find an annotation view
-        var candidate: NSView? = hitTest(pt)
-        while let v = candidate, !(v is MKAnnotationView) { candidate = v.superview }
-        if let annView = candidate as? MKAnnotationView,
-           let ann = annView.annotation as? LocationAnnotation,
-           let menu = onBuildAnnotationMenu?(ann.location, ann.isProjectPin) {
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
-            return
+        // Use the SAME reliable spatial lookup as left-click (hover/pinUnderCursor). The old
+        // hitTest()+walk-up was unreliable on MapKit annotation views — it only occasionally
+        // landed on the annotation, which is why the menu rarely appeared.
+        applyHover(at: pt)
+        if let ann = pinUnderCursor?.annotation as? LocationAnnotation {
+            let menu = onBuildAnnotationMenu?(ann.location, ann.isProjectPin)
+            DebugLogger.shared.log("right-click pin '\(ann.location.name)' isProjectPin=\(ann.isProjectPin) → menu items=\(menu?.items.count ?? -1)", tag: "RMB")
+            if let menu {
+                NSMenu.popUpContextMenu(menu, with: event, for: self)
+                return
+            }
+        } else {
+            DebugLogger.shared.log("right-click: no pin under cursor at \(pt)", tag: "RMB")
         }
         super.rightMouseDown(with: event)
     }
