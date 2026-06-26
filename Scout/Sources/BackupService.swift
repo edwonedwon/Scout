@@ -20,6 +20,32 @@ struct BackupProject: Codable {
     var createdAt: Date
     var lists: [BackupList]
     var importedPhotos: [BackupPin]
+    /// Imported `.fountain` scripts + their scene→list links. Optional so older backups
+    /// (written before scripts existed) still decode.
+    var scripts: [BackupScript]? = nil
+}
+
+struct BackupScript: Codable {
+    var uuid: UUID
+    var name: String
+    var rawText: String
+    var importedAt: Date
+    var updatedAt: Date
+    var sortOrder: Int
+    var highlights: [BackupScriptHighlight]
+}
+
+struct BackupScriptHighlight: Codable {
+    var uuid: UUID
+    var rangeStart: Int
+    var rangeLength: Int
+    var excerpt: String
+    var contextBefore: String
+    var contextAfter: String
+    var sceneHeading: String?
+    var createdAt: Date
+    /// The uuid of the list this scene is linked to (re-mapped to the freshly imported list).
+    var listUUID: UUID?
 }
 
 struct BackupList: Codable {
@@ -107,6 +133,7 @@ enum BackupService {
         for pin in project.importedPhotos.sorted(by: { $0.panelOrder < $1.panelOrder }) {
             bp.importedPhotos.append(backupPin(pin))
         }
+        bp.scripts = project.scripts.sorted(by: { $0.sortOrder < $1.sortOrder }).map(backupScript)
         manifest.projects.append(bp)
 
         // --- Write JSON ---
@@ -130,6 +157,7 @@ enum BackupService {
         var projectsAdded: Int = 0
         var listsAdded: Int = 0
         var pinsAdded: Int = 0
+        var scriptsAdded: Int = 0
         var photoFilesCopied: Int = 0
         var skippedDuplicates: Int = 0
     }
@@ -190,14 +218,37 @@ enum BackupService {
             summary.pinsAdded += 1
         }
 
+        // Original backup list-uuid → freshly created list, so script scene-links can be re-tied.
+        var listsByOriginalUUID: [UUID: LocationListData] = [:]
+
         func insertList(_ bl: BackupList, project: ProjectData?) -> LocationListData {
             var fresh = bl; fresh.uuid = UUID()
             let list = LocationListData.fromBackup(fresh)
             context.insert(list)
             list.project = project
+            listsByOriginalUUID[bl.uuid] = list
             summary.listsAdded += 1
             for bp in bl.pins { insertPin(bp, list: list, project: nil) }
             return list
+        }
+
+        func insertScript(_ bs: BackupScript, project: ProjectData) {
+            let script = ScriptData(name: bs.name, rawText: bs.rawText, sortOrder: bs.sortOrder)
+            script.importedAt = bs.importedAt
+            script.updatedAt = bs.updatedAt
+            context.insert(script)
+            script.project = project
+            summary.scriptsAdded += 1
+            for bh in bs.highlights {
+                // Only re-create links whose list made it into the import (skip orphans).
+                guard let listUUID = bh.listUUID, let list = listsByOriginalUUID[listUUID] else { continue }
+                let h = ScriptHighlight(rangeStart: bh.rangeStart, rangeLength: bh.rangeLength,
+                                        excerpt: bh.excerpt, contextBefore: bh.contextBefore,
+                                        contextAfter: bh.contextAfter, sceneHeading: bh.sceneHeading)
+                context.insert(h)
+                h.script = script
+                h.list = list
+            }
         }
 
         for bp in manifest.projects {
@@ -208,6 +259,7 @@ enum BackupService {
             summary.projectsAdded += 1
             for bl in bp.lists           { _ = insertList(bl, project: project) }
             for pin in bp.importedPhotos { insertPin(pin, list: nil, project: project) }
+            for bs in bp.scripts ?? []   { insertScript(bs, project: project) }
         }
 
         // Standalone lists and unfiled pins (edge cases — wrap in a project named after the file)
@@ -308,6 +360,30 @@ enum BackupService {
             sortOrder: list.sortOrder,
             panelOrder: list.panelOrder,
             pins: list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }).map(backupPin)
+        )
+    }
+
+    private static func backupScript(_ script: ScriptData) -> BackupScript {
+        BackupScript(
+            uuid: script.uuid,
+            name: script.name,
+            rawText: script.rawText,
+            importedAt: script.importedAt,
+            updatedAt: script.updatedAt,
+            sortOrder: script.sortOrder,
+            highlights: script.highlights.map { h in
+                BackupScriptHighlight(
+                    uuid: h.uuid,
+                    rangeStart: h.rangeStart,
+                    rangeLength: h.rangeLength,
+                    excerpt: h.excerpt,
+                    contextBefore: h.contextBefore,
+                    contextAfter: h.contextAfter,
+                    sceneHeading: h.sceneHeading,
+                    createdAt: h.createdAt,
+                    listUUID: h.list?.uuid
+                )
+            }
         )
     }
 
