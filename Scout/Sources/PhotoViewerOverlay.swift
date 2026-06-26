@@ -91,8 +91,65 @@ enum PhotoLoader {
             }
         }.value
         guard let img else { return nil }
-        cache.setObject(img, forKey: url as NSURL, cost: data.count)
+        // Cost = real DECODED memory (≈ w·h·4), NOT the compressed byte count. Using
+        // data.count undercounts a decoded bitmap by 10-30× (a 2048px carousel image is
+        // ~16 MB in memory but <1 MB as JPEG), so the cache silently held 1-2 GB of
+        // bitmaps under a "150 MB" ceiling and thrashed memory on low-RAM machines.
+        cache.setObject(img, forKey: url as NSURL, cost: decodedCost(img))
         return img
+    }
+
+    /// Approximate in-memory size of a decoded image in bytes (4 bytes per pixel).
+    private static func decodedCost(_ img: ScoutImageType) -> Int {
+        #if os(macOS)
+        if let rep = img.representations.first, rep.pixelsWide > 0 {
+            return rep.pixelsWide * rep.pixelsHigh * 4
+        }
+        return Int(img.size.width * img.size.height) * 4
+        #else
+        return Int(img.size.width * img.scale * img.size.height * img.scale) * 4
+        #endif
+    }
+
+    // MARK: - Downsampled thumbnails (photo grid)
+
+    /// Synchronous cache hit for a downsampled thumbnail at `maxPixel`. Keyed separately
+    /// from the full-size entry so the grid and carousel don't evict each other.
+    static func cachedThumbnail(_ url: URL, maxPixel: Int) -> ScoutImageType? {
+        cache.object(forKey: thumbKey(url, maxPixel))
+    }
+
+    /// Loads an image downsampled so its longest side ≤ `maxPixel`. Uses CGImageSource's
+    /// thumbnail path, which decodes far less than a full decode and yields a small bitmap —
+    /// so the grid holds many more images in the same memory budget (fewer re-decodes on
+    /// scroll) and each decode is cheaper.
+    static func loadThumbnail(_ url: URL, maxPixel: Int) async -> ScoutImageType? {
+        if let c = cachedThumbnail(url, maxPixel: maxPixel) { return c }
+        guard let data = await data(for: url) else { return nil }
+        let img = await Task.detached(priority: .utility) { downsample(data, maxPixel: maxPixel) }.value
+        guard let img else { return nil }
+        cache.setObject(img, forKey: thumbKey(url, maxPixel), cost: decodedCost(img))
+        return img
+    }
+
+    private static func thumbKey(_ url: URL, _ maxPixel: Int) -> NSURL {
+        (URL(string: url.absoluteString + "#th\(maxPixel)") ?? url) as NSURL
+    }
+
+    private static func downsample(_ data: Data, maxPixel: Int) -> ScoutImageType? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+        ]
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        #if os(macOS)
+        return ScoutImageType(cgImage: cg, size: .zero)
+        #else
+        return ScoutImageType(cgImage: cg)
+        #endif
     }
 
     private static func decodeImage(from data: Data) -> ScoutImageType? {
@@ -189,15 +246,30 @@ struct GooglePhotoImage<Placeholder: View>: View {
     /// Rotating the bitmap (not the view) keeps the swapped aspect ratio correct
     /// for layout — masonry sizing and aspect-fit all behave automatically.
     var rotationQuarterTurns: Int = 0
+    /// When set, the image is decoded downsampled so its longest side ≈ this many pixels
+    /// (rounded up to a small bucket). The photo grid passes the cell's pixel width so big
+    /// source files become tiny bitmaps — many more fit in cache, scrolling stops re-decoding.
+    var targetPixelSize: CGFloat? = nil
     let placeholder: () -> Placeholder
 
     @State private var image: ScoutImageType? = nil
     @State private var loadTask: Task<Void, Never>? = nil
 
-    init(url: URL?, rotationQuarterTurns: Int = 0, @ViewBuilder placeholder: @escaping () -> Placeholder) {
+    init(url: URL?, rotationQuarterTurns: Int = 0, targetPixelSize: CGFloat? = nil,
+         @ViewBuilder placeholder: @escaping () -> Placeholder) {
         self.url = url
         self.rotationQuarterTurns = rotationQuarterTurns
+        self.targetPixelSize = targetPixelSize
         self.placeholder = placeholder
+    }
+
+    /// Rounds a target display size up to a small bucket to avoid caching many near-identical
+    /// sizes. Returns 0 when the cell is large enough that downsampling the (already small)
+    /// source thumbnail wouldn't save anything — then we use the normal full decode.
+    private func sizeBucket(_ s: CGFloat) -> Int {
+        let px = Int(s.rounded())
+        for b in [96, 128, 160, 192, 224, 256] where px <= b { return b }
+        return 0
     }
 
     var body: some View {
@@ -216,11 +288,28 @@ struct GooglePhotoImage<Placeholder: View>: View {
         .onDisappear { loadTask?.cancel() }
         .onChange(of: url?.absoluteString ?? "") { _, _ in load() }
         .onChange(of: rotationQuarterTurns) { _, _ in load() }
+        .onChange(of: targetPixelSize.map(sizeBucket) ?? 0) { _, _ in load() }
     }
 
     private func load() {
         loadTask?.cancel()
         guard let url else { image = nil; return }
+        // Downsampled path for the grid: tiny bitmaps, many more fit in cache.
+        let bucket = targetPixelSize.map(sizeBucket) ?? 0
+        if bucket > 0 {
+            if let cached = PhotoLoader.cachedThumbnail(url, maxPixel: bucket) {
+                image = cached.rotatedCCW(quarterTurns: rotationQuarterTurns)
+                return
+            }
+            image = nil
+            loadTask = Task {
+                let loaded = await PhotoLoader.loadThumbnail(url, maxPixel: bucket)
+                guard !Task.isCancelled, let loaded else { return }
+                let rotated = loaded.rotatedCCW(quarterTurns: rotationQuarterTurns)
+                await MainActor.run { image = rotated }
+            }
+            return
+        }
         if let cached = PhotoLoader.cached(url) {
             image = cached.rotatedCCW(quarterTurns: rotationQuarterTurns)
             return

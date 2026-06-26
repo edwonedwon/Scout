@@ -567,10 +567,34 @@ final class ZoomableMapView: MKMapView {
         magTrackingArea = t
     }
 
+    // Hover throttle: applyHover runs a spatial query + view lookups; mouseMoved fires at
+    // 60-120 Hz, so cap it to ~30 Hz with a trailing update so the final resting position
+    // is never dropped. Hover is purely cosmetic, so coalescing intermediate moves is safe.
+    private var hoverThrottleUntil: TimeInterval = 0
+    private var pendingHoverPoint: CGPoint?
+    private var hoverScheduled = false
+
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         guard !isDrawingMode else { return }
-        applyHover(at: convert(event.locationInWindow, from: nil))
+        let pt = convert(event.locationInWindow, from: nil)
+        let now = CACurrentMediaTime()
+        if now >= hoverThrottleUntil {
+            hoverThrottleUntil = now + 0.033
+            applyHover(at: pt)
+            return
+        }
+        pendingHoverPoint = pt
+        guard !hoverScheduled else { return }
+        hoverScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + (hoverThrottleUntil - now)) { [weak self] in
+            guard let self else { return }
+            self.hoverScheduled = false
+            guard let p = self.pendingHoverPoint else { return }
+            self.pendingHoverPoint = nil
+            self.hoverThrottleUntil = CACurrentMediaTime() + 0.033
+            self.applyHover(at: p)
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -944,10 +968,15 @@ final class MenuAction: NSObject {
 
 struct ScoutMapView {
     @Binding var selection: ScoutLocation?
-    /// Option-click multi-selection of pin location IDs (for batch move-to-list).
-    @Binding var mapSelection: Set<UUID>
+    /// THE shared selection store (sidebar + grid + map). Option-clicking pins writes here, and
+    /// a Combine subscription in the Coordinator reflects changes made in the OTHER views back
+    /// onto the map's pin rings — without re-running ContentView's body.
+    var multiSelection: SelectionStore
     var locations: [ScoutLocation]
     var projectPins: [(ScoutLocation, String)] = []  // (location, colorHex)
+    /// Bumped by the host only when `projectPins` actually changes, so `updateMap` can skip
+    /// the O(n) map + hash of thousands of pins on unrelated re-renders (selection, hover…).
+    var projectPinsVersion: Int = 0
     var scrollToZoom: Bool
     var initialRegion: MKCoordinateRegion?
     var controller: ScoutMapController
@@ -1001,6 +1030,7 @@ struct ScoutMapView {
         Task { @MainActor in
             controller.mapView = map
             context.coordinator.wireReveal(controller: controller, mapView: map)
+            context.coordinator.wireSelection(store: multiSelection, mapView: map)
         }
         return map
     }
@@ -1018,29 +1048,16 @@ struct ScoutMapView {
                 coordinator?.buildAnnotationMenu(for: location)
             }
             zoomable.onMultiSelectionChanged = { ids in
-                // Update synchronously. An async hop leaves a window where the view's
-                // multiSelectedIDs is ahead of this binding; an unrelated re-render in
-                // that window (e.g. popover deselect → onMapDeselect → rebuildPinCaches)
-                // runs the reconciliation below and wipes the just-added pin's ring —
-                // which is why option-click could never build up more than one selection.
-                // Mouse events never fire during a SwiftUI view update, so a synchronous
-                // binding write here is safe.
-                mapSelection = ids
+                // Write the shared store synchronously. The store's publisher then notifies the
+                // sidebar/grid (which observe it). The Coordinator's own subscription also fires,
+                // but reconcileSelection is a no-op because the view's multiSelectedIDs already
+                // equals `ids` (set in toggleMultiSelect before this). Synchronous is safe:
+                // mouse events never fire during a SwiftUI view update.
+                multiSelection.ids = ids
             }
-            // Reconcile the view's selection rings when the binding changes externally
-            // (e.g. cleared after a batch move, or restored). Handle both directions.
-            if zoomable.multiSelectedIDs != mapSelection {
-                let removed = zoomable.multiSelectedIDs.subtracting(mapSelection)
-                let added = mapSelection.subtracting(zoomable.multiSelectedIDs)
-                zoomable.multiSelectedIDs = mapSelection
-                for ann in zoomable.annotations.compactMap({ $0 as? LocationAnnotation }) {
-                    if removed.contains(ann.location.id) {
-                        zoomable.applySelectionRing(to: ann, selected: false)
-                    } else if added.contains(ann.location.id) {
-                        zoomable.applySelectionRing(to: ann, selected: true)
-                    }
-                }
-            }
+            // Reconcile rings against the shared store on any re-render (covers a render that
+            // lands after an external change the Combine sink hasn't processed yet).
+            context.coordinator.reconcileSelection(multiSelection.ids, on: zoomable)
         }
         #endif
         // NOTE: showsUserLocation is set once in makeMap and deliberately never
@@ -1080,7 +1097,12 @@ struct ScoutMapView {
         }
         coord.lastPinScale = pinScale
         context.coordinator.syncAnnotations(map, desired: locations.map { ($0, nil) }, projectPins: false)
-        context.coordinator.syncAnnotations(map, desired: projectPins.map { ($0.0, $0.1) }, projectPins: true)
+        // Only rebuild the (large) project-pin array + diff when the version actually changed.
+        // This keeps unrelated re-renders (selection, hover, typing) off the O(n) path.
+        if coord.lastProjectPinsVersion != projectPinsVersion {
+            coord.lastProjectPinsVersion = projectPinsVersion
+            context.coordinator.syncAnnotations(map, desired: projectPins.map { ($0.0, $0.1) }, projectPins: true)
+        }
         context.coordinator.syncSelection(map, selection: selection)
         syncTileOverlay(map)
         syncPolygonOverlay(map)
@@ -1131,6 +1153,7 @@ struct ScoutMapView {
         private var projectIndex: [UUID: LocationAnnotation] = [:]
         private var lastSearchSig:  Int = 0
         private var lastProjectSig: Int = 0
+        var lastProjectPinsVersion: Int = -1
 
         /// True incremental diff: adds only new annotations, removes only stale ones, and
         /// updates tint/image in-place — so a 1000-pin project that hasn't changed costs
@@ -1306,7 +1329,39 @@ struct ScoutMapView {
         private var activePopover: NSPopover?
         private var photoViewerCancellable: AnyCancellable?
         private var revealCancellable: AnyCancellable?
+        private var selectionCancellable: AnyCancellable?
         #endif
+
+        /// Subscribes to the shared selection store so a selection made in the sidebar or photo
+        /// grid is mirrored onto the map's pin rings — imperatively, without re-running any
+        /// SwiftUI body (ContentView owns the store via plain @State, so it never re-renders the
+        /// map on selection change; this subscription is what keeps the map in sync).
+        func wireSelection(store: SelectionStore, mapView: MKMapView) {
+            #if os(macOS)
+            selectionCancellable = store.$ids
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self, weak mapView] ids in
+                    guard let self, let map = mapView as? ZoomableMapView else { return }
+                    self.reconcileSelection(ids, on: map)
+                }
+            #endif
+        }
+
+        /// Brings the map view's working selection set + pin rings in line with `ids`.
+        /// Only touches the pins whose membership actually changed, so it's cheap.
+        func reconcileSelection(_ ids: Set<UUID>, on map: ZoomableMapView) {
+            #if os(macOS)
+            // Only pin uuids matter to the map; folder uuids in the set are ignored naturally
+            // (no annotation has that id). Compare against the view's current working set.
+            guard map.multiSelectedIDs != ids else { return }
+            let changed = map.multiSelectedIDs.symmetricDifference(ids)
+            map.multiSelectedIDs = ids
+            for ann in map.annotations.compactMap({ $0 as? LocationAnnotation })
+            where changed.contains(ann.location.id) {
+                map.applySelectionRing(to: ann, selected: ids.contains(ann.location.id))
+            }
+            #endif
+        }
 
         func wireReveal(controller: ScoutMapController, mapView: MKMapView) {
             #if os(macOS)
@@ -1331,6 +1386,18 @@ struct ScoutMapView {
 
         func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
             guard let ann = view.annotation as? LocationAnnotation else { return }
+            #if os(macOS)
+            // While an option-click multi-selection is active, NEVER show the single-pin
+            // popover or hijack parent.selection. This selection can be a stray re-selection
+            // from syncSelection (parent.selection is cleared only asynchronously via
+            // didDeselect, so a re-render can re-select the previously-open pin). Undo it
+            // immediately and bail — the user is building a batch, not inspecting one pin.
+            // Check the view's own synchronous multiSelectedIDs (the binding lags a frame).
+            if let zoomable = mapView as? ZoomableMapView, !zoomable.multiSelectedIDs.isEmpty {
+                mapView.deselectAnnotation(ann, animated: false)
+                return
+            }
+            #endif
             // Blue selection ring — store original border color so we can restore it on deselect.
             #if os(macOS)
             if let photo = view as? ScoutPhotoAnnotationView {
@@ -1351,8 +1418,16 @@ struct ScoutMapView {
             // Restore the original border/dot color from the annotation's tintHex.
             #if os(macOS)
             if let ann = view.annotation as? LocationAnnotation {
+                // MapKit fires didDeselect asynchronously, so it can land AFTER an option-click
+                // has already folded this pin into the multi-selection and rung it blue. Photo
+                // pins reuse `borderColor` for both the single-select highlight AND the
+                // multi-select ring, so blindly clearing it here wipes the ring of a pin that's
+                // still selected — the "blue frame randomly disappears" bug. Only clear when the
+                // pin is genuinely out of the multi-selection. (Dots track multi-select via the
+                // separate isMultiSelected flag, so resetting dotColor never affects their ring.)
+                let inMultiSelect = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                 if let photo = view as? ScoutPhotoAnnotationView {
-                    photo.borderColor = .clear   // no colored frame on map photos
+                    photo.borderColor = inMultiSelect ? .systemBlue : .clear
                 } else if let dot = view as? ScoutDotAnnotationView {
                     dot.dotColor = ann.tintColor
                 }
@@ -1374,6 +1449,8 @@ struct ScoutMapView {
             // popover can appear floating on top of it. This is the hard guarantee; the
             // .onChange(photoViewer.isVisible) dismiss handles the already-open case.
             if PhotoViewerState.shared.isVisible { return }
+            // Never show the popover during an active option-click multi-selection.
+            if let zoomable = mapView as? ZoomableMapView, !zoomable.multiSelectedIDs.isEmpty { return }
             activePopover?.close()
             let lists = parent.availableLists
             let saveHandler = parent.onSaveToList
@@ -1410,7 +1487,7 @@ struct ScoutMapView {
             let menu = NSMenu()
 
             // Multi-selection: one item that opens the move picker for all selected pins.
-            let selectionCount = parent.mapSelection.count
+            let selectionCount = parent.multiSelection.ids.count
             if selectionCount >= 2, let moveSelection = parent.onMoveSelectionToList {
                 let act = MenuAction { moveSelection() }
                 menuActions.append(act)

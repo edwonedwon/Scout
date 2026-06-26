@@ -3,6 +3,75 @@ import MapKit
 import SwiftData
 import ScoutKit
 
+/// The single source of truth for the app's selection, shared by every view that shows it:
+/// the sidebar rows, the photo-grid cells, and the map pins. Selecting in any one view writes
+/// here; the others observe the same store and update automatically.
+///
+/// Keyed by UUID (each `PinnedLocationData`/`LocationListData` has a stable `uuid`, and
+/// `ScoutLocation.id` is that same uuid) — the common identifier across all three views.
+/// The set normally holds selected PHOTO uuids; the sidebar may also include folder/list
+/// uuids (folders aren't pins, so the grid and map simply ignore ids they don't render).
+///
+/// A reference type so it can be owned high up via plain @State and passed down without
+/// re-rendering the owner on every change. Only leaf rows/cells `@ObservedObject` it (and the
+/// map subscribes via Combine), so selecting thousands of items repaints just what's visible.
+final class SelectionStore: ObservableObject {
+    @Published var ids: Set<UUID> = []
+    /// Anchor for shift-range selection (last single-clicked id).
+    var anchor: UUID? = nil
+    func contains(_ id: UUID) -> Bool { ids.contains(id) }
+}
+
+/// Caches the two expensive pieces of `rebuildPinCaches` so a visibility toggle (which
+/// changes neither a pin's data nor a list's membership) reuses results instead of
+/// recomputing them for thousands of pins on the main thread:
+///   • `asScoutLocation()` — does a per-pin disk stat (`isReadableFile`) via fullResImages.
+///   • `proximityOrdered()` — an O(n²) nearest-neighbour walk per list section.
+/// Both are keyed by a cheap content signature, so any real change (rotation, new photos,
+/// moved/added/removed pins, reorder) self-invalidates while a pure show/hide hits the cache.
+/// Held by the view via plain @State: mutating its internal dictionaries does NOT re-render
+/// the view (the @State value — the reference — is unchanged).
+final class PinDisplayCache {
+    private var locs: [PersistentIdentifier: (sig: Int, loc: ScoutLocation)] = [:]
+    private var proximity: [PersistentIdentifier: (sig: Int, result: [PinnedLocationData])] = [:]
+
+    func location(for pin: PinnedLocationData) -> ScoutLocation {
+        let sig = Self.pinSignature(pin)
+        if let c = locs[pin.persistentModelID], c.sig == sig { return c.loc }
+        let loc = pin.asScoutLocation()
+        locs[pin.persistentModelID] = (sig, loc)
+        return loc
+    }
+
+    /// Returns the proximity-ordered pins for `key`, recomputing via `compute` only when the
+    /// input set/order signature changes. `pins` must already be filtered + sorted by caller.
+    func proximityOrdered(_ key: PersistentIdentifier, pins: [PinnedLocationData],
+                          compute: ([PinnedLocationData]) -> [PinnedLocationData]) -> [PinnedLocationData] {
+        var hasher = Hasher()
+        for p in pins { hasher.combine(p.persistentModelID); hasher.combine(p.sortOrder) }
+        let sig = hasher.finalize()
+        if let c = proximity[key], c.sig == sig { return c.result }
+        let result = compute(pins)
+        proximity[key] = (sig, result)
+        return result
+    }
+
+    /// Clears everything — used when on-disk file availability changes (e.g. relink), which
+    /// affects `fullResImages` but isn't part of the per-pin signature.
+    func invalidateAll() { locs.removeAll(); proximity.removeAll() }
+
+    private static func pinSignature(_ pin: PinnedLocationData) -> Int {
+        var h = Hasher()
+        h.combine(pin.rotationQuarterTurns)
+        h.combine(pin.name)
+        h.combine(pin.latitude); h.combine(pin.longitude); h.combine(pin.hasGPS)
+        h.combine(pin.photoFiles); h.combine(pin.thumbnailFiles)
+        h.combine(pin.originalFilePath)
+        h.combine(pin.statusRaw)
+        return h.finalize()
+    }
+}
+
 
 struct ContentView: View {
     @StateObject private var locationManager = LocationManager.shared
@@ -77,6 +146,10 @@ struct ContentView: View {
     @AppStorage("ui.showRightPanel") private var showRightPanel = true
     // Left sidebar width — user-draggable, persisted. Min/max are tweakable in the Debug panel.
     @AppStorage("ui.sidebarWidth") private var sidebarWidth: Double = 280
+    // Live width while a resize drag is in progress. Plain @State so dragging never thrashes
+    // UserDefaults (an AppStorage write per tick serializes + persists + KVO-notifies). The
+    // final value is committed to `sidebarWidth` once, on drag end.
+    @State private var liveSidebarWidth: Double? = nil
     @AppStorage("debug.sidebarMinWidth") private var sidebarMinWidth: Double = 200
     @AppStorage("debug.sidebarMaxWidth") private var sidebarMaxWidth: Double = 480
     @State private var activeListIDs: Set<PersistentIdentifier> = []
@@ -94,17 +167,26 @@ struct ContentView: View {
     // Cached pin arrays so asScoutLocation() isn't called on every ContentView body render.
     // Rebuilt only when the underlying SwiftData queries or activeListIDs actually change.
     @State private var cachedProjectPins: [(ScoutLocation, String)] = []
-    @State private var cachedAllProjectPins: [ScoutLocation] = []
     @State private var cachedGridSections: [PhotoGridView.Section] = []
     /// UUIDs to move when the move sheet is triggered from the grid or M key outside sidebar.
     @State private var externalMoveUUIDs: [UUID] = []
-    // Mirror of the photo grid's current multi-selection, so the "m" Move shortcut can act
-    // on ALL selected photos (the grid owns its selection privately).
-    @State private var gridSelectedUUIDs: Set<UUID> = []
-    /// Option-click multi-selection of map pins (location IDs).
-    @State private var mapSelection: Set<UUID> = []
+    /// THE single source of truth for what's selected. The sidebar, the photo grid, and the
+    /// map pins all read and write this one store, so a selection made in any view is reflected
+    /// in the other two automatically. Owned here via plain @State (NOT @StateObject) so
+    /// mutating it never re-runs ContentView's body — only the leaf rows/cells that
+    /// @ObservedObject it, and the map's Combine subscription, react. See SelectionStore.
+    @State private var selection = SelectionStore()
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
     @State private var showExternalMoveSheet = false
+    /// Duplicate pins found by the debug "Find Duplicates" scan, awaiting confirmation to trash.
+    @State private var pendingDuplicateRemoval: [PinnedLocationData] = []
+    @State private var pendingDuplicateClusters = 0
+    @State private var showDuplicateConfirm = false
+    /// Signature-keyed cache that makes visibility toggles instant at thousands of pins.
+    @State private var displayCache = PinDisplayCache()
+    /// Incremented whenever the map's project-pin cache is rebuilt, so ScoutMapView can skip
+    /// re-diffing thousands of pins on re-renders where the pins didn't change.
+    @State private var pinCacheVersion = 0
 
     private var hasSavedRegion: Bool {
         !savedLat.isNaN && !savedLng.isNaN
@@ -137,6 +219,19 @@ struct ContentView: View {
 
     @ViewBuilder private var rootLayoutWithObservers: some View {
         rootLayoutWithModeObservers
+            .confirmationDialog("Find & Delete Duplicates",
+                                isPresented: $showDuplicateConfirm,
+                                titleVisibility: .visible) {
+                Button("Move \(pendingDuplicateRemoval.count) to Trash", role: .destructive) {
+                    confirmRemoveDuplicates()
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingDuplicateRemoval = []
+                    pendingDuplicateClusters = 0
+                }
+            } message: {
+                Text("Found \(pendingDuplicateRemoval.count) duplicate photo\(pendingDuplicateRemoval.count == 1 ? "" : "s") across \(pendingDuplicateClusters) group\(pendingDuplicateClusters == 1 ? "" : "s"). The original (large) files are kept; the compressed copies move to the Trash (recoverable for 30 days).")
+            }
             .onChange(of: allPins.count)         { rebuildPinCaches() }
             .onChange(of: unfiledPins.count)     { rebuildPinCaches() }
             .onChange(of: allLists.count)        { rebuildPinCaches() }
@@ -217,6 +312,7 @@ struct ContentView: View {
         HStack(spacing: 0) {
             if showProjectsPanel {
                 ProjectsPanel(
+                    selection: selection,
                     activeListIDs: $activeListIDs,
                     hiddenUncategorizedProjectIDs: $hiddenUncategorizedProjectIDs,
                     purgeTrigger: purgeTrigger,
@@ -242,12 +338,14 @@ struct ContentView: View {
                     scrollToPinUUID: highlightedPinID,
                     externalMoveUUIDs: $externalMoveUUIDs
                 )
-                .frame(width: clampedSidebarWidth)
+                .frame(width: liveSidebarWidth.map { CGFloat(min(max($0, sidebarMinWidth), sidebarMaxWidth)) } ?? clampedSidebarWidth)
                 .transition(.move(edge: .leading))
                 SidebarResizeHandle(
-                    width: $sidebarWidth,
+                    width: liveSidebarWidth ?? sidebarWidth,
                     minWidth: sidebarMinWidth,
-                    maxWidth: sidebarMaxWidth
+                    maxWidth: sidebarMaxWidth,
+                    onLiveChange: { liveSidebarWidth = $0 },
+                    onCommit: { sidebarWidth = $0; liveSidebarWidth = nil }
                 )
             }
             centerPanel
@@ -304,6 +402,7 @@ struct ContentView: View {
         locationManager.requestIfNeeded()
         centerOnUserIfNeeded()
         backfillPhotos()
+        backfillAspectRatios()
         if !activeListUUIDs.isEmpty {
             let uuids = Set(activeListUUIDs.split(separator: ",").map(String.init))
             activeListIDs = Set(allLists.filter { uuids.contains($0.uuid.uuidString) }
@@ -475,6 +574,7 @@ struct ContentView: View {
             scoutMap
                 .zIndex(0)
             PhotoGridView(
+                selection: selection,
                 locations: locations,
                 pinnedSections: cachedGridSections,
                 highlightedLocationID: highlightedPinID,
@@ -487,7 +587,6 @@ struct ContentView: View {
                     }
                 },
                 onMoveToList: { uuids in externalMoveUUIDs = uuids },
-                onSelectionChange: { gridSelectedUUIDs = $0 },
                 onRotate: { uuids in rotatePins(uuids) },
                 originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
@@ -508,10 +607,9 @@ struct ContentView: View {
         .background {
             Button("") {
                 let uuids: [UUID] = {
-                    // In Photos mode, the grid's full multi-selection wins so "m" moves them all.
-                    if viewMode == .photos, !gridSelectedUUIDs.isEmpty { return Array(gridSelectedUUIDs) }
-                    // Map option-click multi-selection wins, then highlighted grid/map pin.
-                    if !mapSelection.isEmpty { return Array(mapSelection) }
+                    // The shared selection (sidebar/grid/map all write it) wins, then the
+                    // highlighted grid pin, then the map popover's pin.
+                    if !selection.ids.isEmpty { return Array(selection.ids) }
                     if let id = highlightedPinID { return [id] }
                     if let id = selectedLocation?.id { return [id] }
                     return []
@@ -525,11 +623,18 @@ struct ContentView: View {
             .opacity(0)
             .allowsHitTesting(false)
         }
-        // Clear the map multi-selection once the move sheet has closed.
+        // U key: reset/toggle user-location follow — same as the location button on the map.
+        .background {
+            Button("") { mapController.toggleTracking() }
+                .keyboardShortcut("u", modifiers: [])
+                .opacity(0)
+                .allowsHitTesting(false)
+        }
+        // Clear the shared selection once the move sheet has closed.
         // Also open the sheet here when the sidebar is hidden (ProjectsPanel is not in hierarchy).
         .onChange(of: externalMoveUUIDs) { _, ids in
             if ids.isEmpty {
-                mapSelection = []
+                selection.ids = []
                 showExternalMoveSheet = false
             } else if !showProjectsPanel {
                 showExternalMoveSheet = true
@@ -557,7 +662,7 @@ struct ContentView: View {
                         for (i, p) in list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }).enumerated() { p.sortOrder = i }
                         try? modelContext.save()
                         externalMoveUUIDs = []
-                        gridSelectedUUIDs = []
+                        selection.ids = []
                         showExternalMoveSheet = false
                     },
                     onDismiss: { externalMoveUUIDs = []; showExternalMoveSheet = false }
@@ -687,27 +792,18 @@ struct ContentView: View {
     private func rebuildPinCaches() {
         let active = allLists.filter { isEffectivelyActive($0) }
         var mapPins: [(ScoutLocation, String)] = active.flatMap { list in
-            list.pins.filter { $0.hasGPS && $0.deletedAt == nil }.map { ($0.asScoutLocation(), list.colorHex) }
+            list.pins.filter { $0.hasGPS && $0.deletedAt == nil }.map { (displayCache.location(for: $0), list.colorHex) }
         }
         for project in allProjects {
             // Skip uncategorized pins for projects whose "Uncategorized" eye is off.
             guard !hiddenUncategorizedProjectIDs.contains(project.persistentModelID) else { continue }
             for pin in project.importedPhotos where pin.hasGPS && pin.deletedAt == nil {
-                mapPins.append((pin.asScoutLocation(), Self.generalPinColor))
+                mapPins.append((displayCache.location(for: pin), Self.generalPinColor))
             }
         }
         // unfiledPins (list==nil, owningProject==nil) are orphaned data from old builds.
         // They have no sidebar entry and no visibility toggle, so exclude from map.
         cachedProjectPins = mapPins
-
-        // Flat list kept for places that still need it (annotation building etc.)
-        var gridPins: [ScoutLocation] = active.flatMap { $0.pins }
-            .filter { $0.deletedAt == nil }.map { $0.asScoutLocation() }
-        for project in allProjects {
-            gridPins += project.importedPhotos.filter { $0.deletedAt == nil }.map { $0.asScoutLocation() }
-        }
-        gridPins += unfiledPins.filter { $0.deletedAt == nil }.map { $0.asScoutLocation() }
-        cachedAllProjectPins = gridPins
 
         // Sectioned grid matching sidebar order: lists inside projects, then unfiled.
         var sections: [PhotoGridView.Section] = []
@@ -719,8 +815,12 @@ struct ContentView: View {
             let sortedLists = orderedListsForGrid(project)
                 .filter { isEffectivelyActive($0) }
             for list in sortedLists {
-                let locs = proximityOrdered(list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder })
-                    .map { $0.asScoutLocation() }
+                let ordered = displayCache.proximityOrdered(
+                    list.persistentModelID,
+                    pins: list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder }
+                ) { proximityOrdered($0) }
+                let locs = ordered
+                    .map { displayCache.location(for: $0) }
                     .filter { !$0.images.isEmpty }
                 if !locs.isEmpty {
                     sections.append(PhotoGridView.Section(
@@ -737,8 +837,8 @@ struct ContentView: View {
                 : project.importedPhotos
                 .filter { $0.deletedAt == nil }
                 .sorted { $0.sortOrder < $1.sortOrder }
-            let imported = proximityOrdered(importedPins)
-                .map { $0.asScoutLocation() }
+            let imported = displayCache.proximityOrdered(project.persistentModelID, pins: importedPins) { proximityOrdered($0) }
+                .map { displayCache.location(for: $0) }
                 .filter { !$0.images.isEmpty }
             if !imported.isEmpty {
                 let title = project.lists.isEmpty ? project.name : "\(project.name) — Uncategorized"
@@ -747,8 +847,12 @@ struct ContentView: View {
         }
         // Active standalone lists not belonging to any project.
         for list in active.filter({ $0.project == nil }).sorted(by: { $0.createdAt < $1.createdAt }) {
-            let locs = proximityOrdered(list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder })
-                .map { $0.asScoutLocation() }
+            let ordered = displayCache.proximityOrdered(
+                list.persistentModelID,
+                pins: list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder }
+            ) { proximityOrdered($0) }
+            let locs = ordered
+                .map { displayCache.location(for: $0) }
                 .filter { !$0.images.isEmpty }
             if !locs.isEmpty {
                 sections.append(PhotoGridView.Section(
@@ -762,6 +866,8 @@ struct ContentView: View {
         // They have no sidebar entry and no visibility toggle, so exclude from the grid —
         // the grid must show nothing when no list/uncategorized is visible.
         cachedGridSections = sections
+        // Tell the map the project-pin set changed so it re-diffs (only) now.
+        pinCacheVersion &+= 1
     }
 
     /// Flattens a project's lists into sidebar display order: each top-level list/folder by
@@ -932,6 +1038,34 @@ struct ContentView: View {
         rebuildPinCaches()
     }
 
+    /// Debug "Find Duplicates": scans every live photo in the project for duplicates
+    /// (same normalized filename, or same EXIF capture-time + GPS), then stashes the
+    /// compressed copies to remove and shows a confirmation. The original large files are
+    /// always kept; confirmed removals go to the Trash (recoverable, 30-day rule).
+    private func findDuplicates() {
+        let plan = PhotoImportService.findDuplicates(in: allPins)
+        if plan.remove.isEmpty {
+            DebugLogger.shared.log("No duplicates found across \(allPins.filter { $0.deletedAt == nil }.count) photos.",
+                                   level: .info, tag: "Dedup")
+            return
+        }
+        pendingDuplicateRemoval = plan.remove
+        pendingDuplicateClusters = plan.clusters
+        showDuplicateConfirm = true
+    }
+
+    /// Confirmed: move the previously-found duplicate copies to the Trash.
+    private func confirmRemoveDuplicates() {
+        let now = Date()
+        for pin in pendingDuplicateRemoval { pin.deletedAt = now }
+        try? modelContext.save()
+        rebuildPinCaches()
+        DebugLogger.shared.log("Moved \(pendingDuplicateRemoval.count) duplicate photo(s) to Trash across \(pendingDuplicateClusters) group(s); kept the original files.",
+                               level: .success, tag: "Dedup")
+        pendingDuplicateRemoval = []
+        pendingDuplicateClusters = 0
+    }
+
     /// Moves an existing pin out of wherever it lives and into `list`.
     private func movePin(_ pin: PinnedLocationData, to list: LocationListData) {
         // Detach from current list.
@@ -1037,6 +1171,9 @@ struct ContentView: View {
         let result = await BackupService.relinkOriginals(folder: url, context: modelContext)
         backupStatusMessage = "Relinked \(result.linked) files. \(result.notFound) not found."
         isBackupBusy = false
+        // Original-file availability changed (not part of the per-pin signature) → drop caches.
+        displayCache.invalidateAll()
+        rebuildPinCaches()
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { backupStatusMessage = nil }
     }
     #endif
@@ -1046,6 +1183,36 @@ struct ContentView: View {
     private func backfillPhotos() {
         for pin in allPins where pin.photoFiles.isEmpty {
             cachePhotos(for: pin, from: pin.asScoutLocation())
+        }
+    }
+
+    /// One-time pass that fills in `aspectRatio` for pins imported before that field existed,
+    /// so the photo grid can size cells without waiting for the image to load (no reflow).
+    /// File headers are read off the main actor; the model is updated back on main.
+    private func backfillAspectRatios() {
+        // (persistentModelID, thumbnail file URL) for every pin still missing an aspect.
+        let targets: [(PersistentIdentifier, URL)] = allPins.compactMap { pin in
+            guard pin.aspectRatio == 0, pin.deletedAt == nil else { return nil }
+            guard let file = pin.thumbnailFiles.first ?? pin.photoFiles.first else { return nil }
+            return (pin.persistentModelID, PinPhotoStore.fileURL(file))
+        }
+        guard !targets.isEmpty else { return }
+        Task {
+            let results: [PersistentIdentifier: Double] = await Task.detached(priority: .utility) {
+                var r: [PersistentIdentifier: Double] = [:]
+                for (id, url) in targets {
+                    if let a = PhotoImportService.aspectRatio(ofImageAt: url) { r[id] = a }
+                }
+                return r
+            }.value
+            guard !results.isEmpty else { return }
+            for pin in allPins {
+                if let a = results[pin.persistentModelID], pin.aspectRatio == 0 { pin.aspectRatio = a }
+            }
+            try? modelContext.save()
+            // ScoutLocations cached before backfill lack the aspect → drop and rebuild.
+            displayCache.invalidateAll()
+            rebuildPinCaches()
         }
     }
 
@@ -1065,9 +1232,10 @@ struct ContentView: View {
     private var scoutMap: some View {
         ScoutMapView(
             selection: $selectedLocation,
-            mapSelection: $mapSelection,
+            multiSelection: selection,
             locations: locations,
             projectPins: cachedProjectPins,
+            projectPinsVersion: pinCacheVersion,
             scrollToZoom: scrollToZoom,
             initialRegion: initialRegion,
             controller: mapController,
@@ -1097,7 +1265,7 @@ struct ContentView: View {
             pinScale: pinSize,
             availableLists: openProjectLists,
             onSaveToList: saveToList,
-            onMoveSelectionToList: { if !mapSelection.isEmpty { externalMoveUUIDs = Array(mapSelection) } },
+            onMoveSelectionToList: { if !selection.ids.isEmpty { externalMoveUUIDs = Array(selection.ids) } },
             isSelectedPinned: allPins.contains(where: { $0.uuid == selectedLocation?.id }),
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,
@@ -1126,7 +1294,7 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.2), value: backupStatusMessage != nil)
         }
         .overlay(alignment: .topLeading) {
-            DebugPanelOverlay(onDeleteAllData: deleteAllData)
+            DebugPanelOverlay(onDeleteAllData: deleteAllData, onFindDuplicates: findDuplicates)
                 .padding(.top, 58)
                 .padding(.leading, 16)
         }
@@ -1725,32 +1893,48 @@ private struct RegionChip: View {
 /// A thin draggable divider between the left sidebar and the center panel. Hovering shows
 /// the horizontal-resize cursor (macOS); dragging adjusts the bound width within [min, max].
 private struct SidebarResizeHandle: View {
-    @Binding var width: Double
+    /// Current width (the live value during a drag, or the persisted value at rest).
+    let width: Double
     let minWidth: Double
     let maxWidth: Double
+    /// Fired every drag tick with the new live width — drives a plain @State, no persistence.
+    let onLiveChange: (Double) -> Void
+    /// Fired once on drag end with the final width — this is where it's persisted.
+    let onCommit: (Double) -> Void
     @State private var dragStartWidth: Double? = nil
+
+    private func clamp(_ w: Double) -> Double { min(max(w, minWidth), maxWidth) }
 
     var body: some View {
         Divider()
             .frame(width: 1)
             .overlay(
-                // Wider invisible hit area so the 1px line is easy to grab.
+                // Wider invisible hit area so the 1px line is easy to grab. It's an overlay,
+                // so widening it doesn't shift layout — it just makes the cursor/grab zone bigger.
                 Color.clear
-                    .frame(width: 8)
+                    .frame(width: 16)
                     .contentShape(Rectangle())
                     #if os(macOS)
                     .onHover { inside in
                         if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
                     }
                     #endif
+                    // Global coordinate space: the handle moves as the sidebar resizes, so a
+                    // .local translation would be measured against a frame that's shifting
+                    // under the cursor — that feedback loop makes the drag oscillate. Global
+                    // (screen) coordinates are stable regardless of the handle's own movement.
                     .gesture(
-                        DragGesture(minimumDistance: 1)
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
                             .onChanged { value in
                                 let base = dragStartWidth ?? width
                                 if dragStartWidth == nil { dragStartWidth = width }
-                                width = min(max(base + value.translation.width, minWidth), maxWidth)
+                                onLiveChange(clamp(base + value.translation.width))
                             }
-                            .onEnded { _ in dragStartWidth = nil }
+                            .onEnded { value in
+                                let base = dragStartWidth ?? width
+                                onCommit(clamp(base + value.translation.width))
+                                dragStartWidth = nil
+                            }
                     )
             )
     }

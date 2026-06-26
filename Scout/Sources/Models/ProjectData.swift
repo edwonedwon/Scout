@@ -118,6 +118,10 @@ final class PinnedLocationData {
     /// Counter-clockwise 90° rotation steps applied when displaying this photo (0–3).
     /// Set by the "R" rotate command; baked into every ScoutImage this pin produces.
     var rotationQuarterTurns: Int = 0
+    /// Unrotated pixel aspect ratio (width / height) of the photo; 0 when not yet measured.
+    /// Captured at import (and backfilled for older pins) so the photo grid can size each
+    /// cell to its final height immediately — no reflow when the thumbnail finishes loading.
+    var aspectRatio: Double = 0
     @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
     /// Set when this pin was imported directly into a project (not inside a list).
     var owningProject: ProjectData? = nil
@@ -146,7 +150,7 @@ final class PinnedLocationData {
     var thumbnailImages: [ScoutImage] {
         let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .imported
         let files = thumbnailFiles.isEmpty ? photoFiles : thumbnailFiles
-        return files.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken, rotationQuarterTurns: rotationQuarterTurns) }
+        return files.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken, rotationQuarterTurns: rotationQuarterTurns, aspectRatio: aspectRatio) }
     }
 
     /// Images for the full-screen carousel.

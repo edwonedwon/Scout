@@ -139,6 +139,7 @@ enum PhotoImportService {
               let thumbName = write(thumbData, name: "\(pinID.uuidString)-0-thumb.jpg") else { return nil }
 
         let displayName = url.deletingPathExtension().lastPathComponent
+        let aspect = cgImage.height > 0 ? Double(cgImage.width) / Double(cgImage.height) : 0
         let pin = PinnedLocationData.fromImport(
             id: pinID,
             name: displayName,
@@ -148,7 +149,8 @@ enum PhotoImportService {
             originalFilePath: url.path,
             fullFilename: fullName,
             thumbFilename: thumbName,
-            sortOrder: sortOrder
+            sortOrder: sortOrder,
+            aspectRatio: aspect
         )
         return ImportResult(pin: pin, hadGPS: coordinate != nil)
     }
@@ -184,6 +186,124 @@ enum PhotoImportService {
         guard (try? data.write(to: dest)) != nil else { return nil }
         return name
     }
+
+    /// Reads an image's pixel aspect ratio (width / height) from its header WITHOUT decoding
+    /// the pixels — used to backfill `aspectRatio` on pins imported before that field existed.
+    /// `nonisolated` so it can run off the main actor in a backfill task.
+    nonisolated static func aspectRatio(ofImageAt url: URL) -> Double? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Double,
+              let h = props[kCGImagePropertyPixelHeight] as? Double, h > 0
+        else { return nil }
+        return w / h
+    }
+
+    // MARK: - Duplicate detection
+
+    /// The result of scanning a project for duplicate photos: which pins to keep (one per
+    /// duplicate cluster, the "original large" file) and which to remove (the compressed
+    /// copies, e.g. "DSC02796 Large.jpeg"). `clusters` is the number of duplicate groups.
+    struct DuplicatePlan {
+        var remove: [PinnedLocationData] = []
+        var clusters: Int = 0
+    }
+
+    /// Scans `pins` and clusters duplicates using TWO independent signals (a union of either
+    /// match — so a missing one doesn't hide a real duplicate):
+    ///  1. Normalized base filename — strips the extension and "large"/"copy"/"small" markers,
+    ///     so `DSC02796 Large.jpeg` and `DSC02796.HIF` collapse to the same key `dsc02796`.
+    ///  2. EXIF capture time (to the second) + GPS (±~10 m) — catches copies that were renamed
+    ///     beyond recognition but came from the same shot. Requires BOTH a date and GPS so a
+    ///     shared timestamp alone can never falsely group two distinct photos.
+    ///
+    /// Within each cluster it keeps the highest-scoring pin (see `keepScore` — original camera
+    /// formats and non-"Large" names win) and marks the rest for removal. Read-only: it never
+    /// mutates the pins; the caller decides what to do with `plan.remove`.
+    static func findDuplicates(in pins: [PinnedLocationData]) -> DuplicatePlan {
+        let live = pins.filter { $0.deletedAt == nil }
+        guard live.count > 1 else { return DuplicatePlan() }
+
+        // Union-Find over indices into `live`.
+        var parent = Array(0..<live.count)
+        func find(_ i: Int) -> Int {
+            var r = i
+            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
+            return r
+        }
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+
+        // First index seen for each signature → union subsequent matches into it.
+        var byName: [String: Int] = [:]
+        var byMeta: [String: Int] = [:]
+        for (i, pin) in live.enumerated() {
+            let nameKey = normalizeName(pin.name)
+            if !nameKey.isEmpty {
+                if let j = byName[nameKey] { union(i, j) } else { byName[nameKey] = i }
+            }
+            if let d = pin.dateTaken, pin.hasGPS {
+                let ts = Int(d.timeIntervalSinceReferenceDate)
+                let metaKey = "\(ts)|\(String(format: "%.4f", pin.latitude))|\(String(format: "%.4f", pin.longitude))"
+                if let j = byMeta[metaKey] { union(i, j) } else { byMeta[metaKey] = i }
+            }
+        }
+
+        // Gather clusters.
+        var clusters: [Int: [Int]] = [:]
+        for i in live.indices { clusters[find(i), default: []].append(i) }
+
+        var plan = DuplicatePlan()
+        for (_, members) in clusters where members.count > 1 {
+            plan.clusters += 1
+            // Keep the best-scoring member; remove the rest.
+            let sorted = members.sorted { keepScore(live[$0]) > keepScore(live[$1]) }
+            for idx in sorted.dropFirst() { plan.remove.append(live[idx]) }
+        }
+        return plan
+    }
+
+    /// Strips the extension and common compressed-copy markers so derived files collapse to
+    /// the same key as their original (e.g. `DSC02796 Large` → `dsc02796`).
+    private static func normalizeName(_ raw: String) -> String {
+        var s = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        let exts = ["jpeg","jpg","heic","heif","hif","png","tif","tiff","arw","cr2","cr3","nef","dng","raw","orf","rw2"]
+        for ext in exts where s.hasSuffix("." + ext) { s = String(s.dropLast(ext.count + 1)) }
+        // Repeatedly peel trailing copy/size markers (e.g. "dsc1 large copy").
+        let markers = [" large", "-large", "_large", " small", "-small", "_small", " copy", "-copy", "_copy"]
+        var changed = true
+        while changed {
+            changed = false
+            s = s.trimmingCharacters(in: .whitespaces)
+            for m in markers where s.hasSuffix(m) {
+                s = String(s.dropLast(m.count)); changed = true
+            }
+        }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Higher = more likely the "original" the user wants to keep. The compressed copies
+    /// (names containing "large"/"small"/"copy", JPEG exports) score low and get removed.
+    private static func keepScore(_ pin: PinnedLocationData) -> Int {
+        var score = 0
+        let lname = pin.name.lowercased()
+        if lname.contains("large") { score -= 1000 }
+        if lname.contains("small") { score -= 1000 }
+        if lname.contains("copy")  { score -= 500 }
+        let ext = pin.originalFilePath.map { URL(fileURLWithPath: $0).pathExtension.lowercased() } ?? ""
+        let originalFormats: Set<String> = ["hif","heif","heic","raw","arw","cr2","cr3","nef","dng","tif","tiff","orf","rw2"]
+        if originalFormats.contains(ext) { score += 200 }
+        // Prefer pins whose original file is still on disk, and larger originals.
+        if let p = pin.originalFilePath, FileManager.default.isReadableFile(atPath: p) {
+            score += 50
+            if let size = try? FileManager.default.attributesOfItem(atPath: p)[.size] as? Int {
+                score += min(size / 1_000_000, 200)   // up to +200 by megabytes
+            }
+        }
+        return score
+    }
 }
 
 // MARK: - Model factory
@@ -198,7 +318,8 @@ extension PinnedLocationData {
         originalFilePath: String,
         fullFilename: String,
         thumbFilename: String,
-        sortOrder: Int
+        sortOrder: Int,
+        aspectRatio: Double = 0
     ) -> PinnedLocationData {
         let phantom = ScoutLocation(name: name, description: "", coordinate: coordinate, images: [])
         let pin = PinnedLocationData(from: phantom, sortOrder: sortOrder)
@@ -208,6 +329,7 @@ extension PinnedLocationData {
         pin.originalFilePath = originalFilePath
         pin.hasGPS           = hasGPS
         pin.dateTaken        = dateTaken
+        pin.aspectRatio      = aspectRatio
         return pin
     }
 }

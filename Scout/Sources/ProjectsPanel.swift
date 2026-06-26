@@ -117,6 +117,8 @@ struct ProjectsPanel: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ProjectData.createdAt) private var projects: [ProjectData]
 
+    /// THE shared selection store (sidebar + grid + map), owned by ContentView.
+    var selection: SelectionStore
     @Binding var activeListIDs: Set<PersistentIdentifier>
     /// Projects whose uncategorized (loose) photos are hidden from map + grid.
     @Binding var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier>
@@ -151,6 +153,7 @@ struct ProjectsPanel: View {
                 .navigationDestination(for: ProjectData.self) { project in
                     ProjectDetailView(
                         project: project,
+                        selection: selection,
                         initialExpandedUUIDs: storedExpandedUUIDs,
                         activeListIDs: $activeListIDs,
                         hiddenUncategorizedProjectIDs: $hiddenUncategorizedProjectIDs,
@@ -297,13 +300,6 @@ struct ProjectsPanel: View {
 /// or rebuild the row list. Only the rows themselves observe it via `@ObservedObject`, and
 /// because the List is lazy, only the handful of on-screen rows ever repaint — selecting
 /// thousands of off-screen rows is an O(1) set assignment with no visual work.
-private final class SidebarSelection: ObservableObject {
-    @Published var ids: Set<PersistentIdentifier> = []
-    var anchor: PersistentIdentifier? = nil
-
-    func contains(_ id: PersistentIdentifier) -> Bool { ids.contains(id) }
-}
-
 // MARK: - Sidebar item (unified photo + list)
 
 private enum SidebarItem: Identifiable {
@@ -399,6 +395,11 @@ private struct SidebarRowDropDelegate: DropDelegate {
 
 private struct ProjectDetailView: View {
     @Bindable var project: ProjectData
+    /// THE shared selection store (sidebar + grid + map). Held as a plain `var` (NOT
+    /// @ObservedObject) so mutating it never re-runs THIS view's body / its ForEach — only the
+    /// PinRow/ListRow leaves observe it and repaint. Observing it here would rebuild the whole
+    /// list on every click (the documented sidebar-selection perf footgun).
+    var selection: SelectionStore
     var initialExpandedUUIDs: Set<String> = []
     @Binding var activeListIDs: Set<PersistentIdentifier>
     @Binding var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier>
@@ -432,7 +433,6 @@ private struct ProjectDetailView: View {
     // so mutating it never re-renders this view or re-runs ForEach(sidebarItems). Only the
     // handful of on-screen rows observe it via @ObservedObject, so selecting (or shift-
     // selecting thousands of) rows repaints only what's visible — instant regardless of count.
-    @State private var selection = SidebarSelection()
     // Cached sidebar items — rebuilt only when photos/lists actually change,
     // not on every render triggered by selection or scroll state.
     @State private var cachedSidebarItems: [SidebarItem] = []
@@ -466,24 +466,29 @@ private struct ProjectDetailView: View {
     // actually focused, so we resign this whenever a row is selected.
     @FocusState private var searchFieldFocused: Bool
 
-    /// Flat ordered list of every currently visible row id (including expanded list pins),
-    /// used to resolve a shift-click range.
-    private var flatVisibleIDs: [PersistentIdentifier] {
-        var result: [PersistentIdentifier] = []
+    /// One flat, ordered entry per visible row. Carries both the `uuid` (the selection key,
+    /// shared with the grid and map) and the `scrollID` (the row's ScrollViewReader identity,
+    /// which is its PersistentIdentifier). Used for shift-range selection and arrow-key nav.
+    private struct FlatRow { let uuid: UUID; let scrollID: PersistentIdentifier }
+    private var flatVisibleRows: [FlatRow] {
+        var result: [FlatRow] = []
         for item in cachedSidebarItems {
             switch item {
             case .photo(let pin):
-                result.append(pin.persistentModelID)
+                result.append(FlatRow(uuid: pin.uuid, scrollID: pin.persistentModelID))
             case .list(let list):
-                result.append(list.persistentModelID)
+                result.append(FlatRow(uuid: list.uuid, scrollID: list.persistentModelID))
                 if expandedListIDs.contains(list.persistentModelID) {
-                    result.append(contentsOf:
-                        list.pins.sorted { $0.sortOrder < $1.sortOrder }.map(\.persistentModelID))
+                    for p in list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+                        result.append(FlatRow(uuid: p.uuid, scrollID: p.persistentModelID))
+                    }
                 }
             case .uncategorized(let proj):
-                result.append(proj.persistentModelID)
+                result.append(FlatRow(uuid: proj.uuid, scrollID: proj.persistentModelID))
                 if uncategorizedExpanded {
-                    result.append(contentsOf: loosePhotos.map(\.persistentModelID))
+                    for p in loosePhotos {
+                        result.append(FlatRow(uuid: p.uuid, scrollID: p.persistentModelID))
+                    }
                 }
             }
         }
@@ -493,7 +498,7 @@ private struct ProjectDetailView: View {
     /// Single click selects just this row (and fires the map side effect).
     /// Shift-click extends a contiguous range from the anchor.
     /// Option-click toggles this item in/out of a disparate selection.
-    private func handleTap(_ id: PersistentIdentifier, shift: Bool, option: Bool = false) {
+    private func handleTap(_ id: UUID, shift: Bool, option: Bool = false) {
         // Selecting a row takes keyboard focus off the search field so bare-letter
         // shortcuts (like "m" to Move) aren't typed into the search box.
         searchFieldFocused = false
@@ -508,7 +513,7 @@ private struct ProjectDetailView: View {
             return   // disparate toggle: no map nav
         }
         if shift, let anchor = selection.anchor {
-            let order = flatVisibleIDs
+            let order = flatVisibleRows.map(\.uuid)
             if let a = order.firstIndex(of: anchor), let b = order.firstIndex(of: id) {
                 selection.ids = Set(order[min(a, b)...max(a, b)])
             } else {
@@ -518,23 +523,23 @@ private struct ProjectDetailView: View {
         }
         selection.ids = [id]
         selection.anchor = id
-        if let pin = findPin(byID: id) {
+        if let pin = findPin(uuid: id) {
             if pin.hasGPS { onSelectPin?(pin) } else { onClearPin?() }
-        } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
+        } else if let list = findList(uuid: id) {
             onClearPin?()
             onFitToList?(list.pins.filter { $0.hasGPS })
         }
     }
 
     /// Double-click zooms into a pin (or fits to a list). No-GPS pins open in carousel.
-    private func handleDoubleTap(_ id: PersistentIdentifier) {
-        if let pin = findPin(byID: id) {
+    private func handleDoubleTap(_ id: UUID) {
+        if let pin = findPin(uuid: id) {
             if pin.hasGPS {
                 onZoomToPin?(pin)
             } else {
                 onOpenCarousel?(pin)
             }
-        } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
+        } else if let list = findList(uuid: id) {
             // Double-click toggles the list's visibility (eye on/off).
             if activeListIDs.contains(list.persistentModelID) {
                 // Toggling OFF — just hide this one.
@@ -606,43 +611,46 @@ private struct ProjectDetailView: View {
     /// Moves keyboard selection up (-1) or down (+1) through the flat visible row list.
     /// If the next item is a list, it auto-expands it and steps inside to its first pin.
     private func moveSelection(_ delta: Int) {
-        let flat = flatVisibleIDs
+        let flat = flatVisibleRows
         guard !flat.isEmpty else { return }
-        let current = selection.anchor ?? flat.first!
-        guard let idx = flat.firstIndex(of: current) else { return }
+        let current = selection.anchor ?? flat.first!.uuid
+        guard let idx = flat.firstIndex(where: { $0.uuid == current }) else { return }
         var next = max(0, min(flat.count - 1, idx + delta))
 
         // If the target is a collapsed list and we're moving into it, expand it first
         // and step to its first pin (or last pin when moving up).
-        if let list = cachedSidebarItems.compactMap({ if case .list(let l) = $0 { return l } else { return nil } })
-            .first(where: { $0.persistentModelID == flat[next] }),
+        let targetUUID = flat[next].uuid
+        if let list = cachedSidebarItems.compactMap({ item -> LocationListData? in
+                if case .list(let l) = item { return l } else { return nil }
+            }).first(where: { $0.uuid == targetUUID }),
            !expandedListIDs.contains(list.persistentModelID) {
             let pins = list.pins.sorted { $0.sortOrder < $1.sortOrder }
             if !pins.isEmpty {
                 var tx = Transaction(animation: .none); tx.disablesAnimations = true
                 withTransaction(tx) { expandedListIDs.insert(list.persistentModelID) }
                 // Re-compute flat after expansion to find the pin's index.
-                let newFlat = flatVisibleIDs
+                let newFlat = flatVisibleRows
                 let targetPin = delta > 0 ? pins.first! : pins.last!
-                if let pinIdx = newFlat.firstIndex(of: targetPin.persistentModelID) {
+                if let pinIdx = newFlat.firstIndex(where: { $0.uuid == targetPin.uuid }) {
                     next = pinIdx
                 }
             }
         }
 
-        let newFlat = flatVisibleIDs
+        let newFlat = flatVisibleRows
         guard next < newFlat.count else { return }
-        let targetID = newFlat[next]
-        selection.ids = [targetID]
-        selection.anchor = targetID
+        let target = newFlat[next]
+        selection.ids = [target.uuid]
+        selection.anchor = target.uuid
 
         // Fire the same map / photo-mode side effects as a tap.
-        if let pin = findPin(byID: targetID) {
+        if let pin = findPin(uuid: target.uuid) {
             onSelectPin?(pin)
         }
 
         // .none anchor: only scrolls enough to make the row visible; doesn't re-center.
-        listProxyHolder?.scrollTo(targetID, anchor: .none)
+        // Scroll by the row's ScrollViewReader identity (PersistentIdentifier), not the uuid.
+        listProxyHolder?.scrollTo(target.scrollID, anchor: .none)
     }
 
     private func rebuildSidebarItems() {
@@ -689,16 +697,38 @@ private struct ProjectDetailView: View {
         rebuildSidebarItems()
     }
 
-    /// Drop handler for child-list rows inside a folder.
-    private func performChildDrop(_ providers: [NSItemProvider], folder: LocationListData,
-                                   target: LocationListData, after: Bool) -> Bool {
+    /// Drop handler for child-list rows inside a folder. Handles BOTH:
+    ///  • photo(s)/pin dropped INTO the child list (mode `.into`) → move them into it, and
+    ///  • a sibling child list reordered before/after (mode `.before`/`.after`).
+    /// External files/images are imported into the child list when dropped onto it.
+    private func performChildRowDrop(_ providers: [NSItemProvider], folder: LocationListData,
+                                      target child: LocationListData, mode: DropMode) -> Bool {
+        // External files/images → import directly into this nested list.
+        if mode == .into, tryImportDrop(providers, into: child) { return true }
+
         guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return false }
         _ = provider.loadObject(ofClass: NSString.self) { object, _ in
-            guard let dragID = object as? String, dragID.hasPrefix("list:") else { return }
-            let uuid = String(dragID.dropFirst(5))
+            guard let dragID = object as? String else { return }
             Task { @MainActor in
-                guard let dragged = folder.childLists.first(where: { $0.uuid.uuidString == uuid }) else { return }
-                reorderChild(dragged, in: folder, before: target, after: after)
+                // Photos/pins dropped INTO the nested list → move them in.
+                if mode == .into {
+                    if dragID.hasPrefix("photos:") {
+                        let uuids = dragID.dropFirst(7).split(separator: ",").map(String.init)
+                        movePins(uuids.compactMap { findPin(uuid: $0) }, intoList: child)
+                        return
+                    }
+                    if dragID.hasPrefix("photo:") || dragID.hasPrefix("pin:") {
+                        let uuid = dragID.hasPrefix("pin:") ? String(dragID.dropFirst(4)) : String(dragID.dropFirst(6))
+                        if let pin = findPin(uuid: uuid) { movePinsToList(pin, intoList: child) }
+                        return
+                    }
+                }
+                // A sibling child list dragged → reorder within the folder.
+                if dragID.hasPrefix("list:") {
+                    let uuid = String(dragID.dropFirst(5))
+                    guard let dragged = folder.childLists.first(where: { $0.uuid.uuidString == uuid }) else { return }
+                    reorderChild(dragged, in: folder, before: child, after: mode == .after)
+                }
             }
         }
         return true
@@ -750,6 +780,20 @@ private struct ProjectDetailView: View {
         return nil
     }
 
+    /// UUID overload — pins are selected by their stable `uuid` (the shared selection key).
+    private func findPin(uuid: UUID) -> PinnedLocationData? {
+        if let p = project.importedPhotos.first(where: { $0.uuid == uuid }) { return p }
+        for list in project.lists {
+            if let p = list.pins.first(where: { $0.uuid == uuid }) { return p }
+        }
+        return nil
+    }
+
+    /// Finds a list/folder anywhere in the project by its `uuid`.
+    private func findList(uuid: UUID) -> LocationListData? {
+        project.lists.first(where: { $0.uuid == uuid })
+    }
+
     /// Removes a pin from wherever it currently lives (list or top-level).
     private func detach(_ pin: PinnedLocationData) {
         if let list = pin.list {
@@ -776,11 +820,17 @@ private struct ProjectDetailView: View {
                 // top-level sidebar items that handleDrop's resolve() could find).
                 if case .list(let list) = target,
                    dragID.hasPrefix("photo:") || dragID.hasPrefix("photos:") {
-                    let uuids = dragID.hasPrefix("photos:")
-                        ? dragID.dropFirst(7).split(separator: ",").map(String.init)
-                        : [String(dragID.dropFirst(6))]
-                    let pins = uuids.compactMap { findPin(uuid: $0) }
-                    pins.forEach { movePinsToList($0, intoList: list) }
+                    if dragID.hasPrefix("photos:") {
+                        // Grid multi-drag: move exactly the pins named in the payload.
+                        let uuids = dragID.dropFirst(7).split(separator: ",").map(String.init)
+                        movePins(uuids.compactMap { findPin(uuid: $0) }, intoList: list)
+                    } else {
+                        // Single "photo:" (grid single or sidebar loose photo) keeps the
+                        // sidebar-selection-expanding path.
+                        if let pin = findPin(uuid: String(dragID.dropFirst(6))) {
+                            movePinsToList(pin, intoList: list)
+                        }
+                    }
                 } else {
                     _ = handleDrop(dragID, onto: target)
                 }
@@ -827,9 +877,9 @@ private struct ProjectDetailView: View {
 
                 // If the dragged pin is part of a multi-selection, move all selected pins.
                 var pinsToMove: [PinnedLocationData] = [primaryPin]
-                if selection.contains(primaryPin.persistentModelID) {
-                    for id in selection.ids where id != primaryPin.persistentModelID {
-                        if let p = findPin(byID: id), p.list != nil { pinsToMove.append(p) }
+                if selection.contains(primaryPin.uuid) {
+                    for id in selection.ids where id != primaryPin.uuid {
+                        if let p = findPin(uuid: id), p.list != nil { pinsToMove.append(p) }
                     }
                 }
                 for pin in pinsToMove {
@@ -845,17 +895,19 @@ private struct ProjectDetailView: View {
         return true
     }
 
-    /// Moves `pin` and all other selected pins (if pin is in the selection) into `list`.
-    private func movePinsToList(_ primaryPin: PinnedLocationData, intoList list: LocationListData, afterPin: PinnedLocationData? = nil) {
-        // Collect all pins to move: the primary one plus any other selected pins.
-        var allPins: [PinnedLocationData] = [primaryPin]
-        if selection.contains(primaryPin.persistentModelID) {
-            for id in selection.ids where id != primaryPin.persistentModelID {
-                if let pin = findPin(byID: id) { allPins.append(pin) }
-            }
+    /// Core move: relocates EXACTLY `pins` into `list`, with no selection expansion.
+    /// Use this for grid drags — their payload ("photos:a,b,c") already names every dragged
+    /// photo. Routing those through `movePinsToList` instead re-expanded each pin via the
+    /// SIDEBAR selection (a different selection from the grid's), pulling in unrelated pins —
+    /// that was the "shift-select 3, list count jumps by 5–6" drag bug.
+    private func movePins(_ pins: [PinnedLocationData], intoList list: LocationListData, afterPin: PinnedLocationData? = nil) {
+        // Only pins not already in the target list. De-dupe by identity so a payload that
+        // accidentally repeats an id can't move (or count) the same pin twice.
+        var seen = Set<PersistentIdentifier>()
+        let moving = pins.filter { pin in
+            guard pin.list?.persistentModelID != list.persistentModelID else { return false }
+            return seen.insert(pin.persistentModelID).inserted
         }
-        // Only pins not already in the target list.
-        let moving = allPins.filter { $0.list?.persistentModelID != list.persistentModelID }
         guard !moving.isEmpty else { return }
         for pin in moving {
             detach(pin)
@@ -881,12 +933,25 @@ private struct ProjectDetailView: View {
         try? modelContext.save()
     }
 
+    /// Sidebar single-pin/row drag: moves `primaryPin` PLUS any other pins selected in the
+    /// SIDEBAR into `list`. Only for sidebar drags ("pin:"/"photo:" rows), where one dragged
+    /// row should carry the whole sidebar selection. Grid drags must use `movePins` instead.
+    private func movePinsToList(_ primaryPin: PinnedLocationData, intoList list: LocationListData, afterPin: PinnedLocationData? = nil) {
+        var pins: [PinnedLocationData] = [primaryPin]
+        if selection.contains(primaryPin.uuid) {
+            for id in selection.ids where id != primaryPin.uuid {
+                if let pin = findPin(uuid: id) { pins.append(pin) }
+            }
+        }
+        movePins(pins, intoList: list, afterPin: afterPin)
+    }
+
     /// Moves a pin (and any other selected pins) out of its list into Uncategorized (loose).
     private func moveSelectedPinsToUncategorized(primary: PinnedLocationData) {
         var pins: [PinnedLocationData] = [primary]
-        if selection.contains(primary.persistentModelID) {
-            for id in selection.ids where id != primary.persistentModelID {
-                if let p = findPin(byID: id) { pins.append(p) }
+        if selection.contains(primary.uuid) {
+            for id in selection.ids where id != primary.uuid {
+                if let p = findPin(uuid: id) { pins.append(p) }
             }
         }
         for pin in pins { movePinToUncategorized(pin) }
@@ -921,9 +986,9 @@ private struct ProjectDetailView: View {
             guard let dragID = object as? String else { return }
             Task { @MainActor in
                 if dragID.hasPrefix("photos:") {
+                    // Grid multi-drag: move exactly the listed pins, no selection expansion.
                     let uuids = dragID.dropFirst(7).split(separator: ",").map(String.init)
-                    let pins = uuids.compactMap { findPin(uuid: $0) }
-                    pins.forEach { movePinsToList($0, intoList: list, afterPin: afterPin) }
+                    movePins(uuids.compactMap { findPin(uuid: $0) }, intoList: list, afterPin: afterPin)
                     return
                 }
                 let uuid: String
@@ -1034,7 +1099,7 @@ private struct ProjectDetailView: View {
         let now = Date()
         for pin in live {
             pin.deletedAt = now
-            selection.ids.remove(pin.persistentModelID)
+            selection.ids.remove(pin.uuid)
         }
         trashUndoStack.append(live.map { $0.persistentModelID })
         normalizeOrder()
@@ -1050,9 +1115,9 @@ private struct ProjectDetailView: View {
         var pins: [PinnedLocationData] = []
         var lists: [LocationListData] = []
         for id in ids {
-            if let pin = findPin(byID: id) {
+            if let pin = findPin(uuid: id) {
                 pins.append(pin)
-            } else if let list = project.lists.first(where: { $0.persistentModelID == id }) {
+            } else if let list = findList(uuid: id) {
                 lists.append(list)
             }
         }
@@ -1111,7 +1176,7 @@ private struct ProjectDetailView: View {
         func mark(_ l: LocationListData) {
             if l.deletedAt == nil { l.deletedAt = now }
             activeListIDs.remove(l.persistentModelID)
-            selection.ids.remove(l.persistentModelID)
+            selection.ids.remove(l.uuid)
             for child in l.childLists { mark(child) }
         }
         mark(list)
@@ -1210,13 +1275,13 @@ private struct ProjectDetailView: View {
 
     /// True when `id` is part of a multi-item selection (used to switch context-menu
     /// actions and labels between single-item and whole-selection delete).
-    private func isInMultiSelection(_ id: PersistentIdentifier) -> Bool {
+    private func isInMultiSelection(_ id: UUID) -> Bool {
         selection.ids.count > 1 && selection.ids.contains(id)
     }
 
     /// "Delete Photos (3)" when the selection is all photos/pins, else "Delete Items (3)".
     private var deleteSelectionLabel: String {
-        let allPhotos = selection.ids.allSatisfy { findPin(byID: $0) != nil }
+        let allPhotos = selection.ids.allSatisfy { findPin(uuid: $0) != nil }
         return allPhotos ? "Delete Photos (\(selection.ids.count))"
                          : "Delete Items (\(selection.ids.count))"
     }
@@ -1373,13 +1438,16 @@ private struct ProjectDetailView: View {
                 return
             }
             // Dragged photo(s) → move into the list.
-            if dragID.hasPrefix("photo:") || dragID.hasPrefix("photos:") || dragID.hasPrefix("pin:") {
-                let uuids: [String]
-                if dragID.hasPrefix("photos:") { uuids = dragID.dropFirst(7).split(separator: ",").map(String.init) }
-                else if dragID.hasPrefix("photo:") { uuids = [String(dragID.dropFirst(6))] }
-                else { uuids = [String(dragID.dropFirst(4))] }
-                let pins = uuids.compactMap { findPin(uuid: $0) }
-                pins.forEach { movePinsToList($0, intoList: folder) }
+            if dragID.hasPrefix("photos:") {
+                // Grid multi-drag: move exactly the listed pins, no selection expansion.
+                let uuids = dragID.dropFirst(7).split(separator: ",").map(String.init)
+                movePins(uuids.compactMap { findPin(uuid: $0) }, intoList: folder)
+                return
+            }
+            if dragID.hasPrefix("photo:") || dragID.hasPrefix("pin:") {
+                // Single sidebar row: carry the sidebar selection.
+                let uuid = dragID.hasPrefix("photo:") ? String(dragID.dropFirst(6)) : String(dragID.dropFirst(4))
+                if let pin = findPin(uuid: uuid) { movePinsToList(pin, intoList: folder) }
                 return
             }
             return
@@ -1557,13 +1625,13 @@ private struct ProjectDetailView: View {
                 PinRow(
                     pin: pin,
                     selection: selection,
-                    onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
-                    onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
+                    onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
+                    onDoubleTap: { handleDoubleTap(pin.uuid) }
                 )
                 .padding(.leading, 24)
                 .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
                 .contextMenu {
-                    let multi = isInMultiSelection(pin.persistentModelID)
+                    let multi = isInMultiSelection(pin.uuid)
                     #if os(macOS)
                     if let path = pin.originalFilePath {
                         Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
@@ -1620,8 +1688,8 @@ private struct ProjectDetailView: View {
                     else { expandedListIDs.insert(child.persistentModelID) }
                 }
             },
-            onTap: { shift, option in handleTap(child.persistentModelID, shift: shift, option: option) },
-            onDoubleTap: { handleDoubleTap(child.persistentModelID) },
+            onTap: { shift, option in handleTap(child.uuid, shift: shift, option: option) },
+            onDoubleTap: { handleDoubleTap(child.uuid) },
             activeListIDs: $activeListIDs,
             onFitToList: onFitToList,
             onRename: {
@@ -1634,17 +1702,25 @@ private struct ProjectDetailView: View {
         )
         .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
         .padding(.leading, 18)
-        .background { rowHeightReader(child.persistentModelID) }
+        // NOTE: deliberately NO rowHeightReader/GeometryReader here. A GeometryReader's
+        // onAppear writes the `rowHeights` @State on every child mount, and each write
+        // re-renders this whole view — so a folder with N children fired N extra body
+        // passes on expand, making folders far slower to open than plain photo lists.
+        // These rows are single-line and use allowNest:false (a plain before/after split
+        // at the midpoint), so a constant height is exact enough for drag-reorder.
         .overlay { dropIndicator(for: child.persistentModelID) }
-        .onDrop(of: [.text],
+        .onDrop(of: [.text, .fileURL, .image],
                 delegate: SidebarRowDropDelegate(
                     targetID: child.persistentModelID,
-                    allowNest: false,
-                    height: { rowHeights[child.persistentModelID] ?? 36 },
+                    // Allow nesting so the middle zone is a "drop INTO this list" target (the
+                    // row highlights) — needed so photos can be dropped straight into a list
+                    // that lives inside a folder, not just reordered around it.
+                    allowNest: true,
+                    height: { 36 },
                     onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
                     onExit: { id in clearDropTarget(ifOwnedBy: id) },
                     onPerform: { mode, providers in
-                        performChildDrop(providers, folder: folder, target: child, after: mode == .after)
+                        performChildRowDrop(providers, folder: folder, target: child, mode: mode)
                     }
                 ))
 
@@ -1657,13 +1733,13 @@ private struct ProjectDetailView: View {
                     pin: pin,
                     selection: selection,
                     listColor: Color(hexString: child.colorHex),
-                    onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
-                    onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
+                    onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
+                    onDoubleTap: { handleDoubleTap(pin.uuid) }
                 )
                 .padding(.leading, 42)
                 .listRowInsets(EdgeInsets(top: 0, leading: 42, bottom: 0, trailing: 0))
                 .contextMenu {
-                    let multi = isInMultiSelection(pin.persistentModelID)
+                    let multi = isInMultiSelection(pin.uuid)
                     Button(role: .destructive) {
                         if multi { deleteSelectedItems() } else { deletePin(pin) }
                     } label: {
@@ -1686,11 +1762,11 @@ private struct ProjectDetailView: View {
                     PinRow(
                         pin: pin,
                         selection: selection,
-                        onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
-                        onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
+                        onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
+                        onDoubleTap: { handleDoubleTap(pin.uuid) }
                     )
                     .contextMenu {
-                        let multi = isInMultiSelection(pin.persistentModelID)
+                        let multi = isInMultiSelection(pin.uuid)
                         #if os(macOS)
                         if let path = pin.originalFilePath {
                             Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
@@ -1736,8 +1812,8 @@ private struct ProjectDetailView: View {
                                 else { expandedListIDs.insert(list.persistentModelID) }
                             }
                         },
-                        onTap: { shift, option in handleTap(list.persistentModelID, shift: shift, option: option) },
-                        onDoubleTap: { handleDoubleTap(list.persistentModelID) },
+                        onTap: { shift, option in handleTap(list.uuid, shift: shift, option: option) },
+                        onDoubleTap: { handleDoubleTap(list.uuid) },
                         activeListIDs: $activeListIDs,
                         onFitToList: onFitToList,
                         onRename: {
@@ -1783,13 +1859,13 @@ private struct ProjectDetailView: View {
                                 pin: pin,
                                 selection: selection,
                                 listColor: Color(hexString: list.colorHex),
-                                onTap: { shift, option in handleTap(pin.persistentModelID, shift: shift, option: option) },
-                                onDoubleTap: { handleDoubleTap(pin.persistentModelID) }
+                                onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
+                                onDoubleTap: { handleDoubleTap(pin.uuid) }
                             )
                             .padding(.leading, 24)
                             .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
                             .contextMenu {
-                                let multi = isInMultiSelection(pin.persistentModelID)
+                                let multi = isInMultiSelection(pin.uuid)
                                 Button(role: .destructive) {
                                     if multi { deleteSelectedItems() } else { deletePin(pin) }
                                 } label: {
@@ -1954,10 +2030,10 @@ private struct ProjectDetailView: View {
         }
         .onChange(of: scrollToPinUUID) { _, uuid in
             guard let uuid,
-                  let pin = findPin(uuid: uuid.uuidString) else { return }
+                  let pin = findPin(uuid: uuid) else { return }
             // Select the row in the sidebar without scrolling or expanding lists.
-            selection.ids = [pin.persistentModelID]
-            selection.anchor = pin.persistentModelID
+            selection.ids = [pin.uuid]
+            selection.anchor = pin.uuid
         }
         } // VStack
         } // ScrollViewReader
@@ -1966,7 +2042,7 @@ private struct ProjectDetailView: View {
         // Hidden M key button — opens Move popup when sidebar pins are selected.
         .background {
             Button("") {
-                let hasPins = selection.ids.contains(where: { findPin(byID: $0) != nil })
+                let hasPins = selection.ids.contains(where: { findPin(uuid: $0) != nil })
                 if hasPins { showMovePopup = true }
             }
             .keyboardShortcut("m", modifiers: [])
@@ -1985,7 +2061,7 @@ private struct ProjectDetailView: View {
                 // Prefer externally-supplied UUIDs (grid/map selection); fall back to sidebar.
                 let ext = externalMoveUUIDs
                 if !ext.isEmpty { return ext }
-                return selection.ids.compactMap { findPin(byID: $0)?.uuid }
+                return selection.ids.compactMap { findPin(uuid: $0)?.uuid }
             }()
             MoveToListSheet(
                 project: project,
@@ -2117,7 +2193,7 @@ private struct ListRow: View {
     let isExpanded: Bool
     var isFolder: Bool = false
     var isNested: Bool = false
-    @ObservedObject var selection: SidebarSelection
+    @ObservedObject var selection: SelectionStore
     let onToggleExpand: () -> Void
     var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
@@ -2136,7 +2212,7 @@ private struct ListRow: View {
     @Environment(\.modelContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
-    private var isSelected: Bool { selection.contains(list.persistentModelID) }
+    private var isSelected: Bool { selection.contains(list.uuid) }
     private var listColor: Color { Color(hexString: list.colorHex) }
 
     var body: some View {
@@ -2254,12 +2330,12 @@ private struct OptionalDrag: ViewModifier {
 
 private struct PinRow: View {
     let pin: PinnedLocationData
-    @ObservedObject var selection: SidebarSelection
+    @ObservedObject var selection: SelectionStore
     var listColor: Color? = nil
     var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
 
-    private var isSelected: Bool { selection.contains(pin.persistentModelID) }
+    private var isSelected: Bool { selection.contains(pin.uuid) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -2686,6 +2762,7 @@ private struct SidebarDetailPreview: View {
     var body: some View {
         ProjectDetailView(
             project: project,
+            selection: SelectionStore(),
             initialExpandedUUIDs: Set(project.lists.map(\.uuid.uuidString)),
             activeListIDs: $activeListIDs,
             hiddenUncategorizedProjectIDs: $hiddenUncategorizedProjectIDs,
@@ -2706,7 +2783,7 @@ private struct SidebarDetailPreview: View {
 }
 
 #Preview("Projects list") {
-    ProjectsPanel(activeListIDs: .constant([]), hiddenUncategorizedProjectIDs: .constant([]), externalMoveUUIDs: .constant([]))
+    ProjectsPanel(selection: SelectionStore(), activeListIDs: .constant([]), hiddenUncategorizedProjectIDs: .constant([]), externalMoveUUIDs: .constant([]))
         .frame(width: 280, height: 600)
         .modelContainer(SidebarPreviewData.container)
 }
@@ -2748,6 +2825,11 @@ private struct ScrollerGutterReserver: NSViewRepresentable {
         guard let view, let scroll = findScrollView(from: view) else { return }
         scroll.scrollerStyle = .overlay
         scroll.hasVerticalScroller = true
+        // Keep the scroller permanently present. When the system uses legacy (in-line)
+        // scrollers — "Always" in System Settings, or whenever a mouse is attached — an
+        // autohiding scroller pops in on scroll and steals width from the rows, squeezing
+        // them. Pinning it on means the content width never changes.
+        scroll.autohidesScrollers = false
         scroll.automaticallyAdjustsContentInsets = false
         let cur = scroll.contentInsets
         guard cur.right != width else { return }

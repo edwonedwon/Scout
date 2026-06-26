@@ -30,10 +30,25 @@ fi
 mkdir -p "$OUT_DIR"
 DEST="$OUT_DIR/Scout.app"
 
+# Quit ANY running Scout before swapping the bundle. A bare `open` on an already-running
+# app only re-focuses the old process — macOS won't reload a new binary into it — so without
+# this you'd keep testing a stale build. Graceful quit first, then force-kill stragglers.
+# The path match (…Scout.app/Contents/MacOS/Scout) covers both the /Applications copy and
+# any instance launched from Xcode's DerivedData.
+echo "▶ Quitting any running Scout…"
+osascript -e 'tell application "Scout" to quit' >/dev/null 2>&1 || true
+# Give it a moment to exit cleanly, then force-kill whatever's left.
+for _ in 1 2 3 4 5; do
+    pgrep -f "Scout.app/Contents/MacOS/Scout" >/dev/null 2>&1 || break
+    sleep 0.3
+done
+pkill -9 -f "Scout.app/Contents/MacOS/Scout" >/dev/null 2>&1 || true
+
 # Replace any existing copy
 rm -rf "$DEST"
 cp -R "$APP_PATH" "$DEST"
 
 echo ""
 echo "✓ Scout.app → $DEST"
-echo "  Open with:  open \"$DEST\""
+echo "▶ Launching fresh build…"
+open "$DEST"

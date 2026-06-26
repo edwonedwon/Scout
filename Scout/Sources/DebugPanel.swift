@@ -3,6 +3,7 @@ import ScoutKit
 
 struct DebugPanelOverlay: View {
     var onDeleteAllData: (() -> Void)? = nil
+    var onFindDuplicates: (() -> Void)? = nil
     @ObservedObject private var logger = DebugLogger.shared
     @State private var isExpanded = false
     @State private var showDeleteConfirm = false
@@ -47,6 +48,16 @@ struct DebugPanelOverlay: View {
                 Text("Debug Log")
                     .font(.caption.bold())
                 Spacer()
+                if let findDuplicates = onFindDuplicates {
+                    Button {
+                        findDuplicates()
+                    } label: {
+                        Text("Find Duplicates")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.orange)
+                }
                 if let deleteAll = onDeleteAllData {
                     Button {
                         showDeleteConfirm = true

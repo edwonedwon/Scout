@@ -65,12 +65,16 @@ public struct ScoutImage: Identifiable, Codable, Hashable {
     public var dateTaken: Date?
     /// Counter-clockwise 90° rotation steps to apply when displaying (0–3).
     public var rotationQuarterTurns: Int
+    /// Unrotated pixel aspect ratio (width / height); 0 when unknown. Lets the photo grid
+    /// size each cell to its final height BEFORE the image loads, eliminating the layout
+    /// reflow that otherwise fires on every async image load during scroll.
+    public var aspectRatio: Double
 
     public enum ImageSource: String, Codable {
         case googleMaps, streetView, instagram, youtube, imported, scouting
     }
 
-    public init(id: UUID = UUID(), url: URL? = nil, localPath: String? = nil, caption: String = "", source: ImageSource, dateTaken: Date? = nil, rotationQuarterTurns: Int = 0) {
+    public init(id: UUID = UUID(), url: URL? = nil, localPath: String? = nil, caption: String = "", source: ImageSource, dateTaken: Date? = nil, rotationQuarterTurns: Int = 0, aspectRatio: Double = 0) {
         self.id = id
         self.url = url
         self.localPath = localPath
@@ -78,6 +82,7 @@ public struct ScoutImage: Identifiable, Codable, Hashable {
         self.source = source
         self.dateTaken = dateTaken
         self.rotationQuarterTurns = rotationQuarterTurns
+        self.aspectRatio = aspectRatio
     }
 }
 

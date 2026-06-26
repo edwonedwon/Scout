@@ -1,18 +1,12 @@
 import SwiftUI
 import ScoutKit
 
-/// Holds the photo grid's multi-selection as a reference type. Owned by the grid via plain
-/// @State (NOT @StateObject), so mutating it never re-renders the grid body — which would
-/// otherwise recompute the full PhotoItem arrays on every click. Only the visible cells
-/// observe it via @ObservedObject, so selecting (or shift-selecting thousands of) photos
-/// repaints only what's on screen.
-private final class GridSelection: ObservableObject {
-    @Published var ids: Set<UUID> = []
-    var anchor: UUID? = nil
-    func contains(_ id: UUID) -> Bool { ids.contains(id) }
-}
-
 struct PhotoGridView: View {
+    /// THE shared selection store (sidebar + grid + map). Passed in by ContentView so a
+    /// selection made here shows up in the sidebar and on the map, and vice-versa. Held as a
+    /// plain `var` (the cells `@ObservedObject` it), so mutating it never re-runs the grid body
+    /// — which would otherwise recompute the full PhotoItem arrays on every click.
+    var selection: SelectionStore
     /// A named group of locations forming one visual section in the grid.
     struct Section {
         let title: String
@@ -34,9 +28,6 @@ struct PhotoGridView: View {
     var onDoubleSelectLocation: ((UUID) -> Void)? = nil
     /// Called with selected UUIDs when "Add to List" is chosen from the grid context menu.
     var onMoveToList: (([UUID]) -> Void)? = nil
-    /// Called whenever the grid's multi-selection changes, so the host can drive the
-    /// "m" (move) shortcut with the FULL selection rather than just the last-tapped photo.
-    var onSelectionChange: ((Set<UUID>) -> Void)? = nil
     /// Called with selected UUIDs when "R" is pressed — rotate 90° counter-clockwise.
     var onRotate: (([UUID]) -> Void)? = nil
     /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
@@ -59,23 +50,81 @@ struct PhotoGridView: View {
         }
     }
 
-    private var searchItems: [PhotoItem] { makeItems(from: locations) }
-    private var sectionItems: [(title: String, color: Color?, items: [PhotoItem])] {
-        pinnedSections.map { section in
-            (section.title, section.color, makeItems(from: section.locations, isPinned: true))
-        }
+    /// One section's pre-bucketed display data. Built once per input/column change so the
+    /// scroll body never re-derives PhotoItems while scrolling.
+    private struct SectionModel: Identifiable {
+        let id: Int
+        let title: String
+        let color: Color?
+        let buckets: [[PhotoItem]]
     }
-    private var allPinnedItems: [PhotoItem] { sectionItems.flatMap(\.items) }
-    private var hasAny: Bool { !searchItems.isEmpty || !allPinnedItems.isEmpty }
+    /// The whole grid's memoized display model. Rebuilt only when `inputSignature` changes
+    /// (data or column count), NOT on every scroll tick / highlight change. Without this the
+    /// body rebuilt thousands of structs + two array concatenations per scroll frame.
+    private struct GridModel {
+        var sections: [SectionModel] = []
+        var searchBuckets: [[PhotoItem]] = []
+        var hasSearch = false
+        /// Sequential (display) order of every item — used for shift-range selection.
+        var allItems: [PhotoItem] = []
+        var hasAny: Bool { !sections.isEmpty || hasSearch }
+    }
 
     @State private var columns = 3
-    // Plain @State so selection changes don't re-run the body (see GridSelection docs).
-    @State private var gridSelection = GridSelection()
     @State private var scrollPositionID: UUID? = nil
+    @State private var model = GridModel()
     private let gap: CGFloat = 2
 
+    /// Cheap O(sections) fingerprint of the inputs + column count. Changing it rebuilds the
+    /// memoized model; a pure scroll (which doesn't change it) reuses the built model.
+    private var inputSignature: Int {
+        var h = Hasher()
+        h.combine(columns)
+        h.combine(locations.count)
+        h.combine(locations.first?.id)
+        h.combine(locations.last?.id)
+        h.combine(pinnedSections.count)
+        for s in pinnedSections {
+            h.combine(s.title)
+            h.combine(s.locations.count)
+            h.combine(s.locations.first?.id)
+            h.combine(s.locations.last?.id)
+        }
+        return h.finalize()
+    }
+
+    private func rebuildModel() {
+        let cols = max(columns, 1)
+        func bucketize(_ items: [PhotoItem]) -> [[PhotoItem]] {
+            var b = Array(repeating: [PhotoItem](), count: cols)
+            for (i, it) in items.enumerated() { b[i % cols].append(it) }
+            return b
+        }
+        var sections: [SectionModel] = []
+        var allPinned: [PhotoItem] = []
+        for (i, section) in pinnedSections.enumerated() {
+            let items = makeItems(from: section.locations, isPinned: true)
+            guard !items.isEmpty else { continue }
+            allPinned += items
+            sections.append(SectionModel(id: i, title: section.title, color: section.color,
+                                         buckets: bucketize(items)))
+        }
+        let search = makeItems(from: locations)
+        model = GridModel(sections: sections,
+                          searchBuckets: bucketize(search),
+                          hasSearch: !search.isEmpty,
+                          allItems: allPinned + search)
+    }
+
     var body: some View {
-        if !hasAny {
+        content
+            // initial:true builds the model on first appearance; later fires only when the
+            // data or column count changes — never during scroll.
+            .onChange(of: inputSignature, initial: true) { _, _ in rebuildModel() }
+    }
+
+    @ViewBuilder private var content: some View {
+        if !model.hasAny {
             ContentUnavailableView(
                 "No Photos",
                 systemImage: "photo.on.rectangle.angled",
@@ -88,14 +137,11 @@ struct PhotoGridView: View {
                 let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(sectionItems.enumerated()), id: \.offset) { _, pair in
-                            if !pair.items.isEmpty {
-                                sectionHeader(pair.title, color: pair.color)
-                                masonryGrid(items: pair.items, colWidth: colWidth,
-                                            allItems: allPinnedItems + searchItems)
-                            }
+                        ForEach(model.sections) { section in
+                            sectionHeader(section.title, color: section.color)
+                            masonryGrid(buckets: section.buckets, colWidth: colWidth)
                         }
-                        if !searchItems.isEmpty {
+                        if model.hasSearch {
                             HStack {
                                 sectionHeader("Search Results")
                                 Spacer()
@@ -109,8 +155,7 @@ struct PhotoGridView: View {
                                     .padding(.trailing, 10)
                                 }
                             }
-                            masonryGrid(items: searchItems, colWidth: colWidth,
-                                        allItems: allPinnedItems + searchItems)
+                            masonryGrid(buckets: model.searchBuckets, colWidth: colWidth)
                         }
                     }
                     .padding(.bottom, 44)
@@ -133,8 +178,8 @@ struct PhotoGridView: View {
             // Hidden R-key button: rotate the current selection 90° counter-clockwise.
             .background {
                 Button("") {
-                    guard !gridSelection.ids.isEmpty else { return }
-                    onRotate?(Array(gridSelection.ids))
+                    guard !selection.ids.isEmpty else { return }
+                    onRotate?(Array(selection.ids))
                 }
                 .keyboardShortcut("r", modifiers: [])
                 .opacity(0)
@@ -161,27 +206,18 @@ struct PhotoGridView: View {
         .padding(.bottom, 8)
     }
 
-    /// Split items into column buckets once so LazyVStack bodies never re-filter on scroll.
-    private func columnBuckets(_ items: [PhotoItem]) -> [[PhotoItem]] {
-        var buckets = Array(repeating: [PhotoItem](), count: max(columns, 1))
-        for (i, item) in items.enumerated() { buckets[i % columns].append(item) }
-        return buckets
-    }
-
-    private func masonryGrid(items: [PhotoItem], colWidth: CGFloat,
-                              allItems: [PhotoItem]) -> some View {
-        let buckets = columnBuckets(items)
-        return HStack(alignment: .top, spacing: gap) {
-            ForEach(0..<columns, id: \.self) { col in
+    private func masonryGrid(buckets: [[PhotoItem]], colWidth: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: gap) {
+            ForEach(0..<buckets.count, id: \.self) { col in
                 LazyVStack(spacing: gap) {
                     ForEach(buckets[col]) { item in
                         MasonryCell(
                             item: item,
                             width: colWidth,
                             isHighlighted: highlightedLocationID == item.location.id,
-                            selection: gridSelection,
-                            onTap: { selectItem(item, allItems: allItems) },
-                            onDoubleTap: { openCarousel(from: item, universe: allItems) },
+                            selection: selection,
+                            onTap: { selectItem(item) },
+                            onDoubleTap: { openCarousel(from: item) },
                             originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil,
                             onMoveToList: onMoveToList
                         )
@@ -192,7 +228,8 @@ struct PhotoGridView: View {
         }
     }
 
-    private func selectItem(_ item: PhotoItem, allItems: [PhotoItem]) {
+    private func selectItem(_ item: PhotoItem) {
+        let allItems = model.allItems
         let id = item.location.id
         #if os(macOS)
         let shift = NSEvent.modifierFlags.contains(.shift)
@@ -205,25 +242,24 @@ struct PhotoGridView: View {
 
         if option {
             // Option: toggle this item in/out of a disparate selection.
-            if gridSelection.ids.contains(id) { gridSelection.ids.remove(id) } else { gridSelection.ids.insert(id) }
-            gridSelection.anchor = id
-        } else if shift, let anchor = gridSelection.anchor {
+            if selection.ids.contains(id) { selection.ids.remove(id) } else { selection.ids.insert(id) }
+            selection.anchor = id
+        } else if shift, let anchor = selection.anchor {
             // Shift: range select from anchor to this item in display order.
             let ids = allItems.map(\.location.id)
             if let a = ids.firstIndex(of: anchor), let b = ids.firstIndex(of: id) {
                 let range = ids[min(a,b)...max(a,b)]
-                gridSelection.ids = Set(range)
+                selection.ids = Set(range)
             }
         } else {
             // Plain click: single select.
-            gridSelection.ids = [id]
-            gridSelection.anchor = id
+            selection.ids = [id]
+            selection.anchor = id
         }
         onSelectLocation?(id)
-        onSelectionChange?(gridSelection.ids)
     }
 
-    private func openCarousel(from item: PhotoItem, universe: [PhotoItem]) {
+    private func openCarousel(from item: PhotoItem) {
         onSelectLocation?(item.location.id)
         // If ContentView provided a double-tap handler (for stack-aware carousel), use it.
         if item.isPinned, let handler = onDoubleSelectLocation {
@@ -231,7 +267,7 @@ struct PhotoGridView: View {
             return
         }
         var seen = Set<UUID>()
-        let all = universe.compactMap { i -> ScoutLocation? in
+        let all = model.allItems.compactMap { i -> ScoutLocation? in
             guard seen.insert(i.location.id).inserted else { return nil }
             return i.location
         }
@@ -249,7 +285,7 @@ private struct MasonryCell: View {
     let item: PhotoGridView.PhotoItem
     let width: CGFloat
     var isHighlighted: Bool = false
-    @ObservedObject var selection: GridSelection
+    @ObservedObject var selection: SelectionStore
     var onTap: (() -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
     var originalFilePath: String? = nil
@@ -257,6 +293,18 @@ private struct MasonryCell: View {
     @State private var isHovered = false
 
     private var isSelected: Bool { selection.contains(item.location.id) }
+
+    /// Effective display aspect (width/height), accounting for 90° rotations. Falls back to a
+    /// reasonable landscape ratio only when the photo hasn't been measured yet.
+    private var cellAspect: CGFloat {
+        let a = item.image.aspectRatio
+        guard a > 0 else { return 1.0 / 0.65 }
+        let turns = ((item.image.rotationQuarterTurns % 4) + 4) % 4
+        return turns % 2 == 1 ? CGFloat(1.0 / a) : CGFloat(a)
+    }
+    /// Cell height is derived from the KNOWN aspect ratio (from the model), so it's fixed at
+    /// mount — the image loads into an already-correctly-sized frame with no layout reflow.
+    private var cellHeight: CGFloat { (width / cellAspect).rounded() }
 
     /// Resolves the UUIDs an action should target: the whole multi-selection if this item
     /// is part of it, otherwise just this item. Evaluated at action time so it's always current.
@@ -275,13 +323,17 @@ private struct MasonryCell: View {
     }
 
     var body: some View {
-        GooglePhotoImage(url: item.image.url, rotationQuarterTurns: item.image.rotationQuarterTurns) {
+        GooglePhotoImage(url: item.image.url,
+                         rotationQuarterTurns: item.image.rotationQuarterTurns,
+                         targetPixelSize: width * (NSScreen.main?.backingScaleFactor ?? 2)) {
             Color.gray.opacity(0.12)
-                .frame(width: width, height: width * 0.65)
-                .overlay(ProgressView().tint(.white).controlSize(.small))
         }
-        .aspectRatio(contentMode: .fit)
-        .frame(width: width)
+        // Fixed frame from the known aspect ratio → no reflow when the image loads. fill+clip
+        // shows the whole photo (frame already matches aspect) and crops only on the rare
+        // not-yet-measured fallback instead of distorting.
+        .aspectRatio(contentMode: .fill)
+        .frame(width: width, height: cellHeight)
+        .clipped()
         .overlay(alignment: .bottomLeading) {
             if isHovered {
                 LinearGradient(
@@ -343,8 +395,6 @@ private struct MasonryCell: View {
             }
             #endif
         }
-        .animation(.easeInOut(duration: 0.12), value: isHovered)
-        .animation(.easeInOut(duration: 0.2), value: isHighlighted)
     }
 }
 
@@ -422,6 +472,7 @@ private extension View {
 #if DEBUG
 #Preview("Photo grid") {
     PhotoGridView(
+        selection: SelectionStore(),
         locations: [.preview],
         pinnedSections: [PhotoGridView.Section(title: "Test Project", locations: [.preview])]
     )
