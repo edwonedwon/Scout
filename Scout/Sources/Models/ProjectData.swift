@@ -122,6 +122,9 @@ final class PinnedLocationData {
     /// Captured at import (and backfilled for older pins) so the photo grid can size each
     /// cell to its final height immediately — no reflow when the thumbnail finishes loading.
     var aspectRatio: Double = 0
+    /// Marked as a confirmed/favorite filming location ("flagged"). Sorts to the top of its
+    /// list and shows a marker in the sidebar, grid, and on the map.
+    var isFlagged: Bool = false
     @Relationship(inverse: \LocationListData.pins) var list: LocationListData?
     /// Set when this pin was imported directly into a project (not inside a list).
     var owningProject: ProjectData? = nil
@@ -195,7 +198,8 @@ final class PinnedLocationData {
             fullResImages: fullResImages,
             googleMapsURL: googleMapsURLString.flatMap { URL(string: $0) },
             googlePlaceId: googlePlaceId,
-            status: LocationStatus(rawValue: statusRaw) ?? .scouted
+            status: LocationStatus(rawValue: statusRaw) ?? .scouted,
+            isFlagged: isFlagged
         )
     }
 }

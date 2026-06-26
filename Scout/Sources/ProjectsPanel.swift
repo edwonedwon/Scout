@@ -530,7 +530,7 @@ private struct ProjectDetailView: View {
             case .list(let list):
                 result.append(FlatRow(uuid: list.uuid, scrollID: list.persistentModelID))
                 if expandedListIDs.contains(list.persistentModelID) {
-                    for p in list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }) {
+                    for p in flaggedFirst(list.pins.filter { $0.deletedAt == nil }) {
                         result.append(FlatRow(uuid: p.uuid, scrollID: p.persistentModelID))
                     }
                 }
@@ -675,7 +675,7 @@ private struct ProjectDetailView: View {
                 if case .list(let l) = item { return l } else { return nil }
             }).first(where: { $0.uuid == targetUUID }),
            !expandedListIDs.contains(list.persistentModelID) {
-            let pins = list.pins.sorted { $0.sortOrder < $1.sortOrder }
+            let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil })
             if !pins.isEmpty {
                 var tx = Transaction(animation: .none); tx.disablesAnimations = true
                 withTransaction(tx) { expandedListIDs.insert(list.persistentModelID) }
@@ -845,6 +845,28 @@ private struct ProjectDetailView: View {
         project.lists.first(where: { $0.uuid == uuid })
     }
 
+    /// Flagged ("favorite filming location") pins first — keeping each group's sortOrder — so
+    /// flagging a pin floats it to the top of its list, like pinning a chat.
+    private func flaggedFirst(_ pins: [PinnedLocationData]) -> [PinnedLocationData] {
+        pins.sorted { a, b in
+            a.isFlagged == b.isFlagged ? a.sortOrder < b.sortOrder : a.isFlagged
+        }
+    }
+
+    /// Toggles the flagged state of `primary` (plus any other selected pins). If any are
+    /// unflagged, flags them all; otherwise unflags them all.
+    private func toggleFlag(_ primary: PinnedLocationData) {
+        var pins = [primary]
+        if selection.contains(primary.uuid) {
+            for id in selection.ids where id != primary.uuid {
+                if let p = findPin(uuid: id) { pins.append(p) }
+            }
+        }
+        let shouldFlag = pins.contains { !$0.isFlagged }
+        for p in pins { p.isFlagged = shouldFlag }
+        try? modelContext.save()
+    }
+
     // Drag-start helpers. Each records the drag kind (so list rows can suppress the between-
     // lists insertion line for photo drags) and returns the payload provider. Kept as small
     // functions so the (already large) sidebar view body stays type-checkable.
@@ -859,6 +881,17 @@ private struct ProjectDetailView: View {
     private func beginListDrag(_ payload: String) -> NSItemProvider {
         SidebarDragState.shared.kind = .list
         return NSItemProvider(object: payload as NSString)
+    }
+
+    /// Drop onto a pin row INSIDE a list: reorder there (before/after the row) or import files.
+    /// `beforeNeighbor` is the pin immediately above `target` (nil if `target` is first), used to
+    /// place the dropped photo correctly for a `.before` drop.
+    private func reorderPinDrop(_ providers: [NSItemProvider], list: LocationListData,
+                                target: PinnedLocationData, beforeNeighbor: PinnedLocationData?,
+                                mode: DropMode) -> Bool {
+        if tryImportDrop(providers, into: list) { return true }
+        let after: PinnedLocationData? = (mode == .after) ? target : beforeNeighbor
+        return loadDropPin(providers, intoList: list, afterPin: after)
     }
 
     /// Removes a pin from wherever it currently lives (list or top-level).
@@ -971,10 +1004,10 @@ private struct ProjectDetailView: View {
         // Only pins not already in the target list. De-dupe by identity so a payload that
         // accidentally repeats an id can't move (or count) the same pin twice.
         var seen = Set<PersistentIdentifier>()
-        let moving = pins.filter { pin in
-            guard pin.list?.persistentModelID != list.persistentModelID else { return false }
-            return seen.insert(pin.persistentModelID).inserted
-        }
+        // De-dupe only. Do NOT skip pins already in `list`: a drop onto a row in the SAME list
+        // is a reorder, and the sortOrder logic below repositions them correctly (detach +
+        // re-add). Skipping same-list pins made reordering within a list a silent no-op.
+        let moving = pins.filter { seen.insert($0.persistentModelID).inserted }
         guard !moving.isEmpty else { return }
         for pin in moving {
             detach(pin)
@@ -1697,22 +1730,7 @@ private struct ProjectDetailView: View {
                 )
                 .padding(.leading, 24)
                 .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
-                .contextMenu {
-                    let multi = isInMultiSelection(pin.uuid)
-                    #if os(macOS)
-                    if let path = pin.originalFilePath {
-                        Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
-                            Label("Reveal in Finder", systemImage: "folder")
-                        }
-                        Divider()
-                    }
-                    #endif
-                    Button(role: .destructive) {
-                        if multi { deleteSelectedItems() } else { deletePin(pin) }
-                    } label: {
-                        Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
-                    }
-                }
+                .contextMenu { pinContextMenu(pin) }
                 .onDrag { beginPhotoDrag("photo:\(pin.uuid.uuidString)") }
                 .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
                     tryImportDrop(providers, into: nil) || loadDropPinToUncategorized(providers)
@@ -1792,9 +1810,7 @@ private struct ProjectDetailView: View {
                 ))
 
         if childExpanded {
-            let childPins = child.pins
-                .filter { $0.deletedAt == nil }
-                .sorted { $0.sortOrder < $1.sortOrder }
+            let childPins = flaggedFirst(child.pins.filter { $0.deletedAt == nil })
             ForEach(childPins) { pin in
                 PinRow(
                     pin: pin,
@@ -1805,15 +1821,32 @@ private struct ProjectDetailView: View {
                 )
                 .padding(.leading, 42)
                 .listRowInsets(EdgeInsets(top: 0, leading: 42, bottom: 0, trailing: 0))
-                .contextMenu {
-                    let multi = isInMultiSelection(pin.uuid)
-                    Button(role: .destructive) {
-                        if multi { deleteSelectedItems() } else { deletePin(pin) }
-                    } label: {
-                        Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
-                    }
-                }
+                .contextMenu { pinContextMenu(pin) }
             }
+        }
+    }
+
+    /// Shared right-click menu for any pin row: flag/unflag, reveal in Finder, and delete
+    /// (single or the whole selection). Used everywhere so the menu is identical and there's no
+    /// conflicting inner menu on PinRow.
+    @ViewBuilder private func pinContextMenu(_ pin: PinnedLocationData) -> some View {
+        let multi = isInMultiSelection(pin.uuid)
+        Button { toggleFlag(pin) } label: {
+            Label(pin.isFlagged ? "Unflag" : "Flag as Filming Location",
+                  systemImage: pin.isFlagged ? "flag.slash" : "flag")
+        }
+        #if os(macOS)
+        if let path = pin.originalFilePath {
+            Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
+                Label("Reveal in Finder", systemImage: "folder")
+            }
+        }
+        #endif
+        Divider()
+        Button(role: .destructive) {
+            if multi { deleteSelectedItems() } else { deletePin(pin) }
+        } label: {
+            Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
         }
     }
 
@@ -1832,22 +1865,7 @@ private struct ProjectDetailView: View {
                         onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
                         onDoubleTap: { handleDoubleTap(pin.uuid) }
                     )
-                    .contextMenu {
-                        let multi = isInMultiSelection(pin.uuid)
-                        #if os(macOS)
-                        if let path = pin.originalFilePath {
-                            Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
-                                Label("Reveal in Finder", systemImage: "folder")
-                            }
-                            Divider()
-                        }
-                        #endif
-                        Button(role: .destructive) {
-                            if multi { deleteSelectedItems() } else { deletePin(pin) }
-                        } label: {
-                            Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
-                        }
-                    }
+                    .contextMenu { pinContextMenu(pin) }
                     .background { rowHeightReader(item.id) }
                     .overlay { dropIndicator(for: item.id) }
                     .onDrag { beginItemDrag(item) }
@@ -1917,11 +1935,9 @@ private struct ProjectDetailView: View {
                             childListRow(child, folder: list)
                         }
 
-                        let pins = list.pins
-                            .filter { $0.deletedAt == nil }
-                            .sorted { $0.sortOrder < $1.sortOrder }
+                        let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil })
                             .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
-                        ForEach(pins) { pin in
+                        ForEach(Array(pins.enumerated()), id: \.element.persistentModelID) { idx, pin in
                             PinRow(
                                 pin: pin,
                                 selection: selection,
@@ -1931,18 +1947,25 @@ private struct ProjectDetailView: View {
                             )
                             .padding(.leading, 24)
                             .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
-                            .contextMenu {
-                                let multi = isInMultiSelection(pin.uuid)
-                                Button(role: .destructive) {
-                                    if multi { deleteSelectedItems() } else { deletePin(pin) }
-                                } label: {
-                                    Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
-                                }
-                            }
+                            .contextMenu { pinContextMenu(pin) }
+                            .background { rowHeightReader(pin.persistentModelID) }
+                            .overlay { dropIndicator(for: pin.persistentModelID) }
                             .onDrag { beginPhotoDrag("pin:\(pin.uuid.uuidString)") }
-                            .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
-                                tryImportDrop(providers, into: list) || loadDropPin(providers, intoList: list, afterPin: pin)
-                            }
+                            // Use the drop delegate (like the other rows) so before/after
+                            // insertion lines show and reordering within the list works.
+                            .onDrop(of: [.text, .fileURL, .image],
+                                    delegate: SidebarRowDropDelegate(
+                                        targetID: pin.persistentModelID,
+                                        allowNest: false,
+                                        height: { rowHeights[pin.persistentModelID] ?? 60 },
+                                        onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                                        onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                                        onPerform: { mode, providers in
+                                            reorderPinDrop(providers, list: list, target: pin,
+                                                           beforeNeighbor: idx > 0 ? pins[idx - 1] : nil,
+                                                           mode: mode)
+                                        }
+                                    ))
                         }
                     }
                 case .uncategorized(let proj):
@@ -2426,6 +2449,13 @@ private struct PinRow: View {
                 }
             }
             Spacer()
+            // Flagged (favorite filming location) marker.
+            if pin.isFlagged {
+                Image(systemName: "flag.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.trailing, 4)
+            }
         }
         .contentShape(Rectangle())
         .padding(.vertical, 2)
@@ -2441,17 +2471,9 @@ private struct PinRow: View {
         // List selection — so selecting thousands is an O(1) set write with no per-row work.
         .onTapGesture { { let m = currentModifierFlags(); onTap?(m.shift, m.option) }() }
         .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
-        .contextMenu {
-            #if os(macOS)
-            if let path = pin.originalFilePath {
-                Button {
-                    NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
-                } label: {
-                    Label("Reveal in Finder", systemImage: "folder")
-                }
-            }
-            #endif
-        }
+        // NOTE: no .contextMenu here — each pin row attaches the shared `pinContextMenu(pin)`
+        // from ProjectDetailView (which has access to flag/delete). An inner menu here would
+        // shadow it.
     }
 
     @ViewBuilder
@@ -2697,6 +2719,10 @@ struct MoveToListSheet: View {
                             withAnimation { proxy.scrollTo(hl.persistentModelID, anchor: .center) }
                         }
                     }
+                    // Cap the scroll area so a long list can't make the sheet taller than the
+                    // window — a too-tall .sheet forces macOS to grow the window (and it never
+                    // shrinks back). Short lists still size to content via the outer fixedSize.
+                    .frame(maxHeight: 320)
                 }
             }
         }

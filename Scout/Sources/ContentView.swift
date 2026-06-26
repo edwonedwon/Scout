@@ -79,6 +79,7 @@ final class PinDisplayCache {
         h.combine(pin.photoFiles); h.combine(pin.thumbnailFiles)
         h.combine(pin.originalFilePath)
         h.combine(pin.statusRaw)
+        h.combine(pin.isFlagged)
         return h.finalize()
     }
 }
@@ -417,6 +418,7 @@ struct ContentView: View {
         // reliably regardless of when SwiftUI's (deferred) tap handlers actually fire.
         ClickModifiers.shared.install()
         #endif
+        repairDuplicateUUIDs()
         rebuildPinCaches()
         loadSavedRegions()   // restore this project's region filters
         // Always launch with the left projects panel open and the right search panel closed,
@@ -613,6 +615,7 @@ struct ContentView: View {
                     }
                 },
                 onMoveToList: { uuids in externalMoveUUIDs = uuids },
+                onToggleFlag: { uuids in toggleFlag(uuids) },
                 onRotate: { uuids in rotatePins(uuids) },
                 originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
@@ -853,9 +856,9 @@ struct ContentView: View {
                     list.persistentModelID,
                     pins: list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder }
                 ) { proximityOrdered($0) }
-                let locs = ordered
+                let locs = flaggedFirst(ordered
                     .map { displayCache.location(for: $0) }
-                    .filter { !$0.images.isEmpty }
+                    .filter { !$0.images.isEmpty })
                 if !locs.isEmpty {
                     sections.append(PhotoGridView.Section(
                         title: project.lists.count > 1 ? "\(project.name) — \(list.name)" : project.name,
@@ -871,9 +874,9 @@ struct ContentView: View {
                 : project.importedPhotos
                 .filter { $0.deletedAt == nil }
                 .sorted { $0.sortOrder < $1.sortOrder }
-            let imported = displayCache.proximityOrdered(project.persistentModelID, pins: importedPins) { proximityOrdered($0) }
+            let imported = flaggedFirst(displayCache.proximityOrdered(project.persistentModelID, pins: importedPins) { proximityOrdered($0) }
                 .map { displayCache.location(for: $0) }
-                .filter { !$0.images.isEmpty }
+                .filter { !$0.images.isEmpty })
             if !imported.isEmpty {
                 let title = project.lists.isEmpty ? project.name : "\(project.name) — Uncategorized"
                 sections.append(PhotoGridView.Section(title: title, locations: imported))
@@ -885,9 +888,9 @@ struct ContentView: View {
                 list.persistentModelID,
                 pins: list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder }
             ) { proximityOrdered($0) }
-            let locs = ordered
+            let locs = flaggedFirst(ordered
                 .map { displayCache.location(for: $0) }
-                .filter { !$0.images.isEmpty }
+                .filter { !$0.images.isEmpty })
             if !locs.isEmpty {
                 sections.append(PhotoGridView.Section(
                     title: list.name,
@@ -1065,6 +1068,37 @@ struct ContentView: View {
     /// caches. Soft-delete (not a hard SwiftData delete) keeps the photo recoverable and
     /// avoids the crash that hard-deleting a pin the grid/map still referenced could cause.
     /// The carousel has already dismissed itself by the time this runs.
+    /// One-time data repair: reassign any DUPLICATE `uuid`s among lists/pins/projects.
+    /// The whole app keys selection (and the map/grid) by `uuid` — `ScoutLocation.id` IS the
+    /// pin uuid — so two rows sharing a uuid select together and can collide on the map. (Photo
+    /// files are named by a separate id, so reassigning a pin's uuid never orphans its photos.)
+    private func repairDuplicateUUIDs() {
+        var changed = false
+        var seenLists = Set<UUID>()
+        for list in allLists where !seenLists.insert(list.uuid).inserted { list.uuid = UUID(); changed = true }
+        var seenPins = Set<UUID>()
+        for pin in allPins where !seenPins.insert(pin.uuid).inserted { pin.uuid = UUID(); changed = true }
+        var seenProjects = Set<UUID>()
+        for project in allProjects where !seenProjects.insert(project.uuid).inserted { project.uuid = UUID(); changed = true }
+        if changed { try? modelContext.save() }
+    }
+
+    /// Stable partition: flagged locations first (keeping their order), then the rest.
+    private func flaggedFirst(_ locs: [ScoutLocation]) -> [ScoutLocation] {
+        locs.filter(\.isFlagged) + locs.filter { !$0.isFlagged }
+    }
+
+    /// Toggle the "flagged" (favorite filming location) state of the given pins. If any are
+    /// unflagged, flags them all; otherwise unflags them all. Used by the grid/map.
+    private func toggleFlag(_ uuids: [UUID]) {
+        let pins = allPins.filter { uuids.contains($0.uuid) }
+        guard !pins.isEmpty else { return }
+        let shouldFlag = pins.contains { !$0.isFlagged }
+        for pin in pins { pin.isFlagged = shouldFlag }
+        try? modelContext.save()
+        rebuildPinCaches()   // isFlagged is in the cache signature → flagged-first re-sorts
+    }
+
     private func deletePinFromCarousel(_ loc: ScoutLocation) {
         guard let pin = allPins.first(where: { $0.uuid == loc.id }) else { return }
         pin.deletedAt = Date()

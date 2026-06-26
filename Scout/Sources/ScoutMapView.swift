@@ -688,6 +688,10 @@ final class ScoutDotAnnotationView: MKAnnotationView {
     var isMultiSelected: Bool = false {
         didSet { guard oldValue != isMultiSelected else { return }; needsDisplay = true }
     }
+    /// Flagged (favorite filming) location — draws a small red badge at the corner.
+    var isFlagged: Bool = false {
+        didSet { guard oldValue != isFlagged else { return }; needsDisplay = true }
+    }
 
     override init(annotation: (any MKAnnotation)?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
@@ -748,6 +752,15 @@ final class ScoutDotAnnotationView: MKAnnotationView {
             selPath.lineWidth = ringWidth * 1.1
             selPath.stroke()
         }
+
+        // Flag badge: small red dot at the top-right, kept inside bounds so it isn't clipped.
+        if isFlagged {
+            let bs = bounds.width * 0.55
+            let badge = CGRect(x: bounds.maxX - bs, y: bounds.maxY - bs, width: bs, height: bs)
+            let path = NSBezierPath(ovalIn: badge)
+            NSColor.systemRed.setFill(); path.fill()
+            NSColor.white.setStroke(); path.lineWidth = max(bs * 0.18, 1); path.stroke()
+        }
     }
 }
 
@@ -759,9 +772,14 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
     /// CALayer used instead of NSImageView so we get contentsGravity = .resizeAspectFill
     /// (fill+crop) which NSImageView cannot do natively.
     private let photoLayer = CALayer()
+    private let flagBadge = CALayer()
     private var loadTask: Task<Void, Never>?
     private var currentScale: CGFloat = 1.0
 
+    /// Red badge marking a flagged (favorite filming) location.
+    var isFlagged: Bool = false {
+        didSet { guard oldValue != isFlagged else { return }; flagBadge.isHidden = !isFlagged }
+    }
     var isHovered: Bool = false {
         didSet { guard oldValue != isHovered else { return }; applyBorder() }
     }
@@ -796,6 +814,17 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         photoLayer.cornerRadius = 6
         photoLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         layer?.addSublayer(photoLayer)
+
+        // Flag badge (top-right red dot), hidden unless the pin is flagged.
+        let bs: CGFloat = 16
+        flagBadge.frame = CGRect(x: size - bs + 3, y: size - bs + 3, width: bs, height: bs)
+        flagBadge.backgroundColor = NSColor.systemRed.cgColor
+        flagBadge.cornerRadius = bs / 2
+        flagBadge.borderColor = NSColor.white.cgColor
+        flagBadge.borderWidth = 2
+        flagBadge.zPosition = 20
+        flagBadge.isHidden = true
+        layer?.addSublayer(flagBadge)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -832,6 +861,9 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         layer?.cornerRadius = 8 * ratio
         layer?.shadowRadius = 4 * ratio
         photoLayer.cornerRadius = 6 * ratio
+        let bs = 16 * ratio
+        flagBadge.frame = CGRect(x: s - bs + 3 * ratio, y: s - bs + 3 * ratio, width: bs, height: bs)
+        flagBadge.cornerRadius = bs / 2
         applyBorder()
     }
 
@@ -840,6 +872,7 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         layer?.setAffineTransform(.identity)
         layer?.zPosition = 0
         isHovered = false
+        isFlagged = false
         currentScale = 1.0
         photoLayer.contents = nil
     }
@@ -1168,6 +1201,7 @@ struct ScoutMapView {
                 hasher.combine(loc.id)
                 hasher.combine(tint)
                 hasher.combine(loc.images.first?.url)
+                hasher.combine(loc.isFlagged)
             }
             let sig = hasher.finalize()
             if projectPins {
@@ -1200,8 +1234,8 @@ struct ScoutMapView {
             var toAdd: [LocationAnnotation] = []
             for (id, (loc, tint)) in desiredMap {
                 if let existing = index[id] {
-                    // Already on map — update tint color without remove/add if it changed.
-                    if existing.tintHex != tint {
+                    // Replace (so viewFor: re-runs) when the tint OR the flagged state changed.
+                    if existing.tintHex != tint || existing.location.isFlagged != loc.isFlagged {
                         let replacement = LocationAnnotation(loc, isProjectPin: projectPins, tintHex: tint)
                         map.removeAnnotation(existing)
                         toAdd.append(replacement)
@@ -1592,6 +1626,7 @@ struct ScoutMapView {
                     // No colored frame normally; blue ring when in the multi-selection.
                     let selected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                     view.borderColor = selected ? .systemBlue : .clear
+                    view.isFlagged = ann.location.isFlagged
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url,
                                    rotationQuarterTurns: ann.location.images.first?.rotationQuarterTurns ?? 0)
@@ -1605,6 +1640,7 @@ struct ScoutMapView {
                     view.annotation = annotation
                     view.dotColor = ann.tintColor
                     view.isMultiSelected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
+                    view.isFlagged = ann.location.isFlagged
                     view.setScale(scale)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {
                         view.reveal()

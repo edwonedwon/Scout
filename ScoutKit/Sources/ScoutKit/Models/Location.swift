@@ -17,6 +17,9 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
     public var notes: String
     public var status: LocationStatus
     public var createdAt: Date
+    /// Marked as a confirmed/favorite filming location. Flagged pins sort to the top of their
+    /// list and get a marker in the sidebar, grid, and on the map.
+    public var isFlagged: Bool
 
     public init(
         id: UUID = UUID(),
@@ -31,7 +34,8 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         googlePlaceId: String? = nil,
         notes: String = "",
         status: LocationStatus = .scouted,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        isFlagged: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -46,6 +50,7 @@ public struct ScoutLocation: Identifiable, Codable, Hashable {
         self.notes = notes
         self.status = status
         self.createdAt = createdAt
+        self.isFlagged = isFlagged
     }
 }
 

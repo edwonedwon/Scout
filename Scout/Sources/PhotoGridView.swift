@@ -33,6 +33,8 @@ struct PhotoGridView: View {
     var onDoubleSelectLocation: ((UUID) -> Void)? = nil
     /// Called with selected UUIDs when "Add to List" is chosen from the grid context menu.
     var onMoveToList: (([UUID]) -> Void)? = nil
+    /// Called with selected UUIDs to toggle the "flagged" (favorite filming location) state.
+    var onToggleFlag: (([UUID]) -> Void)? = nil
     /// Called with selected UUIDs when "R" is pressed — rotate 90° counter-clockwise.
     var onRotate: (([UUID]) -> Void)? = nil
     /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
@@ -190,6 +192,16 @@ struct PhotoGridView: View {
                 .opacity(0)
                 .allowsHitTesting(false)
             }
+            // Hidden P-key button: flag/unflag the current selection (favorite filming spot).
+            .background {
+                Button("") {
+                    guard !selection.ids.isEmpty else { return }
+                    onToggleFlag?(Array(selection.ids))
+                }
+                .keyboardShortcut("p", modifiers: [])
+                .opacity(0)
+                .allowsHitTesting(false)
+            }
         }
     }
 
@@ -224,7 +236,8 @@ struct PhotoGridView: View {
                             onTap: { selectItem(item) },
                             onDoubleTap: { openCarousel(from: item) },
                             originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil,
-                            onMoveToList: onMoveToList
+                            onMoveToList: onMoveToList,
+                            onToggleFlag: onToggleFlag
                         )
                         .id(item.id)
                     }
@@ -294,6 +307,7 @@ private struct MasonryCell: View {
     var onDoubleTap: (() -> Void)? = nil
     var originalFilePath: String? = nil
     var onMoveToList: (([UUID]) -> Void)? = nil
+    var onToggleFlag: (([UUID]) -> Void)? = nil
     @State private var isHovered = false
 
     private var isSelected: Bool { selection.contains(item.location.id) }
@@ -358,6 +372,18 @@ private struct MasonryCell: View {
                 }
             }
         }
+        .overlay(alignment: .topTrailing) {
+            // Flagged (favorite filming location) marker.
+            if item.location.isFlagged {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(4)
+                    .background(Circle().fill(Color.red))
+                    .padding(5)
+                    .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+            }
+        }
         .overlay {
             if isSelected {
                 RoundedRectangle(cornerRadius: 3)
@@ -393,6 +419,12 @@ private struct MasonryCell: View {
             })
         }
         .contextMenu {
+            if item.isPinned, let onToggleFlag {
+                Button { onToggleFlag(actionIDs()) } label: {
+                    Label(item.location.isFlagged ? "Unflag" : "Flag as Filming Location",
+                          systemImage: item.location.isFlagged ? "flag.slash" : "flag")
+                }
+            }
             if item.isPinned, let onMoveToList {
                 Button { onMoveToList(actionIDs()) } label: {
                     Label("Add to List…", systemImage: "arrow.right.square")
