@@ -269,6 +269,9 @@ struct ContentView: View {
     @State private var scriptNewListName = ""
     /// When set, the Script view scrolls to & selects this range (jump-to-scene from a list).
     @State private var scriptScrollTarget: NSRange? = nil
+    /// Whole-page zoom for the Script view (Cmd +/-), persisted across launches. Starts a bit
+    /// zoomed in since the page is small to read at 1.0.
+    @AppStorage("scriptZoom") private var scriptZoom: Double = 1.3
 
     private var openProject: ProjectData? {
         allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })
@@ -745,6 +748,7 @@ struct ContentView: View {
                        onAssign: { range in beginScriptAssign(range) },
                        onAssignNewList: { range in beginScriptAssignNewList(range) },
                        onRemoveHighlight: { range in removeScriptHighlight(overlapping: range) },
+                       zoom: CGFloat(scriptZoom),
                        scrollTarget: scriptScrollTarget)
                 .opacity(viewMode == .script ? 1 : 0)
                 .allowsHitTesting(viewMode == .script)
@@ -795,6 +799,22 @@ struct ContentView: View {
                 .disabled(viewMode == .script)
                 .opacity(0)
                 .allowsHitTesting(false)
+        }
+        // Cmd +/- (and Cmd 0 to reset): zoom the Script page in/out. Only in Script mode.
+        .background {
+            Group {
+                Button("") { scriptZoom = min(scriptZoom + 0.1, 3.0) }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button("") { scriptZoom = min(scriptZoom + 0.1, 3.0) }
+                    .keyboardShortcut("=", modifiers: .command)
+                Button("") { scriptZoom = max(scriptZoom - 0.1, 0.5) }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("") { scriptZoom = 1.3 }
+                    .keyboardShortcut("0", modifiers: .command)
+            }
+            .disabled(viewMode != .script)
+            .opacity(0)
+            .allowsHitTesting(false)
         }
         // Clear the shared selection once the move sheet has closed.
         // Also open the sheet here when the sidebar is hidden (ProjectsPanel is not in hierarchy).

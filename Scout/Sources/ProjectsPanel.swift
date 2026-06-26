@@ -608,8 +608,12 @@ private struct ProjectDetailView: View {
         if let pin = findPin(uuid: id) {
             if pin.hasGPS { onSelectPin?(pin) } else { onClearPin?() }
         } else if let list = findList(uuid: id) {
-            onClearPin?()
-            onFitToList?(list.pins.filter { $0.hasGPS })
+            // Only navigate the map for a list that's actually visible on it. Clicking a hidden
+            // (eye-off) list just selects it and leaves the map untouched.
+            if activeListIDs.contains(list.persistentModelID) {
+                onClearPin?()
+                onFitToList?(list.pins.filter { $0.hasGPS })
+            }
         }
     }
 
@@ -2234,19 +2238,20 @@ private struct ProjectDetailView: View {
         // (e.g. the Google Maps search box). The actions no-op on an empty selection, and a
         // focused TextField consumes the key itself, so these never interfere with typing.
         .background {
-            Button("", action: deleteSelectedItems)
-                .keyboardShortcut(.delete, modifiers: [])
-                .opacity(0)
-                .allowsHitTesting(false)
-            Button("") { selection.ids = []; selection.anchor = nil }
-                .keyboardShortcut("a", modifiers: .shift)
-                .opacity(0)
-                .allowsHitTesting(false)
-            // ⌘Z restores the most recently trashed batch of photos.
-            Button("", action: undoLastTrash)
-                .keyboardShortcut("z", modifiers: .command)
-                .opacity(0)
-                .allowsHitTesting(false)
+            // Disabled while renaming so the rename field gets every keystroke — otherwise
+            // backspace deletes the list, Shift+A (a capital "A") clears the selection, etc.
+            Group {
+                Button("", action: deleteSelectedItems)
+                    .keyboardShortcut(.delete, modifiers: [])
+                Button("") { selection.ids = []; selection.anchor = nil }
+                    .keyboardShortcut("a", modifiers: .shift)
+                // ⌘Z restores the most recently trashed batch of photos.
+                Button("", action: undoLastTrash)
+                    .keyboardShortcut("z", modifiers: .command)
+            }
+            .disabled(renamingList != nil)
+            .opacity(0)
+            .allowsHitTesting(false)
         }
         .onChange(of: project.importedPhotos.count) { normalizeOrder() }
         .onChange(of: project.lists.count) { normalizeOrder() }
@@ -2355,19 +2360,21 @@ private struct ProjectDetailView: View {
         }
         } // VStack
         } // ScrollViewReader
-        .onKeyPress(.downArrow) { moveSelection(1); return .handled }
-        .onKeyPress(.upArrow)   { moveSelection(-1); return .handled }
+        // All sidebar key handlers are suppressed while the rename popup is open so its text field
+        // gets every keystroke — only its own Return (onSubmit) commits the name.
+        .onKeyPress(.downArrow) { renamingList != nil ? .ignored : { moveSelection(1); return .handled }() }
+        .onKeyPress(.upArrow)   { renamingList != nil ? .ignored : { moveSelection(-1); return .handled }() }
         // "e" with a list selected: open the scene-type chooser as a popover anchored to the row.
         // Lives here (not as a global keyboardShortcut) so a focused text field consumes "e"
         // normally — only fires when the sidebar itself has keyboard focus.
         .onKeyPress(KeyEquivalent("e")) {
-            guard let target = selectedLists.first else { return .ignored }
+            guard renamingList == nil, let target = selectedLists.first else { return .ignored }
             sceneTypeEditID = target.uuid
             return .handled
         }
         // Enter with a list selected: rename it (reuses the row's rename flow).
         .onKeyPress(.return) {
-            guard let target = selectedLists.first else { return .ignored }
+            guard renamingList == nil, let target = selectedLists.first else { return .ignored }
             renameListText = target.name
             renamingList = target
             return .handled
@@ -2379,9 +2386,9 @@ private struct ProjectDetailView: View {
                 if hasPins { showMovePopup = true }
             }
             .keyboardShortcut("m", modifiers: [])
-            // Disable while the popup is open so typing "m" into its search field
-            // can't re-fire this shortcut and reset the popup's state.
-            .disabled(showMovePopup)
+            // Disable while the move popup or rename popup is open so typing into their fields
+            // can't re-fire this shortcut.
+            .disabled(showMovePopup || renamingList != nil)
             .opacity(0)
             .allowsHitTesting(false)
         }
@@ -2677,6 +2684,7 @@ private struct ListRow: View {
             // dot and the title. Kept out of the drag handle so a click opens the menu rather
             // than starting a reorder drag.
             sceneTypeMenu
+                .padding(.horizontal, 5)
 
             // Drag handle: the list name initiates a reorder drag.
             Text(list.name)
