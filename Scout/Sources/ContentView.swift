@@ -3,6 +3,13 @@ import MapKit
 import SwiftData
 import ScoutKit
 
+/// A collaborator's access level on a shared project. Maps to CloudKit's CKShare permissions
+/// (.readWrite / .readOnly) once iCloud sharing is wired up (docs/collaboration-plan.md).
+enum ShareRole: Hashable {
+    case editor   // can view and make changes
+    case viewer   // read-only
+}
+
 /// The single source of truth for the app's selection, shared by every view that shows it:
 /// the sidebar rows, the photo-grid cells, and the map pins. Selecting in any one view writes
 /// here; the others observe the same store and update automatically.
@@ -271,6 +278,11 @@ struct ContentView: View {
     @State private var scriptScrollTarget: NSRange? = nil
     /// Set when a script highlight is clicked — reveals & selects its linked list in the sidebar.
     @State private var revealListUUID: UUID? = nil
+    /// Collaboration (project sharing) popover — UI shell; real iCloud sharing is wired later
+    /// per docs/collaboration-plan.md.
+    @State private var showCollaborationPopover = false
+    @State private var addPersonEmail = ""
+    @State private var addPersonRole: ShareRole = .editor
     /// Whole-page zoom for the Script view (Cmd +/-), persisted across launches. Starts a bit
     /// zoomed in since the page is small to read at 1.0.
     @AppStorage("scriptZoom") private var scriptZoom: Double = 1.3
@@ -893,6 +905,7 @@ struct ContentView: View {
                 viewModeToggle
                 Spacer()
                 HStack(spacing: 4) {
+                    if openProject != nil { collaborationButton }
                     fitAllPinsButton
                     locationTrackingButton
                     panelToggleButton(
@@ -915,6 +928,80 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(cachedProjectPins.isEmpty)
+    }
+
+    /// Collaboration button (Apple Notes-style). Opens a popover to see/add people on this
+    /// project. UI shell only for now — wired to iCloud sharing per docs/collaboration-plan.md.
+    private var collaborationButton: some View {
+        Button { showCollaborationPopover.toggle() } label: {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(.subheadline.weight(.medium))
+                .mapControlChrome(diameter: 32, circle: false)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showCollaborationPopover, arrowEdge: .bottom) {
+            collaborationPopover
+        }
+    }
+
+    private var collaborationPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "person.2.fill")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Collaboration").font(.headline)
+                    Text(openProject?.name ?? "Project").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(12)
+            Divider()
+            // Current participants (just the owner until sharing is live).
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle.fill").font(.title2).foregroundStyle(.blue)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("You").font(.subheadline.weight(.medium))
+                    Text("Owner").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            Divider()
+            // Add-person form.
+            VStack(alignment: .leading, spacing: 8) {
+                Text("ADD PERSON").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                TextField("Apple ID or iCloud email", text: $addPersonEmail)
+                    .textFieldStyle(.roundedBorder)
+                Picker("Role", selection: $addPersonRole) {
+                    Text("Editor").tag(ShareRole.editor)
+                    Text("Viewer").tag(ShareRole.viewer)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text(addPersonRole == .editor
+                     ? "Editor — can view and make changes."
+                     : "Viewer — can view only, no changes.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Button { addPerson() } label: {
+                    Label("Add Person", systemImage: "person.badge.plus").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(addPersonEmail.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(12)
+            Text("iCloud sharing isn't connected yet — the person is invited once collaboration is enabled.")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .padding(.horizontal, 12).padding(.bottom, 12)
+        }
+        .frame(width: 300)
+    }
+
+    private func addPerson() {
+        // Placeholder until CloudKit sharing exists (docs/collaboration-plan.md). For now just
+        // clears the field; later this creates/updates the project's CKShare with the chosen role.
+        addPersonEmail = ""
     }
 
     private var locationTrackingButton: some View {
