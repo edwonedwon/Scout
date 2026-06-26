@@ -7,6 +7,7 @@ struct DebugPanelOverlay: View {
     @ObservedObject private var logger = DebugLogger.shared
     @State private var isExpanded = false
     @State private var showDeleteConfirm = false
+    @State private var showInspector = false
     // Left-sidebar resize limits — same AppStorage keys ContentView reads.
     @AppStorage("debug.sidebarMinWidth") private var sidebarMinWidth: Double = 200
     @AppStorage("debug.sidebarMaxWidth") private var sidebarMaxWidth: Double = 480
@@ -48,6 +49,15 @@ struct DebugPanelOverlay: View {
                 Text("Debug Log")
                     .font(.caption.bold())
                 Spacer()
+                Button {
+                    showInspector = true
+                } label: {
+                    Text("Data Inspector")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.blue)
+                .sheet(isPresented: $showInspector) { DataInspectorView() }
                 if let findDuplicates = onFindDuplicates {
                     Button {
                         findDuplicates()
