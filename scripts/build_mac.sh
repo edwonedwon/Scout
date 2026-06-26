@@ -16,6 +16,7 @@ xcodebuild \
     -configuration Debug \
     -destination "platform=macOS" \
     -derivedDataPath "$BUILD_DIR" \
+    -allowProvisioningUpdates \
     DEVELOPMENT_TEAM=2J8M8Z4QCX \
     CODE_SIGN_STYLE=Automatic \
     CODE_SIGN_IDENTITY="Apple Development" \

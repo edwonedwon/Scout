@@ -32,6 +32,10 @@
 	<string>Scout imports geotagged photos from your library.</string>
 	<key>NSQuitAlwaysKeepsWindows</key>
 	<false/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

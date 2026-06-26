@@ -1,6 +1,6 @@
 name: Scout
 options:
-  bundleIdPrefix: com.scout
+  bundleIdPrefix: com.cutetech
   deploymentTarget:
     iOS: "17.0"
     macOS: "14.0"
@@ -29,7 +29,9 @@ targets:
       - package: ScoutKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.scout.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.cutetech.scout
+        DEVELOPMENT_TEAM: 2J8M8Z4QCX
+        CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
@@ -47,10 +49,19 @@ targets:
         com.apple.security.app-sandbox: false
         com.apple.security.personal-information.location: true
         com.apple.security.network.client: true
+        # iCloud + CloudKit (project sharing / real-time sync — docs/collaboration-plan.md).
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.cutetech.scout
+        com.apple.developer.icloud-services:
+          - CloudKit
+        # Remote (silent) push so NSPersistentCloudKitContainer gets change notifications.
+        aps-environment: development
     info:
       path: Scout/Info.plist
       properties:
         NSQuitAlwaysKeepsWindows: false
+        UIBackgroundModes:
+          - remote-notification
         NSLocationWhenInUseUsageDescription: "Scout uses your location to show nearby areas on the map."
         NSLocationAlwaysAndWhenInUseUsageDescription: "Scout uses your location to record GPS tracks during scouting trips."
         NSLocationUsageDescription: "Scout uses your location to show nearby areas on the map."
@@ -69,4 +80,5 @@ targets:
       - package: ScoutKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.scout.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.cutetech.scout.tests
+        DEVELOPMENT_TEAM: 2J8M8Z4QCX
