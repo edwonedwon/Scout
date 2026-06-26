@@ -179,6 +179,8 @@ struct ProjectsPanel: View {
     var scrollToPinUUID: UUID? = nil
     /// Set by "Reveal in List" (grid/map) to expand the pin's list/folder chain and scroll to it.
     var revealInListUUID: UUID? = nil
+    /// Set when a script highlight is clicked — reveal & select that LIST (centered) in the sidebar.
+    var revealListUUID: UUID? = nil
     /// Set by ContentView (M key or grid context menu) to open the move sheet for these UUIDs.
     @Binding var externalMoveUUIDs: [UUID]
 
@@ -218,6 +220,7 @@ struct ProjectsPanel: View {
                         },
                         scrollToPinUUID: scrollToPinUUID,
                         revealInListUUID: revealInListUUID,
+                        revealListUUID: revealListUUID,
                         externalMoveUUIDs: $externalMoveUUIDs
                     )
                 }
@@ -484,6 +487,8 @@ private struct ProjectDetailView: View {
     var scrollToPinUUID: UUID? = nil
     /// Set by "Reveal in List" — expand this pin's list/folder chain and scroll to its row.
     var revealInListUUID: UUID? = nil
+    /// Set when a script highlight is clicked — expand & scroll to that LIST's row (centered).
+    var revealListUUID: UUID? = nil
     /// Set by ContentView (from M key or grid context menu) to open the move sheet
     /// for specific location UUIDs, bypassing sidebar selection.
     @Binding var externalMoveUUIDs: [UUID]
@@ -923,6 +928,25 @@ private struct ProjectDetailView: View {
         selection.ids = [pin.uuid]
         selection.anchor = pin.uuid
         return pin.persistentModelID
+    }
+
+    /// Expands a list's ancestor folder chain (so its row exists), selects it, and returns its
+    /// scroll id — for revealing a list when its script highlight is clicked.
+    @discardableResult
+    private func revealList(_ uuid: UUID) -> PersistentIdentifier? {
+        guard let list = findList(uuid: uuid) else { return nil }
+        if !searchText.isEmpty { searchText = "" }
+        var tx = Transaction(animation: .none); tx.disablesAnimations = true
+        withTransaction(tx) {
+            var chain = Set<PersistentIdentifier>()
+            var node: LocationListData? = list.parentList
+            while let n = node { chain.insert(n.persistentModelID); node = n.parentList }
+            expandedListIDs = chain
+            uncategorizedExpanded = false
+        }
+        selection.ids = [list.uuid]
+        selection.anchor = list.uuid
+        return list.persistentModelID
     }
 
     /// Flagged ("favorite filming location") pins first — keeping each group's sortOrder — so
@@ -1969,7 +1993,8 @@ private struct ProjectDetailView: View {
             onMoveToTopLevel: { unnestList(list) },
             onDelete: { requestDeleteList(list) },
             dragProvider: { beginItemDrag(item) },
-            sceneTypeEditID: $sceneTypeEditID
+            sceneTypeEditID: $sceneTypeEditID,
+            onOpenSceneLink: { onOpenScriptHighlight?($0) }
         )
         .background { rowHeightReader(item.id) }
         .overlay { dropIndicator(for: item.id) }
@@ -2101,7 +2126,8 @@ private struct ProjectDetailView: View {
             onMoveToTopLevel: { unnestList(child) },
             onDelete: { requestDeleteList(child) },
             dragProvider: { beginListDrag("list:\(child.uuid.uuidString)") },
-            sceneTypeEditID: $sceneTypeEditID
+            sceneTypeEditID: $sceneTypeEditID,
+            onOpenSceneLink: { onOpenScriptHighlight?($0) }
         )
         .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
         .padding(.leading, 18)
@@ -2358,6 +2384,10 @@ private struct ProjectDetailView: View {
             guard let uuid, let target = revealPin(uuid) else { return }
             scrollSidebar(to: target, using: listProxy)
         }
+        .onChange(of: revealListUUID) { _, uuid in
+            guard let uuid, let target = revealList(uuid) else { return }
+            scrollSidebar(to: target, using: listProxy)
+        }
         } // VStack
         } // ScrollViewReader
         // All sidebar key handlers are suppressed while the rename popup is open so its text field
@@ -2577,6 +2607,8 @@ private struct ListRow: View {
     /// Which list's scene-type popover is open (shared across rows); the popover anchors to the
     /// row whose `list.uuid` matches. Set by clicking the chip or the panel's "e" shortcut.
     var sceneTypeEditID: Binding<UUID?>? = nil
+    /// Tapping the header's scene-count badge opens the script at that scene link.
+    var onOpenSceneLink: ((ScriptHighlight) -> Void)? = nil
     @Environment(\.modelContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
@@ -2696,14 +2728,22 @@ private struct ListRow: View {
 
             Spacer()
 
-            // Scene indicator: this list has script scene(s) assigned to it.
+            // Scene indicator: this list has script scene(s) assigned. Click → open the script at
+            // the first one (same as clicking the list's scene row).
             if !list.sceneLinks.isEmpty {
-                HStack(spacing: 1) {
-                    Image(systemName: "text.quote")
-                    Text("\(list.sceneLinks.count)")
+                Button {
+                    if let first = list.sceneLinks.sorted(by: { $0.rangeStart < $1.rangeStart }).first {
+                        onOpenSceneLink?(first)
+                    }
+                } label: {
+                    HStack(spacing: 1) {
+                        Image(systemName: "text.quote")
+                        Text("\(list.sceneLinks.count)")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
             }
             // A flag here means at least one photo in the list is flagged — i.e. a filming
             // location has already been picked for this list.

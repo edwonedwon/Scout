@@ -17,6 +17,8 @@ struct ScriptView: View {
     var onAssignNewList: ((NSRange) -> Void)? = nil
     /// Called to remove the highlight(s) overlapping the given range (right-click menu).
     var onRemoveHighlight: ((NSRange) -> Void)? = nil
+    /// Called with a character offset when the user clicks a highlight — to select its linked list.
+    var onHighlightClick: ((Int) -> Void)? = nil
     /// Page zoom (magnification) — Cmd +/- in Script mode; persisted by the owner.
     var zoom: CGFloat = 1.0
     /// When set, the view scrolls to & selects this range (used by "open scene from a list").
@@ -33,7 +35,8 @@ struct ScriptView: View {
                     zoom: zoom,
                     onAssign: onAssign,
                     onAssignNewList: onAssignNewList,
-                    onRemoveHighlight: onRemoveHighlight
+                    onRemoveHighlight: onRemoveHighlight,
+                    onHighlightClick: onHighlightClick
                 )
                 #else
                 ScrollView { Text(script.rawText).font(.system(.body, design: .monospaced)).padding() }
@@ -79,6 +82,14 @@ enum Screenplay {
     /// 11.9 keeps 54 lines fitting solidly (54×11.9=642.6 < 648) while 55 still never fit
     /// (55×11.9=654.5 > 648), so the page count matches an Arc Studio PDF export exactly.
     static let lineHeight: CGFloat = 11.9
+    /// Horizontal slack added to the text container. The element widths work out to exact whole
+    /// character counts (action 432pt = 60 chars, dialogue 252pt = 35 chars at 7.2pt/char), and at
+    /// an exact boundary NSLayoutManager wraps one character early (59/34) — so every dialogue
+    /// paragraph gains a line and, with this dialogue-heavy script, the whole thing runs a page
+    /// long. ~half a character of slack lets the intended 60/35 chars fit without admitting 61/36.
+    static let hSlack: CGFloat = 4
+    /// Text container width (the page text area plus the wrap slack above).
+    static var containerW: CGFloat { textW + hSlack }
     static let pageGap: CGFloat = 18
     static let font: NSFont = NSFont(name: "Courier", size: 12)
         ?? .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -127,6 +138,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
     var onAssign: ((NSRange) -> Void)?
     var onAssignNewList: ((NSRange) -> Void)?
     var onRemoveHighlight: ((NSRange) -> Void)?
+    var onHighlightClick: ((Int) -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -144,6 +156,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         context.coordinator.onAssign = onAssign
         context.coordinator.onAssignNewList = onAssignNewList
         context.coordinator.onRemoveHighlight = onRemoveHighlight
+        context.coordinator.onHighlightClick = onHighlightClick
         context.coordinator.rebuild(text: text, highlights: highlights)
         return scroll
     }
@@ -152,6 +165,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         context.coordinator.onAssign = onAssign
         context.coordinator.onAssignNewList = onAssignNewList
         context.coordinator.onRemoveHighlight = onRemoveHighlight
+        context.coordinator.onHighlightClick = onHighlightClick
         if abs(scroll.magnification - zoom) > 0.001 { scroll.magnification = zoom }
         if context.coordinator.needsRebuild(text: text, highlights: highlights) {
             context.coordinator.rebuild(text: text, highlights: highlights)
@@ -175,6 +189,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         var onAssign: ((NSRange) -> Void)?
         var onAssignNewList: ((NSRange) -> Void)?
         var onRemoveHighlight: ((NSRange) -> Void)?
+        var onHighlightClick: ((Int) -> Void)?
         var lastScrollTarget: NSRange?
 
         private var storage: NSTextStorage?
@@ -214,7 +229,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
             var containers: [NSTextContainer] = []
             var guardCount = 0
             while lastChar < total && guardCount < 5000 {
-                let c = NSTextContainer(size: NSSize(width: Screenplay.textW, height: Screenplay.textH))
+                let c = NSTextContainer(size: NSSize(width: Screenplay.containerW, height: Screenplay.textH))
                 c.lineFragmentPadding = 0
                 layout.addTextContainer(c)
                 var gr = layout.glyphRange(for: c)            // forces layout for this container
@@ -229,7 +244,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                     let frag = layout.lineFragmentRect(forGlyphAt: g, effectiveRange: nil)
                     if frag.minY > Screenplay.lineHeight,                       // not the top of the page
                        Screenplay.textH - frag.minY < Screenplay.lineHeight * 3 {  // < heading + 2 lines
-                        c.size = NSSize(width: Screenplay.textW, height: frag.minY)
+                        c.size = NSSize(width: Screenplay.containerW, height: frag.minY)
                         gr = layout.glyphRange(for: c)
                         cr = layout.characterRange(forGlyphRange: gr, actualGlyphRange: nil)
                     }
@@ -240,7 +255,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                 guardCount += 1
             }
             if containers.isEmpty {
-                let c = NSTextContainer(size: NSSize(width: Screenplay.textW, height: Screenplay.textH))
+                let c = NSTextContainer(size: NSSize(width: Screenplay.containerW, height: Screenplay.textH))
                 c.lineFragmentPadding = 0
                 layout.addTextContainer(c)
                 containers.append(c)
@@ -256,7 +271,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
 
                 let tv = ScriptNSTextView(
                     frame: NSRect(x: Screenplay.marginLeft, y: Screenplay.marginTop,
-                                  width: Screenplay.textW, height: Screenplay.textH),
+                                  width: Screenplay.containerW, height: Screenplay.textH),
                     textContainer: container)
                 tv.isEditable = false
                 tv.isSelectable = true
@@ -264,8 +279,8 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                 tv.textContainerInset = .zero
                 tv.isVerticallyResizable = false
                 tv.isHorizontallyResizable = false
-                tv.minSize = NSSize(width: Screenplay.textW, height: Screenplay.textH)
-                tv.maxSize = NSSize(width: Screenplay.textW, height: Screenplay.textH)
+                tv.minSize = NSSize(width: Screenplay.containerW, height: Screenplay.textH)
+                tv.maxSize = NSSize(width: Screenplay.containerW, height: Screenplay.textH)
                 tv.coordinatorRef = self
                 sheet.addSubview(tv)
                 pageTextViews.append(tv)
@@ -292,9 +307,11 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         func assign(_ range: NSRange) { onAssign?(range) }
         func assignNewList(_ range: NSRange) { onAssignNewList?(range) }
         func removeHighlight(_ range: NSRange) { onRemoveHighlight?(range) }
+        func highlightClicked(_ offset: Int) { onHighlightClick?(offset) }
 
-        /// Scrolls to the START of `range` without selecting it (selecting was distracting). The
-        /// highlight is already tinted, so the reader just needs it brought into view.
+        /// Scrolls so the START of `range` sits at the top of the view (with a little space above),
+        /// without selecting it. Forces the position even if the range is already partly visible,
+        /// so re-clicking the same scene always re-centres it to the top.
         func scrollTo(range: NSRange) {
             guard let layout, let scroll, let storage, range.location < storage.length else { return }
             let glyph = layout.glyphIndexForCharacter(at: range.location)
@@ -303,12 +320,13 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                   pageIndex < pageTextViews.count else { return }
             let tv = pageTextViews[pageIndex]
             guard let sheet = tv.superview else { return }
-            // Line rect of the highlight's first character, mapped page text view → sheet → doc.
-            var frag = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
-            frag.origin.x += tv.frame.minX + sheet.frame.minX
-            frag.origin.y += tv.frame.minY + sheet.frame.minY
-            // A little context above/below so the line isn't jammed against the top edge.
-            scroll.documentView?.scrollToVisible(frag.insetBy(dx: 0, dy: -60))
+            // Line's y in document coords: page text view → sheet → doc.
+            let frag = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let docY = frag.minY + tv.frame.minY + sheet.frame.minY
+            // Put that line ~24pt below the top edge (a touch of breathing room), always.
+            let clip = scroll.contentView
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: max(0, docY - 24)))
+            scroll.reflectScrolledClipView(clip)
         }
     }
 }
@@ -317,6 +335,23 @@ struct ScriptTextRepresentable: NSViewRepresentable {
 /// menu forwards an "assign" action to the shared coordinator.
 final class ScriptNSTextView: NSTextView {
     weak var coordinatorRef: ScriptTextRepresentable.Coordinator?
+
+    // A plain click on a tinted highlight selects its linked list (and reveals it in the sidebar)
+    // instead of starting a text selection. Modifier-clicks and drags fall through to normal
+    // selection so text can still be selected for assigning.
+    override func mouseDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.isEmpty, event.clickCount == 1, let storage = textStorage {
+            let pt = convert(event.locationInWindow, from: nil)
+            let idx = characterIndexForInsertion(at: pt)
+            if idx >= 0, idx < storage.length,
+               storage.attribute(.backgroundColor, at: idx, effectiveRange: nil) != nil {
+                coordinatorRef?.highlightClicked(idx)
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

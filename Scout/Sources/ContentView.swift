@@ -269,6 +269,8 @@ struct ContentView: View {
     @State private var scriptNewListName = ""
     /// When set, the Script view scrolls to & selects this range (jump-to-scene from a list).
     @State private var scriptScrollTarget: NSRange? = nil
+    /// Set when a script highlight is clicked — reveals & selects its linked list in the sidebar.
+    @State private var revealListUUID: UUID? = nil
     /// Whole-page zoom for the Script view (Cmd +/-), persisted across launches. Starts a bit
     /// zoomed in since the page is small to read at 1.0.
     @AppStorage("scriptZoom") private var scriptZoom: Double = 1.3
@@ -287,14 +289,18 @@ struct ContentView: View {
     /// the instant a scene link (or its list) is removed. Highlights with no list are skipped.
     private var activeScriptHighlights: [(NSRange, NSColor)] {
         guard let script = activeScript else { return [] }
-        return allScriptHighlights.compactMap { h in
-            // Skip links whose list is gone or in the Trash (soft-deleted) — those were the
-            // lingering "ghost" highlights.
-            guard h.script?.uuid == script.uuid,
-                  let list = h.list, list.deletedAt == nil,
-                  let color = NSColor(hexString: list.colorHex) else { return nil }
-            return (NSRange(location: h.rangeStart, length: h.rangeLength), color)
-        }
+        return allScriptHighlights
+            // Stable order (the @Query is unsorted) so the Script view doesn't rebuild — and reset
+            // the scroll — on every re-render when there are multiple highlights.
+            .filter { $0.script?.uuid == script.uuid }
+            .sorted { $0.rangeStart < $1.rangeStart }
+            .compactMap { h in
+                // Skip links whose list is gone or in the Trash (soft-deleted) — those were the
+                // lingering "ghost" highlights.
+                guard let list = h.list, list.deletedAt == nil,
+                      let color = NSColor(hexString: list.colorHex) else { return nil }
+                return (NSRange(location: h.rangeStart, length: h.rangeLength), color)
+            }
     }
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
     @State private var showExternalMoveSheet = false
@@ -474,6 +480,7 @@ struct ContentView: View {
                     onRevealOnMap: { id in revealOnMap(id) },
                     scrollToPinUUID: highlightedPinID,
                     revealInListUUID: revealInListUUID,
+                    revealListUUID: revealListUUID,
                     externalMoveUUIDs: $externalMoveUUIDs
                 )
                 .frame(width: liveSidebarWidth.map { CGFloat(min(max($0, sidebarMinWidth), sidebarMaxWidth)) } ?? clampedSidebarWidth)
@@ -748,6 +755,7 @@ struct ContentView: View {
                        onAssign: { range in beginScriptAssign(range) },
                        onAssignNewList: { range in beginScriptAssignNewList(range) },
                        onRemoveHighlight: { range in removeScriptHighlight(overlapping: range) },
+                       onHighlightClick: { offset in selectListForScriptOffset(offset) },
                        zoom: CGFloat(scriptZoom),
                        scrollTarget: scriptScrollTarget)
                 .opacity(viewMode == .script ? 1 : 0)
@@ -1350,6 +1358,21 @@ struct ContentView: View {
     }
 
     /// Opens a script highlight: switch to Script mode, show its script, scroll to & select it.
+    /// A highlight in the script was clicked: select its linked list and reveal it (centered) in
+    /// the sidebar. No-op if the offset isn't inside a highlight, or its list is gone/trashed.
+    private func selectListForScriptOffset(_ offset: Int) {
+        guard let script = activeScript,
+              let h = allScriptHighlights.first(where: {
+                  $0.script?.uuid == script.uuid
+                  && offset >= $0.rangeStart && offset < $0.rangeStart + $0.rangeLength
+              }),
+              let list = h.list, list.deletedAt == nil else { return }
+        selection.ids = [list.uuid]
+        selection.anchor = list.uuid
+        revealListUUID = nil
+        DispatchQueue.main.async { revealListUUID = list.uuid }
+    }
+
     private func openScriptHighlight(_ highlight: ScriptHighlight) {
         guard let script = highlight.script else { return }
         activeScriptUUID = script.uuid
