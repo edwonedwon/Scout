@@ -107,9 +107,11 @@ final class LocationListData {
     var deletedAt: Date? = nil
     @Relationship(deleteRule: .cascade) var pins: [PinnedLocationData] = []
     var project: ProjectData?
-    /// Script sections (scenes / parts of scenes) assigned to this list. Nullified, not cascaded,
-    /// so deleting a list just detaches its scene links rather than deleting the script text.
-    @Relationship(deleteRule: .nullify, inverse: \ScriptHighlight.list) var sceneLinks: [ScriptHighlight] = []
+    /// Script sections (scenes / parts of scenes) assigned to this list. Cascaded: a scene link
+    /// only exists to tie a script range to THIS list, so deleting the list removes the link
+    /// (it never deletes the script text itself — only the ScriptHighlight join object). A nullify
+    /// rule here left orphaned highlights that still painted a "ghost" tint in the script.
+    @Relationship(deleteRule: .cascade, inverse: \ScriptHighlight.list) var sceneLinks: [ScriptHighlight] = []
 
     // Self-referential nesting: a list may contain child lists, to any depth.
     var parentList: LocationListData?

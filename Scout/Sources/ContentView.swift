@@ -205,6 +205,9 @@ struct ContentView: View {
     // All pins, for the one-time offline-photo backfill.
     @Query private var allPins: [PinnedLocationData]
     @Query private var allProjects: [ProjectData]
+    // All script highlights — drives Script-view tinting reactively, so removing a scene link
+    // (or its list) repaints the script immediately instead of leaving a "ghost" highlight.
+    @Query private var allScriptHighlights: [ScriptHighlight]
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -275,6 +278,20 @@ struct ContentView: View {
         let scripts = openProject?.scripts ?? []
         if let id = activeScriptUUID, let s = scripts.first(where: { $0.uuid == id }) { return s }
         return scripts.sorted { $0.sortOrder < $1.sortOrder }.first
+    }
+
+    /// Highlight ranges for the active script, sourced from the reactive `@Query` so they update
+    /// the instant a scene link (or its list) is removed. Highlights with no list are skipped.
+    private var activeScriptHighlights: [(NSRange, NSColor)] {
+        guard let script = activeScript else { return [] }
+        return allScriptHighlights.compactMap { h in
+            // Skip links whose list is gone or in the Trash (soft-deleted) — those were the
+            // lingering "ghost" highlights.
+            guard h.script?.uuid == script.uuid,
+                  let list = h.list, list.deletedAt == nil,
+                  let color = NSColor(hexString: list.colorHex) else { return nil }
+            return (NSRange(location: h.rangeStart, length: h.rangeLength), color)
+        }
     }
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
     @State private var showExternalMoveSheet = false
@@ -724,8 +741,10 @@ struct ContentView: View {
                 .allowsHitTesting(viewMode == .photos)
                 .zIndex(10)
             ScriptView(script: activeScript,
+                       highlights: activeScriptHighlights,
                        onAssign: { range in beginScriptAssign(range) },
                        onAssignNewList: { range in beginScriptAssignNewList(range) },
+                       onRemoveHighlight: { range in removeScriptHighlight(overlapping: range) },
                        scrollTarget: scriptScrollTarget)
                 .opacity(viewMode == .script ? 1 : 0)
                 .allowsHitTesting(viewMode == .script)
@@ -1211,6 +1230,9 @@ struct ContentView: View {
         for project in allProjects where !seenProjects.insert(project.uuid).inserted { project.uuid = UUID(); changed = true }
         var seenScripts = Set<UUID>()
         for script in allProjects.flatMap(\.scripts) where !seenScripts.insert(script.uuid).inserted { script.uuid = UUID(); changed = true }
+        // Purge orphaned scene links (no list) left behind by the old .nullify delete rule — they
+        // served no purpose and could paint a "ghost" highlight in the script.
+        for h in allScriptHighlights where h.list == nil { modelContext.delete(h); changed = true }
         if changed { try? modelContext.save() }
     }
 
@@ -1289,6 +1311,21 @@ struct ContentView: View {
         modelContext.insert(h)
         h.script = script
         h.list = list
+        try? modelContext.save()
+    }
+
+    /// Deletes any ScriptHighlight(s) of the active script that overlap `range` (right-click
+    /// "Remove Highlight"). Works regardless of whether the link's list still exists — the surest
+    /// way to clear a stray highlight.
+    private func removeScriptHighlight(overlapping range: NSRange) {
+        guard let script = activeScript, range.length > 0 else { return }
+        let victims = allScriptHighlights.filter { h in
+            guard h.script?.uuid == script.uuid else { return false }
+            let hr = NSRange(location: h.rangeStart, length: h.rangeLength)
+            return NSIntersectionRange(hr, range).length > 0
+        }
+        guard !victims.isEmpty else { return }
+        for h in victims { modelContext.delete(h) }
         try? modelContext.save()
     }
 

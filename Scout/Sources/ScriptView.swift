@@ -9,10 +9,14 @@ import AppKit
 /// assign it to a list; assigned ranges are tinted with the list's colour.
 struct ScriptView: View {
     let script: ScriptData?
+    /// List-coloured highlight ranges to tint (supplied reactively by the owner).
+    var highlights: [(NSRange, NSColor)] = []
     /// Called with the selected character range (into rawText) when the user presses `m`.
     var onAssign: ((NSRange) -> Void)? = nil
     /// Called to create a new list and assign the range to it (right-click menu).
     var onAssignNewList: ((NSRange) -> Void)? = nil
+    /// Called to remove the highlight(s) overlapping the given range (right-click menu).
+    var onRemoveHighlight: ((NSRange) -> Void)? = nil
     /// When set, the view scrolls to & selects this range (used by "open scene from a list").
     var scrollTarget: NSRange? = nil
 
@@ -22,10 +26,11 @@ struct ScriptView: View {
                 #if os(macOS)
                 ScriptTextRepresentable(
                     text: script.rawText,
-                    highlights: Self.highlightRanges(for: script),
+                    highlights: highlights,
                     scrollTarget: scrollTarget,
                     onAssign: onAssign,
-                    onAssignNewList: onAssignNewList
+                    onAssignNewList: onAssignNewList,
+                    onRemoveHighlight: onRemoveHighlight
                 )
                 #else
                 ScrollView { Text(script.rawText).font(.system(.body, design: .monospaced)).padding() }
@@ -42,16 +47,6 @@ struct ScriptView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ScriptStyle.background)
     }
-
-    #if os(macOS)
-    /// Maps a script's highlights → (range, colour) pairs for rendering.
-    static func highlightRanges(for script: ScriptData) -> [(NSRange, NSColor)] {
-        script.highlights.compactMap { h in
-            guard let hex = h.list?.colorHex, let color = NSColor(hexString: hex) else { return nil }
-            return (NSRange(location: h.rangeStart, length: h.rangeLength), color)
-        }
-    }
-    #endif
 }
 
 private enum ScriptStyle {
@@ -123,6 +118,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
     var scrollTarget: NSRange?
     var onAssign: ((NSRange) -> Void)?
     var onAssignNewList: ((NSRange) -> Void)?
+    var onRemoveHighlight: ((NSRange) -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -134,6 +130,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         context.coordinator.scroll = scroll
         context.coordinator.onAssign = onAssign
         context.coordinator.onAssignNewList = onAssignNewList
+        context.coordinator.onRemoveHighlight = onRemoveHighlight
         context.coordinator.rebuild(text: text, highlights: highlights)
         return scroll
     }
@@ -141,6 +138,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.onAssign = onAssign
         context.coordinator.onAssignNewList = onAssignNewList
+        context.coordinator.onRemoveHighlight = onRemoveHighlight
         if context.coordinator.needsRebuild(text: text, highlights: highlights) {
             context.coordinator.rebuild(text: text, highlights: highlights)
         }
@@ -162,6 +160,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         weak var scroll: NSScrollView?
         var onAssign: ((NSRange) -> Void)?
         var onAssignNewList: ((NSRange) -> Void)?
+        var onRemoveHighlight: ((NSRange) -> Void)?
         var lastScrollTarget: NSRange?
 
         private var storage: NSTextStorage?
@@ -189,6 +188,12 @@ struct ScriptTextRepresentable: NSViewRepresentable {
             self.layout = layout
             pageTextViews = []
 
+            // Character offsets of every scene heading — used to keep a heading off the bottom of
+            // a page (screenplay "don't orphan a scene heading" rule).
+            let sceneHeadingStarts = FountainParser.parse(text)
+                .filter { $0.type == .sceneHeading }
+                .map { $0.range.location }
+
             // Add one container per page until all characters are laid out.
             let total = storage.length
             var lastChar = 0
@@ -198,9 +203,24 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                 let c = NSTextContainer(size: NSSize(width: Screenplay.textW, height: Screenplay.textH))
                 c.lineFragmentPadding = 0
                 layout.addTextContainer(c)
-                let gr = layout.glyphRange(for: c)            // forces layout for this container
+                var gr = layout.glyphRange(for: c)            // forces layout for this container
                 if gr.length == 0 { break }
-                let cr = layout.characterRange(forGlyphRange: gr, actualGlyphRange: nil)
+                var cr = layout.characterRange(forGlyphRange: gr, actualGlyphRange: nil)
+                let pageEnd = cr.location + cr.length
+                // Orphan control: if a scene heading sits within the last ~3 lines of this page and
+                // there's more content after it, shrink the page to push the heading to the next.
+                if pageEnd < total,
+                   let headingStart = sceneHeadingStarts.last(where: { $0 >= cr.location && $0 < pageEnd }) {
+                    let g = layout.glyphIndexForCharacter(at: headingStart)
+                    let frag = layout.lineFragmentRect(forGlyphAt: g, effectiveRange: nil)
+                    if frag.minY > Screenplay.lineHeight,                       // not the top of the page
+                       Screenplay.textH - frag.minY < Screenplay.lineHeight * 3 {  // < heading + 2 lines
+                        c.size = NSSize(width: Screenplay.textW, height: frag.minY)
+                        gr = layout.glyphRange(for: c)
+                        cr = layout.characterRange(forGlyphRange: gr, actualGlyphRange: nil)
+                    }
+                }
+                if gr.length == 0 { break }
                 lastChar = cr.location + cr.length
                 containers.append(c)
                 guardCount += 1
@@ -257,6 +277,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         /// shared storage = rawText offsets).
         func assign(_ range: NSRange) { onAssign?(range) }
         func assignNewList(_ range: NSRange) { onAssignNewList?(range) }
+        func removeHighlight(_ range: NSRange) { onRemoveHighlight?(range) }
 
         func scrollTo(range: NSRange) {
             guard let layout, let scroll, let storage, range.location < storage.length else { return }
@@ -294,6 +315,7 @@ final class ScriptNSTextView: NSTextView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         var range = selectedRange()
+        var onHighlight = rangeHasHighlight(range)
         // No selection? If the right-click lands inside an existing (tinted) highlight, use it.
         if range.length == 0, let storage = textStorage {
             let pt = convert(event.locationInWindow, from: nil)
@@ -305,6 +327,7 @@ final class ScriptNSTextView: NSTextView {
                                       in: NSRange(location: 0, length: storage.length))
                 range = eff
                 setSelectedRange(eff)
+                onHighlight = true
             }
         }
         guard range.length > 0 else { return nil }
@@ -315,7 +338,23 @@ final class ScriptNSTextView: NSTextView {
         let newList = NSMenuItem(title: "Create new list and assign", action: #selector(assignNewListFromMenu), keyEquivalent: "")
         newList.target = self
         menu.addItem(newList)
+        if onHighlight {
+            menu.addItem(.separator())
+            let remove = NSMenuItem(title: "Remove Highlight", action: #selector(removeHighlightFromMenu), keyEquivalent: "")
+            remove.target = self
+            menu.addItem(remove)
+        }
         return menu
+    }
+
+    /// True if any character in `range` carries a list-colour highlight background.
+    private func rangeHasHighlight(_ range: NSRange) -> Bool {
+        guard range.length > 0, let storage = textStorage else { return false }
+        var found = false
+        storage.enumerateAttribute(.backgroundColor, in: range) { value, _, stop in
+            if value != nil { found = true; stop.pointee = true }
+        }
+        return found
     }
 
     @objc private func assignFromMenu() {
@@ -325,6 +364,10 @@ final class ScriptNSTextView: NSTextView {
     @objc private func assignNewListFromMenu() {
         let r = selectedRange()
         if r.length > 0 { coordinatorRef?.assignNewList(r) }
+    }
+    @objc private func removeHighlightFromMenu() {
+        let r = selectedRange()
+        if r.length > 0 { coordinatorRef?.removeHighlight(r) }
     }
 }
 
