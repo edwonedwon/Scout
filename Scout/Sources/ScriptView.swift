@@ -17,6 +17,8 @@ struct ScriptView: View {
     var onAssignNewList: ((NSRange) -> Void)? = nil
     /// Called to remove the highlight(s) overlapping the given range (right-click menu).
     var onRemoveHighlight: ((NSRange) -> Void)? = nil
+    /// Page zoom (magnification) — Cmd +/- in Script mode; persisted by the owner.
+    var zoom: CGFloat = 1.0
     /// When set, the view scrolls to & selects this range (used by "open scene from a list").
     var scrollTarget: NSRange? = nil
 
@@ -28,6 +30,7 @@ struct ScriptView: View {
                     text: script.rawText,
                     highlights: highlights,
                     scrollTarget: scrollTarget,
+                    zoom: zoom,
                     onAssign: onAssign,
                     onAssignNewList: onAssignNewList,
                     onRemoveHighlight: onRemoveHighlight
@@ -70,8 +73,12 @@ enum Screenplay {
     static let marginRight: CGFloat = 72        // 1"
     static let textW = pageW - marginLeft - marginRight   // 432 (6")
     static let textH = pageH - marginTop - marginBottom   // 648 (9")
-    /// 6 lines per inch — the typewriter standard that drives screenplay page count.
-    static let lineHeight: CGFloat = 12
+    /// Line height. Screenplay standard is 12pt (6 LPI), which would be exactly 54 lines in the
+    /// 648pt text area — but at exactly 54×12=648 there's zero slack, so NSLayoutManager's
+    /// line-fragment rounding drops the 54th line on many pages and the script runs one page long.
+    /// 11.9 keeps 54 lines fitting solidly (54×11.9=642.6 < 648) while 55 still never fit
+    /// (55×11.9=654.5 > 648), so the page count matches an Arc Studio PDF export exactly.
+    static let lineHeight: CGFloat = 11.9
     static let pageGap: CGFloat = 18
     static let font: NSFont = NSFont(name: "Courier", size: 12)
         ?? .monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -116,6 +123,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
     let text: String
     let highlights: [(NSRange, NSColor)]
     var scrollTarget: NSRange?
+    var zoom: CGFloat = 1.0
     var onAssign: ((NSRange) -> Void)?
     var onAssignNewList: ((NSRange) -> Void)?
     var onRemoveHighlight: ((NSRange) -> Void)?
@@ -127,6 +135,11 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         scroll.scrollerStyle = .overlay
         scroll.drawsBackground = true
         scroll.backgroundColor = .underPageBackgroundColor
+        // Whole-page zoom (Cmd +/-, also pinch). Scales the pages, not the font.
+        scroll.allowsMagnification = true
+        scroll.minMagnification = 0.5
+        scroll.maxMagnification = 3.0
+        scroll.magnification = zoom
         context.coordinator.scroll = scroll
         context.coordinator.onAssign = onAssign
         context.coordinator.onAssignNewList = onAssignNewList
@@ -139,6 +152,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         context.coordinator.onAssign = onAssign
         context.coordinator.onAssignNewList = onAssignNewList
         context.coordinator.onRemoveHighlight = onRemoveHighlight
+        if abs(scroll.magnification - zoom) > 0.001 { scroll.magnification = zoom }
         if context.coordinator.needsRebuild(text: text, highlights: highlights) {
             context.coordinator.rebuild(text: text, highlights: highlights)
         }
@@ -279,6 +293,8 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         func assignNewList(_ range: NSRange) { onAssignNewList?(range) }
         func removeHighlight(_ range: NSRange) { onRemoveHighlight?(range) }
 
+        /// Scrolls to the START of `range` without selecting it (selecting was distracting). The
+        /// highlight is already tinted, so the reader just needs it brought into view.
         func scrollTo(range: NSRange) {
             guard let layout, let scroll, let storage, range.location < storage.length else { return }
             let glyph = layout.glyphIndexForCharacter(at: range.location)
@@ -286,15 +302,13 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                   let pageIndex = layout.textContainers.firstIndex(of: container),
                   pageIndex < pageTextViews.count else { return }
             let tv = pageTextViews[pageIndex]
-            if range.location + range.length <= (tv.string as NSString).length {
-                tv.setSelectedRange(range)
-                tv.window?.makeFirstResponder(tv)
-            }
-            // Scroll the page (plus the in-page offset) into view.
-            if let sheet = tv.superview {
-                let rectInDoc = sheet.frame
-                scroll.documentView?.scrollToVisible(rectInDoc)
-            }
+            guard let sheet = tv.superview else { return }
+            // Line rect of the highlight's first character, mapped page text view → sheet → doc.
+            var frag = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            frag.origin.x += tv.frame.minX + sheet.frame.minX
+            frag.origin.y += tv.frame.minY + sheet.frame.minY
+            // A little context above/below so the line isn't jammed against the top edge.
+            scroll.documentView?.scrollToVisible(frag.insetBy(dx: 0, dy: -60))
         }
     }
 }

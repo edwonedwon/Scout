@@ -116,6 +116,15 @@ enum FountainParser {
                 i = consumeDialogue(lines, from: i, into: &elements)
                 continue
             }
+            // Whole-paragraph bold with no character cue. This writer marks spoken (to-be-
+            // translated) dialogue in bold, and screenwriting apps (e.g. Arc Studio) render such a
+            // stand-alone bold block as DIALOGUE, not action — so it sits at the dialogue indent
+            // and wraps to the same line count. Match that. (A partially-bold paragraph, like a
+            // production note with one bold phrase, is NOT caught and stays action.)
+            if isFullyBold(trimmed) {
+                elements.append(FountainElement(type: .dialogue, text: line.text, range: line.range))
+                i += 1; continue
+            }
             // Default: action.
             elements.append(FountainElement(type: .action, text: line.text, range: line.range))
             i += 1
@@ -148,6 +157,14 @@ enum FountainParser {
             i += 1
         }
         return i
+    }
+
+    /// True if the entire paragraph is a single bold span — `**…**` with no other `**` inside and
+    /// nothing (non-whitespace) outside. Used to detect cue-less bold dialogue.
+    private static func isFullyBold(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        guard t.hasPrefix("**"), t.hasSuffix("**"), t.count > 4 else { return false }
+        return !t.dropFirst(2).dropLast(2).contains("**")
     }
 
     private static func isSceneHeading(_ s: String) -> Bool {
