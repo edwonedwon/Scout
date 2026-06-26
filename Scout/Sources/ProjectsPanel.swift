@@ -2728,6 +2728,14 @@ private struct ListRow: View {
 
             Spacer()
 
+            // Order (left→right): flag, scene badge, count, eye.
+            // A flag here means at least one photo in the list is flagged — i.e. a filming
+            // location has already been picked for this list.
+            if ListRow.hasFlagged(list) {
+                Image(systemName: "flag.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
             // Scene indicator: this list has script scene(s) assigned. Click → open the script at
             // the first one (same as clicking the list's scene row).
             if !list.sceneLinks.isEmpty {
@@ -2744,13 +2752,6 @@ private struct ListRow: View {
                     .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-            }
-            // A flag here means at least one photo in the list is flagged — i.e. a filming
-            // location has already been picked for this list.
-            if ListRow.hasFlagged(list) {
-                Image(systemName: "flag.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.red)
             }
             // Count only LIVE photos (and live child lists), recursively — trashed photos
             // stay in `list.pins` (soft-delete just sets deletedAt), so counting them made
