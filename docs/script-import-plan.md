@@ -1,8 +1,13 @@
 # Plan: Fountain Script Import & Scene → List Linking
 
-Status: Phases 1–2 DONE (import + sidebar + Script view + third island toggle).
-Phases 3–5 (highlights, list-side visualization, re-import/merge) not started.
-Owner: Edwon. Last updated: 2026-06-26.
+Status: Phases 1–4 DONE (import + sidebar + Script view + island toggle; highlights /
+scene→list linking; list-side scene indicator + Scenes section). Phase 5 (re-import /
+merge) intentionally deferred. Owner: Edwon. Last updated: 2026-06-26.
+
+Test with `docs/sample-script.fountain`: import it, open it (Script toggle), select a
+chunk of text, press `m`, pick a list → the text tints in the list's colour, the list's
+header shows a scene count, and an expandable "scene" row appears under that list (click
+it to jump back to the script).
 
 ## Goal
 

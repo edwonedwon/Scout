@@ -230,7 +230,7 @@ final class LocationAnnotation: NSObject, MKAnnotation {
 }
 
 #if os(macOS)
-private extension NSColor {
+extension NSColor {
     convenience init?(hexString: String) {
         let hex = hexString.trimmingCharacters(in: .init(charactersIn: "#"))
         guard let value = UInt64(hex, radix: 16) else { return nil }

@@ -44,7 +44,7 @@ struct ScoutApp: App {
             ContentView()
         }
         .environmentObject(apiKeyState)
-        .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self, ScriptData.self])
+        .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self, ScriptData.self, ScriptHighlight.self])
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         #endif

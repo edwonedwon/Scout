@@ -123,6 +123,16 @@ enum FountainParser {
         return elements
     }
 
+    /// The nearest scene heading at or before `location` (character offset into `raw`), for
+    /// labelling a highlight. nil if there's no preceding scene heading.
+    static func sceneHeading(in raw: String, before location: Int) -> String? {
+        var heading: String? = nil
+        for el in parse(raw) where el.type == .sceneHeading {
+            if el.range.location <= location { heading = el.text } else { break }
+        }
+        return heading
+    }
+
     /// Consumes the dialogue block (parentheticals + dialogue lines) until a blank line.
     private static func consumeDialogue(_ lines: [(text: String, range: NSRange)], from start: Int,
                                         into elements: inout [FountainElement]) -> Int {

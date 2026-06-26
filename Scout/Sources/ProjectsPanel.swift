@@ -170,6 +170,8 @@ struct ProjectsPanel: View {
     var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
     /// Opens a script in the Script view (third island mode).
     var onOpenScript: ((ScriptData) -> Void)? = nil
+    /// Opens a script scene (highlight) in the Script view, scrolled to its range.
+    var onOpenScriptHighlight: ((ScriptHighlight) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView): show the pin in the grid / on the map.
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -208,6 +210,7 @@ struct ProjectsPanel: View {
                         onRevealPins: onRevealPins,
                         onOpenCarousel: onOpenCarousel,
                         onOpenScript: onOpenScript,
+                        onOpenScriptHighlight: onOpenScriptHighlight,
                         onRevealInGrid: onRevealInGrid,
                         onRevealOnMap: onRevealOnMap,
                         onExpandedChanged: { uuids in
@@ -472,6 +475,7 @@ private struct ProjectDetailView: View {
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
     var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
     var onOpenScript: ((ScriptData) -> Void)? = nil
+    var onOpenScriptHighlight: ((ScriptHighlight) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView).
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -1982,7 +1986,46 @@ private struct ProjectDetailView: View {
             ForEach(Array(pins.enumerated()), id: \.element.persistentModelID) { idx, pin in
                 expandedPinRow(pin, in: list, indexBefore: idx > 0 ? pins[idx - 1] : nil)
             }
+
+            // Script scenes assigned to this list — click to jump to that spot in the script.
+            let scenes = list.sceneLinks.sorted { $0.rangeStart < $1.rangeStart }
+            ForEach(scenes, id: \.persistentModelID) { scene in
+                sceneRow(scene, color: Color(hexString: list.colorHex))
+            }
         }
+    }
+
+    /// A "scene" row inside an expanded list: the linked script excerpt; tap to open it.
+    @ViewBuilder
+    private func sceneRow(_ scene: ScriptHighlight, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "text.quote").font(.caption2).foregroundStyle(color).frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                if let h = scene.sceneHeading, !h.isEmpty {
+                    Text(h).font(.caption.weight(.medium)).lineLimit(1)
+                }
+                Text(scene.excerpt.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 3)
+        .padding(.leading, 24)
+        .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+        .contentShape(Rectangle())
+        .onTapGesture { onOpenScriptHighlight?(scene) }
+        .contextMenu {
+            Button { onOpenScriptHighlight?(scene) } label: { Label("Open in Script", systemImage: "doc.text") }
+            Divider()
+            Button(role: .destructive) { deleteSceneLink(scene) } label: {
+                Label("Remove Scene Link", systemImage: "trash")
+            }
+        }
+    }
+
+    private func deleteSceneLink(_ scene: ScriptHighlight) {
+        modelContext.delete(scene)
+        try? modelContext.save()
     }
 
     /// A pin row shown inside an expanded list, with reorder drop support.
@@ -2586,6 +2629,15 @@ private struct ListRow: View {
 
             Spacer()
 
+            // Scene indicator: this list has script scene(s) assigned to it.
+            if !list.sceneLinks.isEmpty {
+                HStack(spacing: 1) {
+                    Image(systemName: "text.quote")
+                    Text("\(list.sceneLinks.count)")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
             // A flag here means at least one photo in the list is flagged — i.e. a filming
             // location has already been picked for this list.
             if ListRow.hasFlagged(list) {

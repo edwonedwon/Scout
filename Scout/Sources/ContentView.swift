@@ -258,9 +258,18 @@ struct ContentView: View {
     /// The script currently shown in Script mode (selected from the sidebar). Resolved against
     /// the open project's scripts; falls back to the first script.
     @State private var activeScriptUUID: UUID? = nil
+    /// The script text range awaiting a list assignment (set when `m` is pressed in Script mode).
+    @State private var pendingScriptRange: NSRange? = nil
+    @State private var showScriptListPicker = false
+    /// When set, the Script view scrolls to & selects this range (jump-to-scene from a list).
+    @State private var scriptScrollTarget: NSRange? = nil
+
+    private var openProject: ProjectData? {
+        allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })
+    }
 
     private var activeScript: ScriptData? {
-        let scripts = allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })?.scripts ?? []
+        let scripts = openProject?.scripts ?? []
         if let id = activeScriptUUID, let s = scripts.first(where: { $0.uuid == id }) { return s }
         return scripts.sorted { $0.sortOrder < $1.sortOrder }.first
     }
@@ -437,6 +446,7 @@ struct ContentView: View {
                         activeScriptUUID = script.uuid
                         withAnimation(.spring(duration: 0.3)) { viewMode = .script }
                     },
+                    onOpenScriptHighlight: { highlight in openScriptHighlight(highlight) },
                     onRevealInGrid: { id in revealInGrid(id) },
                     onRevealOnMap: { id in revealOnMap(id) },
                     scrollToPinUUID: highlightedPinID,
@@ -710,7 +720,9 @@ struct ContentView: View {
                 .opacity(viewMode == .photos ? 1 : 0)
                 .allowsHitTesting(viewMode == .photos)
                 .zIndex(10)
-            ScriptView(script: activeScript)
+            ScriptView(script: activeScript,
+                       onAssign: { range in beginScriptAssign(range) },
+                       scrollTarget: scriptScrollTarget)
                 .opacity(viewMode == .script ? 1 : 0)
                 .allowsHitTesting(viewMode == .script)
                 .zIndex(15)
@@ -737,9 +749,10 @@ struct ContentView: View {
                 if !uuids.isEmpty { externalMoveUUIDs = uuids }
             }
             .keyboardShortcut("m", modifiers: [])
-            // Disable while the sheet is open so typing "m" into its search field
-            // can't re-fire this shortcut and reset the sheet's state.
-            .disabled(showExternalMoveSheet)
+            // Disable while the move sheet is open (so "m" typed into its search field can't
+            // re-fire this), and in Script mode (where "m" assigns the selected script range to
+            // a list via the Script view's own key handler).
+            .disabled(showExternalMoveSheet || viewMode == .script)
             .opacity(0)
             .allowsHitTesting(false)
         }
@@ -755,6 +768,8 @@ struct ContentView: View {
         .background {
             Button("", action: deleteSelectedPhotos)
                 .keyboardShortcut(.delete, modifiers: [])
+                // Not while reading a script — Delete there must not trash selected photos.
+                .disabled(viewMode == .script)
                 .opacity(0)
                 .allowsHitTesting(false)
         }
@@ -794,6 +809,16 @@ struct ContentView: View {
                         showExternalMoveSheet = false
                     },
                     onDismiss: { externalMoveUUIDs = []; showExternalMoveSheet = false }
+                )
+            }
+        }
+        // Script mode: pick which list a highlighted script section belongs to.
+        .sheet(isPresented: $showScriptListPicker, onDismiss: { pendingScriptRange = nil }) {
+            if let project = openProject {
+                MoveToListSheet(
+                    project: project,
+                    onMove: { list in assignScriptSelection(to: list) },
+                    onDismiss: { showScriptListPicker = false; pendingScriptRange = nil }
                 )
             }
         }
@@ -1198,6 +1223,45 @@ struct ContentView: View {
         for pin in pins { pin.isFlagged = shouldFlag }
         try? modelContext.save()
         rebuildPinCaches()   // isFlagged is in the cache signature → flagged-first re-sorts
+    }
+
+    /// `m` pressed in Script mode with a selection → pick a list to assign that range to.
+    private func beginScriptAssign(_ range: NSRange) {
+        pendingScriptRange = range
+        showScriptListPicker = true
+    }
+
+    /// Creates a ScriptHighlight linking the pending script range to the chosen list.
+    private func assignScriptSelection(to list: LocationListData) {
+        defer { pendingScriptRange = nil; showScriptListPicker = false }
+        guard let range = pendingScriptRange, let script = activeScript else { return }
+        let ns = script.rawText as NSString
+        guard range.length > 0, range.location + range.length <= ns.length else { return }
+        let excerpt = ns.substring(with: range)
+        let beforeLen = min(40, range.location)
+        let before = ns.substring(with: NSRange(location: range.location - beforeLen, length: beforeLen))
+        let afterStart = range.location + range.length
+        let after = ns.substring(with: NSRange(location: afterStart, length: min(40, ns.length - afterStart)))
+        let heading = FountainParser.sceneHeading(in: script.rawText, before: range.location)
+        let h = ScriptHighlight(rangeStart: range.location, rangeLength: range.length,
+                                excerpt: excerpt, contextBefore: before, contextAfter: after,
+                                sceneHeading: heading)
+        modelContext.insert(h)
+        h.script = script
+        h.list = list
+        try? modelContext.save()
+    }
+
+    /// Opens a script highlight: switch to Script mode, show its script, scroll to & select it.
+    private func openScriptHighlight(_ highlight: ScriptHighlight) {
+        guard let script = highlight.script else { return }
+        activeScriptUUID = script.uuid
+        withAnimation(.spring(duration: 0.3)) { viewMode = .script }
+        // Reset first so re-opening the same highlight still triggers the scroll.
+        scriptScrollTarget = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            scriptScrollTarget = NSRange(location: highlight.rangeStart, length: highlight.rangeLength)
+        }
     }
 
     /// "Reveal in Photo Grid": switch to the grid, scroll to the photo, and select it.

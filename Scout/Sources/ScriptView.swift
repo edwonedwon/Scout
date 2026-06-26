@@ -4,15 +4,25 @@ import AppKit
 #endif
 
 /// The third center-panel mode (Map / Photos / Script). Renders the active script's fountain
-/// text as readable, styled, scrollable text. (Highlight/scene-linking comes in a later phase.)
+/// text as readable, styled, scrollable text. Select a range and press `m` to assign it to a
+/// list; assigned ranges are tinted with the list's colour.
 struct ScriptView: View {
     let script: ScriptData?
+    /// Called with the selected character range (into rawText) when the user presses `m`.
+    var onAssign: ((NSRange) -> Void)? = nil
+    /// When set, the view scrolls to & selects this range (used by "open scene from a list").
+    var scrollTarget: NSRange? = nil
 
     var body: some View {
         Group {
             if let script {
                 #if os(macOS)
-                ScriptTextRepresentable(text: script.rawText)
+                ScriptTextRepresentable(
+                    text: script.rawText,
+                    highlights: Self.highlightRanges(for: script),
+                    scrollTarget: scrollTarget,
+                    onAssign: onAssign
+                )
                 #else
                 ScrollView { Text(script.rawText).font(.system(.body, design: .monospaced)).padding() }
                 #endif
@@ -28,6 +38,16 @@ struct ScriptView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(ScriptStyle.background)
     }
+
+    #if os(macOS)
+    /// Maps a script's highlights → (range, colour) pairs for rendering.
+    static func highlightRanges(for script: ScriptData) -> [(NSRange, NSColor)] {
+        script.highlights.compactMap { h in
+            guard let hex = h.list?.colorHex, let color = NSColor(hexString: hex) else { return nil }
+            return (NSRange(location: h.rangeStart, length: h.rangeLength), color)
+        }
+    }
+    #endif
 }
 
 private enum ScriptStyle {
@@ -39,13 +59,22 @@ private enum ScriptStyle {
 }
 
 #if os(macOS)
-/// Read-only `NSTextView` (selection enabled) showing the fountain text styled per element.
+/// Read-only `NSTextView` (selection enabled) showing the fountain text styled per element, with
+/// list-coloured highlight backgrounds. Pressing `m` with a selection calls `onAssign`.
 struct ScriptTextRepresentable: NSViewRepresentable {
     let text: String
+    let highlights: [(NSRange, NSColor)]
+    var scrollTarget: NSRange?
+    var onAssign: ((NSRange) -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView()
-        guard let tv = scroll.documentView as? NSTextView else { return scroll }
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = .overlay
+        scroll.drawsBackground = true
+        scroll.backgroundColor = NSColor(calibratedWhite: 0.11, alpha: 1)
+
+        let tv = ScriptNSTextView()
         tv.isEditable = false
         tv.isSelectable = true
         tv.isRichText = true
@@ -53,51 +82,95 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         tv.backgroundColor = NSColor(calibratedWhite: 0.11, alpha: 1)
         tv.textContainerInset = NSSize(width: 28, height: 28)
         tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
-        scroll.drawsBackground = true
-        scroll.backgroundColor = NSColor(calibratedWhite: 0.11, alpha: 1)
-        scroll.hasVerticalScroller = true
-        scroll.scrollerStyle = .overlay
-        context.coordinator.apply(text, to: tv)
+        tv.textContainer?.widthTracksTextView = true
+        tv.onAssign = onAssign
+
+        scroll.documentView = tv
+        context.coordinator.textView = tv
+        context.coordinator.render(text, highlights: highlights)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let tv = scroll.documentView as? NSTextView else { return }
-        guard context.coordinator.lastText != text else { return }
-        context.coordinator.apply(text, to: tv)
+        guard let tv = scroll.documentView as? ScriptNSTextView else { return }
+        tv.onAssign = onAssign
+        if context.coordinator.needsRender(text: text, highlights: highlights) {
+            context.coordinator.render(text, highlights: highlights)
+        }
+        // Scroll to (and select) a requested range when it changes.
+        if let target = scrollTarget, context.coordinator.lastScrollTarget != target {
+            context.coordinator.lastScrollTarget = target
+            let ns = tv.string as NSString
+            if target.location + target.length <= ns.length {
+                tv.setSelectedRange(target)
+                tv.scrollRangeToVisible(target)
+            }
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator {
-        var lastText: String = "\u{0}"   // sentinel so the first apply always runs
-        func apply(_ text: String, to tv: NSTextView) {
-            tv.textStorage?.setAttributedString(FountainRenderer.attributedString(text))
+        weak var textView: ScriptNSTextView?
+        private var lastText = "\u{0}"
+        private var lastHL: [(NSRange, NSColor)] = []
+        var lastScrollTarget: NSRange?
+
+        func needsRender(text: String, highlights: [(NSRange, NSColor)]) -> Bool {
+            if text != lastText { return true }
+            if highlights.count != lastHL.count { return true }
+            for (a, b) in zip(highlights, lastHL) where a.0 != b.0 || a.1 != b.1 { return true }
+            return false
+        }
+
+        func render(_ text: String, highlights: [(NSRange, NSColor)]) {
+            textView?.textStorage?.setAttributedString(FountainRenderer.attributedString(text, highlights: highlights))
             lastText = text
+            lastHL = highlights
         }
     }
 }
 
-/// Builds a styled `NSAttributedString` from parsed fountain elements. Readable screenplay-ish
-/// styling (monospace, bold scene headings, indented dialogue, right-aligned transitions) —
-/// not page-accurate pagination.
+/// NSTextView that turns a plain `m` keypress (with a selection) into an "assign" callback.
+final class ScriptNSTextView: NSTextView {
+    var onAssign: ((NSRange) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.isEmpty, event.charactersIgnoringModifiers == "m" {
+            let r = selectedRange()
+            if r.length > 0 { onAssign?(r); return }
+        }
+        super.keyDown(with: event)
+    }
+}
+
+/// Builds a styled `NSAttributedString` that preserves the EXACT raw text (so selection ranges
+/// and stored highlight offsets map 1:1 to `rawText`); styling is applied per parsed element,
+/// and highlight backgrounds are tinted with each linked list's colour.
 enum FountainRenderer {
     private static let base = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     private static let bold = NSFont.monospacedSystemFont(ofSize: 13, weight: .bold)
     private static let textColor = NSColor(calibratedWhite: 0.90, alpha: 1)
     private static let dimColor  = NSColor(calibratedWhite: 0.60, alpha: 1)
 
-    static func attributedString(_ raw: String) -> NSAttributedString {
-        let out = NSMutableAttributedString()
+    static func attributedString(_ raw: String, highlights: [(NSRange, NSColor)] = []) -> NSAttributedString {
+        let out = NSMutableAttributedString(string: raw)
+        let full = NSRange(location: 0, length: (raw as NSString).length)
+        out.addAttributes([.font: base, .foregroundColor: textColor], range: full)
+
         for el in FountainParser.parse(raw) {
-            guard el.type != .blank else { continue }
+            let r = NSIntersectionRange(el.range, full)
+            guard r.length > 0 else { continue }
             let (font, color, para) = style(for: el.type)
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: font, .foregroundColor: color, .paragraphStyle: para
-            ]
-            let line = el.type == .pageBreak ? "— — —" : el.text
-            out.append(NSAttributedString(string: line + "\n", attributes: attrs))
+            out.addAttributes([.font: font, .foregroundColor: color, .paragraphStyle: para], range: r)
+        }
+        for (range, color) in highlights {
+            let r = NSIntersectionRange(range, full)
+            guard r.length > 0 else { continue }
+            out.addAttribute(.backgroundColor, value: color.withAlphaComponent(0.40), range: r)
         }
         return out
     }
@@ -125,8 +198,7 @@ enum FountainRenderer {
             return (bold, dimColor, p)
         case .section:
             p.paragraphSpacingBefore = 18; p.paragraphSpacing = 4
-            return (NSFont.monospacedSystemFont(ofSize: 15, weight: .bold),
-                    NSColor.controlAccentColor, p)
+            return (NSFont.monospacedSystemFont(ofSize: 15, weight: .bold), NSColor.controlAccentColor, p)
         case .synopsis:
             p.paragraphSpacingBefore = 4
             return (base, dimColor, p)
@@ -144,4 +216,5 @@ enum FountainRenderer {
         }
     }
 }
+
 #endif

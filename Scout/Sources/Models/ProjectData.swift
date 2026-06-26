@@ -44,12 +44,47 @@ final class ScriptData {
     var sortOrder: Int = 0
     var project: ProjectData?
 
+    @Relationship(deleteRule: .cascade, inverse: \ScriptHighlight.script) var highlights: [ScriptHighlight] = []
+
     init(name: String, rawText: String, sortOrder: Int = 0) {
         self.name = name
         self.rawText = rawText
         self.importedAt = Date()
         self.updatedAt = Date()
         self.sortOrder = sortOrder
+    }
+}
+
+// MARK: - Script highlight (a range of script linked to a list)
+
+@Model
+final class ScriptHighlight {
+    var uuid: UUID = UUID()
+    /// Character offset + length into the owning script's `rawText`.
+    var rangeStart: Int
+    var rangeLength: Int
+    /// The highlighted text itself — the durable anchor used to re-locate the highlight when a
+    /// newer version of the script is imported.
+    var excerpt: String
+    /// Short surrounding text, to disambiguate when the excerpt appears more than once.
+    var contextBefore: String
+    var contextAfter: String
+    /// Nearest preceding scene heading, for display and matching.
+    var sceneHeading: String?
+    var createdAt: Date
+    var script: ScriptData?
+    /// The list this script section is assigned to (the location for this scene/part).
+    var list: LocationListData?
+
+    init(rangeStart: Int, rangeLength: Int, excerpt: String,
+         contextBefore: String = "", contextAfter: String = "", sceneHeading: String? = nil) {
+        self.rangeStart = rangeStart
+        self.rangeLength = rangeLength
+        self.excerpt = excerpt
+        self.contextBefore = contextBefore
+        self.contextAfter = contextAfter
+        self.sceneHeading = sceneHeading
+        self.createdAt = Date()
     }
 }
 
@@ -72,6 +107,9 @@ final class LocationListData {
     var deletedAt: Date? = nil
     @Relationship(deleteRule: .cascade) var pins: [PinnedLocationData] = []
     var project: ProjectData?
+    /// Script sections (scenes / parts of scenes) assigned to this list. Nullified, not cascaded,
+    /// so deleting a list just detaches its scene links rather than deleting the script text.
+    @Relationship(deleteRule: .nullify, inverse: \ScriptHighlight.list) var sceneLinks: [ScriptHighlight] = []
 
     // Self-referential nesting: a list may contain child lists, to any depth.
     var parentList: LocationListData?
