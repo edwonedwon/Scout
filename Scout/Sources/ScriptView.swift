@@ -27,15 +27,6 @@ struct ScriptView: View {
                     onAssign: onAssign,
                     onAssignNewList: onAssignNewList
                 )
-                .overlay(alignment: .bottom) {
-                    Text("Select text and press  M  to assign it to a list")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.7))
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(.black.opacity(0.6), in: Capsule())
-                        .padding(.bottom, 10)
-                        .allowsHitTesting(false)
-                }
                 #else
                 ScrollView { Text(script.rawText).font(.system(.body, design: .monospaced)).padding() }
                 #endif
@@ -65,7 +56,8 @@ struct ScriptView: View {
 
 private enum ScriptStyle {
     #if os(macOS)
-    static let background = Color(nsColor: NSColor(calibratedWhite: 0.22, alpha: 1))
+    // The standard "behind document pages" colour — light grey in Light mode, dark in Dark mode.
+    static let background = Color(nsColor: .underPageBackgroundColor)
     #else
     static let background = Color(white: 0.22)
     #endif
@@ -92,8 +84,35 @@ enum Screenplay {
         ?? .monospacedSystemFont(ofSize: 12, weight: .bold)
 }
 
-/// A top-down (flipped) container view so pages stack from the top.
-final class FlippedView: NSView { override var isFlipped: Bool { true } }
+/// A top-down (flipped) document view that tracks the scroll view's width and keeps the page
+/// sheets centred horizontally (so the script sits centred under the island).
+final class ScriptDocView: NSView {
+    override var isFlipped: Bool { true }
+    override func layout() {
+        super.layout()
+        let clipW = enclosingScrollView?.contentView.bounds.width ?? bounds.width
+        let w = max(Screenplay.pageW, clipW)
+        if abs(frame.width - w) > 0.5 { setFrameSize(NSSize(width: w, height: frame.height)) }
+        let x = ((w - Screenplay.pageW) / 2).rounded()
+        for sub in subviews where sub.frame.origin.x != x {
+            sub.frame.origin.x = x
+        }
+    }
+}
+
+/// One white (Light) / dark (Dark mode) page sheet. Draws its background so it follows the macOS
+/// appearance live (a CGColor on a layer would not).
+final class PageSheetView: NSView {
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.setFill()
+        bounds.fill()
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+}
 
 /// Renders the script as discrete US-Letter pages via a shared NSLayoutManager with one text
 /// container per page. Selection & highlight offsets map 1:1 to `rawText` (the rendered string
@@ -111,7 +130,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         scroll.hasHorizontalScroller = true
         scroll.scrollerStyle = .overlay
         scroll.drawsBackground = true
-        scroll.backgroundColor = NSColor(calibratedWhite: 0.22, alpha: 1)
+        scroll.backgroundColor = .underPageBackgroundColor
         context.coordinator.scroll = scroll
         context.coordinator.onAssign = onAssign
         context.coordinator.onAssignNewList = onAssignNewList
@@ -193,13 +212,12 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                 containers.append(c)
             }
 
-            // Build the stacked page sheets.
-            let doc = FlippedView(frame: .zero)
+            // Build the stacked page sheets in a self-centering document view.
+            let doc = ScriptDocView(frame: .zero)
+            doc.autoresizingMask = [.width]
             for (i, container) in containers.enumerated() {
                 let y = Screenplay.pageGap + CGFloat(i) * (Screenplay.pageH + Screenplay.pageGap)
-                let sheet = FlippedView(frame: NSRect(x: 0, y: y, width: Screenplay.pageW, height: Screenplay.pageH))
-                sheet.wantsLayer = true
-                sheet.layer?.backgroundColor = NSColor.white.cgColor
+                let sheet = PageSheetView(frame: NSRect(x: 0, y: y, width: Screenplay.pageW, height: Screenplay.pageH))
                 sheet.shadow = { let s = NSShadow(); s.shadowColor = NSColor.black.withAlphaComponent(0.4); s.shadowBlurRadius = 8; s.shadowOffset = NSSize(width: 0, height: -2); return s }()
 
                 let tv = ScriptNSTextView(
@@ -221,17 +239,18 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                 if i > 0 {   // first page is unnumbered, per convention
                     let num = NSTextField(labelWithString: "\(i + 1).")
                     num.font = Screenplay.font
-                    num.textColor = .black
+                    num.textColor = .secondaryLabelColor
                     num.alignment = .right
                     num.frame = NSRect(x: Screenplay.pageW - Screenplay.marginRight - 60, y: 36, width: 60, height: 14)
                     sheet.addSubview(num)
                 }
                 doc.addSubview(sheet)
             }
-            let docW = Screenplay.pageW
+            let initialW = max(Screenplay.pageW, scroll.contentView.bounds.width)
             let docH = Screenplay.pageGap + CGFloat(containers.count) * (Screenplay.pageH + Screenplay.pageGap)
-            doc.frame = NSRect(x: 0, y: 0, width: docW, height: docH)
+            doc.frame = NSRect(x: 0, y: 0, width: initialW, height: docH)
             scroll.documentView = doc
+            doc.needsLayout = true
         }
 
         /// Called by a page's text view to forward an assign action (selectedRange is in the
@@ -309,15 +328,25 @@ final class ScriptNSTextView: NSTextView {
     }
 }
 
-/// Builds a screenplay-styled `NSAttributedString` that preserves the EXACT raw text (so
-/// selection ranges and stored highlight offsets map 1:1 to `rawText`). Black Courier 12 on white,
-/// fixed 12pt line height (6 LPI), standard element indents. Blank lines in the source provide the
-/// vertical spacing (and are counted), exactly as screenplay pagination expects.
+/// Builds a screenplay-styled `NSAttributedString`. The string is STILL the exact `rawText`
+/// (every character kept, in order) so selection ranges and stored highlight offsets map 1:1 to
+/// `rawText` — but fountain control markers (`!` `.` `@` `>` `<`) and emphasis delimiters
+/// (`**` `*` `_`) are rendered INVISIBLE (clear, ~0pt) rather than removed, so the page reads like
+/// a printed screenplay while offsets stay intact. Dynamic colours follow Light/Dark mode; fixed
+/// 12pt line height (6 LPI); standard element indents. Blank lines in the source provide vertical
+/// spacing (and are counted), exactly as screenplay pagination expects.
 enum ScreenplayRenderer {
+    /// Keeps a character in the text (so offsets don't shift) but makes it invisible & ~zero-width.
+    private static let hiddenAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedSystemFont(ofSize: 0.01, weight: .regular),
+        .foregroundColor: NSColor.clear
+    ]
+
     static func attributedString(_ raw: String, highlights: [(NSRange, NSColor)] = []) -> NSAttributedString {
+        let ns = raw as NSString
         let out = NSMutableAttributedString(string: raw)
-        let full = NSRange(location: 0, length: (raw as NSString).length)
-        out.addAttributes([.font: Screenplay.font, .foregroundColor: NSColor.black,
+        let full = NSRange(location: 0, length: ns.length)
+        out.addAttributes([.font: Screenplay.font, .foregroundColor: NSColor.textColor,
                            .paragraphStyle: paragraph()], range: full)
 
         for el in FountainParser.parse(raw) {
@@ -325,13 +354,86 @@ enum ScreenplayRenderer {
             guard r.length > 0 else { continue }
             let (font, para) = style(for: el.type)
             out.addAttributes([.font: font, .paragraphStyle: para], range: r)
+            for m in markerRanges(for: el, in: ns) { out.addAttributes(hiddenAttrs, range: m) }
         }
+
+        applyEmphasis(out, raw: raw, full: full)
+
         for (range, color) in highlights {
             let r = NSIntersectionRange(range, full)
             guard r.length > 0 else { continue }
             out.addAttribute(.backgroundColor, value: color.withAlphaComponent(0.35), range: r)
         }
         return out
+    }
+
+    /// The control-marker character range(s) to hide for an element, located in the raw text
+    /// (skipping leading whitespace) so they map back to real offsets.
+    private static func markerRanges(for el: FountainElement, in ns: NSString) -> [NSRange] {
+        let end = el.range.location + el.range.length
+        var start = el.range.location
+        while start < end {
+            let c = ns.substring(with: NSRange(location: start, length: 1))
+            if c == " " || c == "\t" { start += 1 } else { break }
+        }
+        guard start < end else { return [] }
+        func char(_ off: Int) -> String? {
+            let i = start + off
+            return i < end ? ns.substring(with: NSRange(location: i, length: 1)) : nil
+        }
+        var ranges: [NSRange] = []
+        switch el.type {
+        case .action where char(0) == "!":
+            ranges.append(NSRange(location: start, length: 1))
+        case .sceneHeading where char(0) == "." && char(1) != ".":
+            ranges.append(NSRange(location: start, length: 1))
+        case .character where char(0) == "@":
+            ranges.append(NSRange(location: start, length: 1))
+        case .transition where char(0) == ">":
+            ranges.append(NSRange(location: start, length: 1))
+        case .centered:
+            if char(0) == ">" { ranges.append(NSRange(location: start, length: 1)) }
+            var j = end - 1
+            while j > start {
+                let c = ns.substring(with: NSRange(location: j, length: 1))
+                if c == " " || c == "\t" { j -= 1 } else { break }
+            }
+            if j > start, ns.substring(with: NSRange(location: j, length: 1)) == "<" {
+                ranges.append(NSRange(location: j, length: 1))
+            }
+        default:
+            break
+        }
+        return ranges
+    }
+
+    /// Hides emphasis delimiters and applies bold / italic / underline to the inner text.
+    private static func applyEmphasis(_ out: NSMutableAttributedString, raw: String, full: NSRange) {
+        func forEach(_ pattern: String, _ body: (NSTextCheckingResult) -> Void) {
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+            re.enumerateMatches(in: raw, range: full) { m, _, _ in if let m { body(m) } }
+        }
+        func hideDelims(_ m: NSTextCheckingResult, _ len: Int) {
+            let r = m.range
+            out.addAttributes(hiddenAttrs, range: NSRange(location: r.location, length: len))
+            out.addAttributes(hiddenAttrs, range: NSRange(location: r.location + r.length - len, length: len))
+        }
+        // Bold: **text**
+        forEach(#"\*\*(.+?)\*\*"#) { m in
+            hideDelims(m, 2)
+            out.addAttribute(.font, value: Screenplay.boldFont, range: m.range(at: 1))
+        }
+        // Italic: *text* (single asterisks)
+        forEach(#"(?<!\*)\*([^*\n]+?)\*(?!\*)"#) { m in
+            hideDelims(m, 1)
+            out.addAttribute(.font, value: NSFont(name: "Courier-Oblique", size: 12) ?? Screenplay.font,
+                             range: m.range(at: 1))
+        }
+        // Underline: _text_
+        forEach(#"(?<!_)_([^_\n]+?)_(?!_)"#) { m in
+            hideDelims(m, 1)
+            out.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: m.range(at: 1))
+        }
     }
 
     private static func paragraph(head: CGFloat = 0, tail: CGFloat = 0,
