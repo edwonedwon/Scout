@@ -37,6 +37,9 @@ final class LocationListData {
     var sortOrder: Int = 0
     /// Order within the project panel sidebar (shared namespace with importedPhotos).
     var panelOrder: Int = 0
+    /// Optional screenplay scene type for this list — "INT", "EXT", or "INT/EXT". nil = none.
+    /// Shown as a small grey label on the list row; pickable via a menu.
+    var sceneType: String? = nil
     /// When set, this list is in the Trash (soft-deleted): hidden from the sidebar, map, and
     /// grid, restorable via "Put Back", and auto-purged after 30 days — same rule as photos.
     var deletedAt: Date? = nil

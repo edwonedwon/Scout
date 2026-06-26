@@ -2415,6 +2415,43 @@ private struct ListRow: View {
             || list.childLists.filter { $0.deletedAt == nil }.contains { hasFlagged($0) }
     }
 
+    private var sceneTypeBinding: Binding<String?> {
+        Binding(
+            get: { list.sceneType },
+            set: { list.sceneType = $0; try? modelContext.save() }
+        )
+    }
+
+    /// Small grey scene-type label. Click → menu of None / INT / EXT / INT/EXT (arrow keys +
+    /// Enter to choose). Shows a faint tag when unset.
+    private var sceneTypeMenu: some View {
+        Menu {
+            Picker("Scene Type", selection: sceneTypeBinding) {
+                Text("None").tag(String?.none)
+                Text("INT").tag(String?.some("INT"))
+                Text("EXT").tag(String?.some("EXT"))
+                Text("INT/EXT").tag(String?.some("INT/EXT"))
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Group {
+                if let t = list.sceneType {
+                    Text(t).font(.caption2.weight(.semibold))
+                } else {
+                    Image(systemName: "tag").font(.caption2)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .opacity(list.sceneType == nil ? 0.5 : 1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             // Chevron and eye are Buttons so clicking them toggles expand/visibility
@@ -2428,8 +2465,8 @@ private struct ListRow: View {
             }
             .buttonStyle(.plain)
 
-            // Drag handle: only this region initiates a reorder drag, keeping the
-            // chevron and eye buttons free from accidental drag triggers.
+            // Drag handle: only the icon + name initiate a reorder drag, keeping interactive
+            // controls (scene-type menu, eye) out so they don't trigger accidental drags.
             HStack(spacing: 6) {
                 if isFolder {
                     Image(systemName: isExpanded ? "folder.fill" : "folder")
@@ -2440,30 +2477,38 @@ private struct ListRow: View {
                     Circle()
                         .fill(listColor)
                         .frame(width: 10, height: 10)
+                        .padding(.trailing, 3)
                 }
                 Text(list.name)
                     .font(.body)
                     .foregroundStyle(.primary)
-                Spacer()
-                // A flag here means at least one photo in the list is flagged — i.e. a filming
-                // location has already been picked for this list.
-                if ListRow.hasFlagged(list) {
-                    Image(systemName: "flag.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                }
-                // Count only LIVE photos (and live child lists), recursively — trashed photos
-                // stay in `list.pins` (soft-delete just sets deletedAt), so counting them made
-                // the header number exceed what's actually shown in the sidebar/grid/map.
-                let pinCount = ListRow.liveCount(list)
-                if pinCount > 0 {
-                    Text("\(pinCount)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                    .lineLimit(1)
             }
             .contentShape(Rectangle())
             .modifier(OptionalDrag(provider: dragProvider))
+
+            // Screenplay scene type (INT / EXT / INT/EXT), pickable via menu. Outside the drag
+            // handle so clicking it opens the menu rather than starting a drag.
+            sceneTypeMenu
+
+            Spacer()
+
+            // A flag here means at least one photo in the list is flagged — i.e. a filming
+            // location has already been picked for this list.
+            if ListRow.hasFlagged(list) {
+                Image(systemName: "flag.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+            // Count only LIVE photos (and live child lists), recursively — trashed photos
+            // stay in `list.pins` (soft-delete just sets deletedAt), so counting them made
+            // the header number exceed what's actually shown in the sidebar/grid/map.
+            let pinCount = ListRow.liveCount(list)
+            if pinCount > 0 {
+                Text("\(pinCount)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             Button {
                 let optionHeld = currentModifierFlags().option
