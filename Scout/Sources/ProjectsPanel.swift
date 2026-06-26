@@ -2161,11 +2161,13 @@ private struct ProjectDetailView: View {
         VStack(spacing: 0) {
         sidebarSearchField
         List {
+            // Scripts are pinned to the very top and are not part of the reorderable items, so
+            // nothing can be dragged above them.
+            scriptsSection
+
             ForEach(displayedItems) { item in
                 sidebarRow(item)
             }
-
-            scriptsSection
 
             trashSection
 

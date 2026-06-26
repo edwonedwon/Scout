@@ -108,14 +108,21 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         if context.coordinator.needsRender(text: text, highlights: highlights) {
             context.coordinator.render(text, highlights: highlights)
         }
-        // Scroll to (and select) a requested range when it changes.
-        if let target = scrollTarget, context.coordinator.lastScrollTarget != target {
-            context.coordinator.lastScrollTarget = target
-            let ns = tv.string as NSString
-            if target.location + target.length <= ns.length {
-                tv.setSelectedRange(target)
-                tv.scrollRangeToVisible(target)
+        // Scroll to (and select) a requested range when it changes. The caller resets the
+        // target to nil between requests (so re-clicking the SAME scene re-scrolls); mirror
+        // that here so the next non-nil value always triggers.
+        if let target = scrollTarget {
+            if context.coordinator.lastScrollTarget != target {
+                context.coordinator.lastScrollTarget = target
+                let ns = tv.string as NSString
+                if target.location + target.length <= ns.length {
+                    tv.setSelectedRange(target)
+                    tv.scrollRangeToVisible(target)
+                    tv.window?.makeFirstResponder(tv)
+                }
             }
+        } else {
+            context.coordinator.lastScrollTarget = nil
         }
     }
 
@@ -142,7 +149,8 @@ struct ScriptTextRepresentable: NSViewRepresentable {
     }
 }
 
-/// NSTextView that turns a plain `m` keypress (with a selection) into an "assign" callback.
+/// NSTextView that turns a plain `m` keypress (with a selection) into an "assign" callback,
+/// and offers the same action via a right-click menu.
 final class ScriptNSTextView: NSTextView {
     var onAssign: ((NSRange) -> Void)?
 
@@ -153,6 +161,36 @@ final class ScriptNSTextView: NSTextView {
             if r.length > 0 { onAssign?(r); return }
         }
         super.keyDown(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        var range = selectedRange()
+        // No active selection? If the right-click lands inside an existing (tinted) highlight,
+        // target that whole highlight instead.
+        if range.length == 0, let storage = textStorage {
+            let pt = convert(event.locationInWindow, from: nil)
+            let idx = characterIndexForInsertion(at: pt)
+            if idx >= 0, idx < storage.length,
+               storage.attribute(.backgroundColor, at: idx, effectiveRange: nil) != nil {
+                var eff = NSRange()
+                _ = storage.attribute(.backgroundColor, at: idx, longestEffectiveRange: &eff,
+                                      in: NSRange(location: 0, length: storage.length))
+                range = eff
+                setSelectedRange(eff)
+            }
+        }
+        guard range.length > 0 else { return nil }
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Assign highlight to list",
+                              action: #selector(assignFromMenu), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc private func assignFromMenu() {
+        let r = selectedRange()
+        if r.length > 0 { onAssign?(r) }
     }
 }
 
