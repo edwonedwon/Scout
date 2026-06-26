@@ -168,8 +168,13 @@ struct ProjectsPanel: View {
     var onClearPin: (() -> Void)? = nil
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
     var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
+    /// Context-menu reveal handlers (route to ContentView): show the pin in the grid / on the map.
+    var onRevealInGrid: ((UUID) -> Void)? = nil
+    var onRevealOnMap: ((UUID) -> Void)? = nil
     /// Set by photo grid to scroll the sidebar to the tapped pin.
     var scrollToPinUUID: UUID? = nil
+    /// Set by "Reveal in List" (grid/map) to expand the pin's list/folder chain and scroll to it.
+    var revealInListUUID: UUID? = nil
     /// Set by ContentView (M key or grid context menu) to open the move sheet for these UUIDs.
     @Binding var externalMoveUUIDs: [UUID]
 
@@ -200,10 +205,13 @@ struct ProjectsPanel: View {
                         onClearPin: onClearPin,
                         onRevealPins: onRevealPins,
                         onOpenCarousel: onOpenCarousel,
+                        onRevealInGrid: onRevealInGrid,
+                        onRevealOnMap: onRevealOnMap,
                         onExpandedChanged: { uuids in
                             expandedListUUIDs = uuids.joined(separator: ",")
                         },
                         scrollToPinUUID: scrollToPinUUID,
+                        revealInListUUID: revealInListUUID,
                         externalMoveUUIDs: $externalMoveUUIDs
                     )
                 }
@@ -460,9 +468,14 @@ private struct ProjectDetailView: View {
     var onClearPin: (() -> Void)?
     var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
     var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
+    /// Context-menu reveal handlers (route to ContentView).
+    var onRevealInGrid: ((UUID) -> Void)? = nil
+    var onRevealOnMap: ((UUID) -> Void)? = nil
     var onExpandedChanged: (([String]) -> Void)? = nil
     /// Set from the photo grid to scroll the sidebar to a specific pin.
     var scrollToPinUUID: UUID? = nil
+    /// Set by "Reveal in List" — expand this pin's list/folder chain and scroll to its row.
+    var revealInListUUID: UUID? = nil
     /// Set by ContentView (from M key or grid context menu) to open the move sheet
     /// for specific location UUIDs, bypassing sidebar selection.
     @Binding var externalMoveUUIDs: [UUID]
@@ -843,6 +856,36 @@ private struct ProjectDetailView: View {
     /// Finds a list/folder anywhere in the project by its `uuid`.
     private func findList(uuid: UUID) -> LocationListData? {
         project.lists.first(where: { $0.uuid == uuid })
+    }
+
+    /// "Reveal in List": expand the pin's whole list/folder ancestor chain (so its row exists),
+    /// select/highlight it, and scroll the sidebar to it.
+    private func revealPin(_ uuid: UUID) {
+        guard let pin = findPin(uuid: uuid) else { return }
+        // A sidebar search filter can hide the pin's row entirely — clear it so the row exists.
+        if !searchText.isEmpty { searchText = "" }
+        var tx = Transaction(animation: .none); tx.disablesAnimations = true
+        withTransaction(tx) {
+            if let list = pin.list {
+                // Expand this list AND every ancestor folder so the pin's row is visible.
+                var node: LocationListData? = list
+                while let n = node { expandedListIDs.insert(n.persistentModelID); node = n.parentList }
+            } else {
+                // Loose photo → expand the Uncategorized section.
+                uncategorizedExpanded = true
+            }
+        }
+        // Highlight it in every view.
+        selection.ids = [pin.uuid]
+        selection.anchor = pin.uuid
+        // Scroll after expansion renders the row. The freshly-inserted (lazy) rows can take a
+        // moment to exist, so try a couple of times.
+        let target = pin.persistentModelID
+        for delay in [0.15, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                withAnimation { listProxyHolder?.scrollTo(target, anchor: .center) }
+            }
+        }
     }
 
     /// Flagged ("favorite filming location") pins first — keeping each group's sortOrder — so
@@ -1826,28 +1869,30 @@ private struct ProjectDetailView: View {
         }
     }
 
-    /// Shared right-click menu for any pin row: flag/unflag, reveal in Finder, and delete
-    /// (single or the whole selection). Used everywhere so the menu is identical and there's no
-    /// conflicting inner menu on PinRow.
+    /// Right-click menu for a sidebar pin row — uses the SHARED pin menu (origin .sidebar), so
+    /// it's identical to the grid/map menus aside from the sidebar-only "Reveal in Photo Grid"
+    /// and "Reveal on Map" options.
     @ViewBuilder private func pinContextMenu(_ pin: PinnedLocationData) -> some View {
+        pinContextMenuItems(.sidebar, sidebarPinMenuActions(pin))
+    }
+
+    private func sidebarPinMenuActions(_ pin: PinnedLocationData) -> PinMenuActions {
         let multi = isInMultiSelection(pin.uuid)
-        Button { toggleFlag(pin) } label: {
-            Label(pin.isFlagged ? "Unflag" : "Flag as Filming Location",
-                  systemImage: pin.isFlagged ? "flag.slash" : "flag")
-        }
+        var revealFinder: (() -> Void)? = nil
         #if os(macOS)
         if let path = pin.originalFilePath {
-            Button { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") } label: {
-                Label("Reveal in Finder", systemImage: "folder")
-            }
+            revealFinder = { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") }
         }
         #endif
-        Divider()
-        Button(role: .destructive) {
-            if multi { deleteSelectedItems() } else { deletePin(pin) }
-        } label: {
-            Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
-        }
+        return PinMenuActions(
+            isFlagged: pin.isFlagged,
+            toggleFlag: { toggleFlag(pin) },
+            revealInFinder: revealFinder,
+            revealInList: nil,
+            revealInGrid: onRevealInGrid.map { f in { f(pin.uuid) } },
+            revealOnMap: onRevealOnMap.map { f in { f(pin.uuid) } },
+            delete: { if multi { deleteSelectedItems() } else { deletePin(pin) } }
+        )
     }
 
     var body: some View {
@@ -2128,6 +2173,10 @@ private struct ProjectDetailView: View {
             // the long-standing "can't multi-select in the grid" bug.
             listProxyHolder?.scrollTo(pin.persistentModelID, anchor: nil)
         }
+        .onChange(of: revealInListUUID) { _, uuid in
+            guard let uuid else { return }
+            revealPin(uuid)
+        }
         } // VStack
         } // ScrollViewReader
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
@@ -2308,6 +2357,19 @@ private struct ListRow: View {
     private var isSelected: Bool { selection.contains(list.uuid) }
     private var listColor: Color { Color(hexString: list.colorHex) }
 
+    /// Live (non-trashed) photo count for a list, including its live child lists (recursively).
+    static func liveCount(_ list: LocationListData) -> Int {
+        list.pins.filter { $0.deletedAt == nil }.count
+            + list.childLists.filter { $0.deletedAt == nil }.reduce(0) { $0 + liveCount($1) }
+    }
+
+    /// True if any live photo in this list (or a live child list) is flagged — so the header can
+    /// show a flag, signalling a filming location has already been chosen for the list.
+    static func hasFlagged(_ list: LocationListData) -> Bool {
+        list.pins.contains { $0.deletedAt == nil && $0.isFlagged }
+            || list.childLists.filter { $0.deletedAt == nil }.contains { hasFlagged($0) }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             // Chevron and eye are Buttons so clicking them toggles expand/visibility
@@ -2338,7 +2400,17 @@ private struct ListRow: View {
                     .font(.body)
                     .foregroundStyle(.primary)
                 Spacer()
-                let pinCount = list.pins.count + list.childLists.reduce(0) { $0 + $1.pins.count }
+                // A flag here means at least one photo in the list is flagged — i.e. a filming
+                // location has already been picked for this list.
+                if ListRow.hasFlagged(list) {
+                    Image(systemName: "flag.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
+                // Count only LIVE photos (and live child lists), recursively — trashed photos
+                // stay in `list.pins` (soft-delete just sets deletedAt), so counting them made
+                // the header number exceed what's actually shown in the sidebar/grid/map.
+                let pinCount = ListRow.liveCount(list)
                 if pinCount > 0 {
                     Text("\(pinCount)")
                         .font(.caption)

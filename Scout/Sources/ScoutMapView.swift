@@ -281,7 +281,7 @@ final class ZoomableMapView: MKMapView {
         }
     }
     var onPolygonComplete: (([CLLocationCoordinate2D]) -> Void)?
-    var onBuildAnnotationMenu: ((ScoutLocation) -> NSMenu?)?
+    var onBuildAnnotationMenu: ((ScoutLocation, Bool) -> NSMenu?)?
     /// Fired when the user presses "f" with the map focused (frame all project pins).
     var onFrameAllPins: (() -> Void)?
     /// Fired on double-click of a pin that has photos — opens the full-screen carousel.
@@ -468,7 +468,7 @@ final class ZoomableMapView: MKMapView {
         while let v = candidate, !(v is MKAnnotationView) { candidate = v.superview }
         if let annView = candidate as? MKAnnotationView,
            let ann = annView.annotation as? LocationAnnotation,
-           let menu = onBuildAnnotationMenu?(ann.location) {
+           let menu = onBuildAnnotationMenu?(ann.location, ann.isProjectPin) {
             NSMenu.popUpContextMenu(menu, with: event, for: self)
             return
         }
@@ -753,10 +753,10 @@ final class ScoutDotAnnotationView: MKAnnotationView {
             selPath.stroke()
         }
 
-        // Flag badge: small red dot at the top-right, kept inside bounds so it isn't clipped.
+        // Flag badge: small red dot at the top-left, kept inside bounds so it isn't clipped.
         if isFlagged {
             let bs = bounds.width * 0.55
-            let badge = CGRect(x: bounds.maxX - bs, y: bounds.maxY - bs, width: bs, height: bs)
+            let badge = CGRect(x: bounds.minX, y: bounds.minY, width: bs, height: bs)
             let path = NSBezierPath(ovalIn: badge)
             NSColor.systemRed.setFill(); path.fill()
             NSColor.white.setStroke(); path.lineWidth = max(bs * 0.18, 1); path.stroke()
@@ -815,14 +815,17 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         photoLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         layer?.addSublayer(photoLayer)
 
-        // Flag badge (top-right red dot), hidden unless the pin is flagged.
-        let bs: CGFloat = 16
-        flagBadge.frame = CGRect(x: size - bs + 3, y: size - bs + 3, width: bs, height: bs)
+        // Flag badge: red dot in the TOP-LEFT corner, sitting ON TOP of the photo frame.
+        // Kept fully inside the view bounds — MapKit clips annotation views to their bounds, so
+        // any overflow gets cropped (which is what cut the old badge). zPosition floats it above
+        // the photo + border.
+        let bs: CGFloat = 15
+        flagBadge.frame = CGRect(x: 1, y: 1, width: bs, height: bs)
         flagBadge.backgroundColor = NSColor.systemRed.cgColor
         flagBadge.cornerRadius = bs / 2
         flagBadge.borderColor = NSColor.white.cgColor
         flagBadge.borderWidth = 2
-        flagBadge.zPosition = 20
+        flagBadge.zPosition = 100
         flagBadge.isHidden = true
         layer?.addSublayer(flagBadge)
     }
@@ -861,8 +864,8 @@ final class ScoutPhotoAnnotationView: MKAnnotationView {
         layer?.cornerRadius = 8 * ratio
         layer?.shadowRadius = 4 * ratio
         photoLayer.cornerRadius = 6 * ratio
-        let bs = 16 * ratio
-        flagBadge.frame = CGRect(x: s - bs + 3 * ratio, y: s - bs + 3 * ratio, width: bs, height: bs)
+        let bs = 15 * ratio
+        flagBadge.frame = CGRect(x: ratio, y: ratio, width: bs, height: bs)
         flagBadge.cornerRadius = bs / 2
         applyBorder()
     }
@@ -1033,6 +1036,14 @@ struct ScoutMapView {
     var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
     /// Right-click "Move N photos to list…" on a multi-selection — opens the move picker.
     var onMoveSelectionToList: (() -> Void)? = nil
+    /// Right-click "Reveal in List" — expand & scroll to this pin in the sidebar.
+    var onRevealInList: ((ScoutLocation) -> Void)? = nil
+    /// Right-click reveal/flag/delete handlers for a saved pin (shared pin menu).
+    var onRevealInGrid: ((ScoutLocation) -> Void)? = nil
+    var onToggleFlagLocation: ((ScoutLocation) -> Void)? = nil
+    var onDeleteLocation: ((ScoutLocation) -> Void)? = nil
+    /// Returns the on-disk original-file path for a location (for "Reveal in Finder"), or nil.
+    var onOriginalFilePath: ((ScoutLocation) -> String?)? = nil
     /// True when the currently-selected location is an already-saved pin — enables drag-to-list.
     var isSelectedPinned: Bool = false
     var boundaryPolygons: [BoundaryPolygon] = []
@@ -1080,8 +1091,8 @@ struct ScoutMapView {
             zoomable.onPolygonComplete = onPolygonComplete
             zoomable.onFrameAllPins = onFrameAllPins
             zoomable.onPinDoubleClicked = onPinDoubleClicked
-            zoomable.onBuildAnnotationMenu = { [weak coordinator = context.coordinator] location in
-                coordinator?.buildAnnotationMenu(for: location)
+            zoomable.onBuildAnnotationMenu = { [weak coordinator = context.coordinator] location, isProjectPin in
+                coordinator?.buildAnnotationMenu(for: location, isProjectPin: isProjectPin)
             }
             zoomable.onMultiSelectionChanged = { ids in
                 // Write the shared store synchronously. The store's publisher then notifies the
@@ -1518,14 +1529,16 @@ struct ScoutMapView {
             activePopover = pop
         }
 
-        // Builds an NSMenu for right-click on an annotation, with "Save to List" submenu.
-        func buildAnnotationMenu(for location: ScoutLocation) -> NSMenu? {
-            guard !parent.availableLists.isEmpty, let handler = parent.onSaveToList else { return nil }
-            let menu = NSMenu()
-
+        /// Right-click menu for a map annotation.
+        /// - Multi-selection (≥2): the "Move N photos to list…" action (unchanged).
+        /// - A SAVED pin: the SHARED pin menu (Flag / Reveal in Finder / Reveal in Photo Grid /
+        ///   Reveal in List / Delete) — identical to the sidebar & grid menus.
+        /// - A search-result pin (not saved): "Save to List".
+        func buildAnnotationMenu(for location: ScoutLocation, isProjectPin: Bool) -> NSMenu? {
             // Multi-selection: one item that opens the move picker for all selected pins.
             let selectionCount = parent.multiSelection.ids.count
             if selectionCount >= 2, let moveSelection = parent.onMoveSelectionToList {
+                let menu = NSMenu()
                 let act = MenuAction { moveSelection() }
                 menuActions.append(act)
                 let item = NSMenuItem(title: "Move \(selectionCount) photos to list…",
@@ -1535,17 +1548,53 @@ struct ScoutMapView {
                 return menu
             }
 
-            let saveItem = NSMenuItem(title: "Save to List", action: nil, keyEquivalent: "")
-            let submenu = NSMenu()
-            for list in parent.availableLists {
-                let act = MenuAction { handler(location, list) }
-                menuActions.append(act)
-                let item = NSMenuItem(title: list.name, action: #selector(MenuAction.invoke), keyEquivalent: "")
-                item.target = act
-                submenu.addItem(item)
+            // Saved pin → shared pin menu.
+            if isProjectPin {
+                let path = parent.onOriginalFilePath?(location)
+                let actions = PinMenuActions(
+                    isFlagged: location.isFlagged,
+                    toggleFlag: { [weak self] in self?.parent.onToggleFlagLocation?(location) },
+                    revealInFinder: path.map { p in { NSWorkspace.shared.selectFile(p, inFileViewerRootedAtPath: "") } },
+                    revealInList: parent.onRevealInList.map { f in { f(location) } },
+                    revealInGrid: parent.onRevealInGrid.map { f in { f(location) } },
+                    revealOnMap: nil,
+                    delete: { [weak self] in self?.parent.onDeleteLocation?(location) }
+                )
+                return nsMenu(from: pinMenuEntries(.map, actions))
             }
-            saveItem.submenu = submenu
-            menu.addItem(saveItem)
+
+            // Search-result pin → Save to List.
+            if !parent.availableLists.isEmpty, let handler = parent.onSaveToList {
+                let menu = NSMenu()
+                let saveItem = NSMenuItem(title: "Save to List", action: nil, keyEquivalent: "")
+                let submenu = NSMenu()
+                for list in parent.availableLists {
+                    let act = MenuAction { handler(location, list) }
+                    menuActions.append(act)
+                    let item = NSMenuItem(title: list.name, action: #selector(MenuAction.invoke), keyEquivalent: "")
+                    item.target = act
+                    submenu.addItem(item)
+                }
+                saveItem.submenu = submenu
+                menu.addItem(saveItem)
+                return menu
+            }
+            return nil
+        }
+
+        /// Renders shared `PinMenuEntry`s as an NSMenu (the map's AppKit equivalent of the
+        /// SwiftUI `pinContextMenuItems`). Retains each action in `menuActions`.
+        private func nsMenu(from entries: [PinMenuEntry]) -> NSMenu {
+            let menu = NSMenu()
+            for entry in entries {
+                if entry.separatorBefore { menu.addItem(.separator()) }
+                let act = MenuAction(entry.action)
+                menuActions.append(act)
+                let item = NSMenuItem(title: entry.title,
+                                      action: #selector(MenuAction.invoke), keyEquivalent: "")
+                item.target = act
+                menu.addItem(item)
+            }
             return menu
         }
 

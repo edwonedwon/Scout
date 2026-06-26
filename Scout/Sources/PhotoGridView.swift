@@ -21,6 +21,10 @@ struct PhotoGridView: View {
 
     let locations: [ScoutLocation]
     var pinnedSections: [Section] = []
+    /// Bumped by ContentView whenever the pin caches are rebuilt (flag toggle, rotate, list
+    /// changes…). Included in `inputSignature` so the grid model rebuilds even when a change
+    /// (e.g. unflagging a photo) doesn't alter any section's count or first/last id.
+    var dataVersion: Int = 0
     /// UUID of the location (== PinnedLocationData.uuid) to scroll to and highlight.
     var highlightedLocationID: UUID? = nil
     /// When set, the grid scrolls this location to the top. Used to jump to the photos
@@ -35,6 +39,12 @@ struct PhotoGridView: View {
     var onMoveToList: (([UUID]) -> Void)? = nil
     /// Called with selected UUIDs to toggle the "flagged" (favorite filming location) state.
     var onToggleFlag: (([UUID]) -> Void)? = nil
+    /// Called with a location UUID to reveal & scroll to it in the sidebar list.
+    var onRevealInList: ((UUID) -> Void)? = nil
+    /// Called with a location UUID to reveal it on the map (select + center/zoom).
+    var onRevealOnMap: ((UUID) -> Void)? = nil
+    /// Called with selected UUIDs to trash them.
+    var onDelete: (([UUID]) -> Void)? = nil
     /// Called with selected UUIDs when "R" is pressed — rotate 90° counter-clockwise.
     var onRotate: (([UUID]) -> Void)? = nil
     /// Returns the original file path for a pinned location UUID (for Reveal in Finder).
@@ -87,6 +97,7 @@ struct PhotoGridView: View {
     private var inputSignature: Int {
         var h = Hasher()
         h.combine(columns)
+        h.combine(dataVersion)
         h.combine(locations.count)
         h.combine(locations.first?.id)
         h.combine(locations.last?.id)
@@ -208,9 +219,8 @@ struct PhotoGridView: View {
     private func sectionHeader(_ title: String, color: Color? = nil) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.55))
-                .textCase(.uppercase)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.9))
                 .padding(.horizontal, 10)
             if let color {
                 color
@@ -237,7 +247,10 @@ struct PhotoGridView: View {
                             onDoubleTap: { openCarousel(from: item) },
                             originalFilePath: item.isPinned ? originalFilePath?(item.location.id) : nil,
                             onMoveToList: onMoveToList,
-                            onToggleFlag: onToggleFlag
+                            onToggleFlag: onToggleFlag,
+                            onRevealInList: onRevealInList,
+                            onRevealOnMap: onRevealOnMap,
+                            onDelete: onDelete
                         )
                         .id(item.id)
                     }
@@ -308,6 +321,9 @@ private struct MasonryCell: View {
     var originalFilePath: String? = nil
     var onMoveToList: (([UUID]) -> Void)? = nil
     var onToggleFlag: (([UUID]) -> Void)? = nil
+    var onRevealInList: ((UUID) -> Void)? = nil
+    var onRevealOnMap: ((UUID) -> Void)? = nil
+    var onDelete: (([UUID]) -> Void)? = nil
     @State private var isHovered = false
 
     private var isSelected: Bool { selection.contains(item.location.id) }
@@ -372,7 +388,7 @@ private struct MasonryCell: View {
                 }
             }
         }
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .topLeading) {
             // Flagged (favorite filming location) marker.
             if item.location.isFlagged {
                 Image(systemName: "flag.fill")
@@ -419,26 +435,32 @@ private struct MasonryCell: View {
             })
         }
         .contextMenu {
-            if item.isPinned, let onToggleFlag {
-                Button { onToggleFlag(actionIDs()) } label: {
-                    Label(item.location.isFlagged ? "Unflag" : "Flag as Filming Location",
-                          systemImage: item.location.isFlagged ? "flag.slash" : "flag")
-                }
+            // Saved photos use the shared pin menu (Flag / Reveal in Finder / Reveal in List /
+            // Delete). Search results (not pinned) aren't in a list, so no menu.
+            if item.isPinned {
+                pinContextMenuItems(.grid, gridPinMenuActions())
             }
-            if item.isPinned, let onMoveToList {
-                Button { onMoveToList(actionIDs()) } label: {
-                    Label("Add to List…", systemImage: "arrow.right.square")
-                }
-            }
-            if item.isPinned { Divider() }
-            #if os(macOS)
-            if let path = originalFilePath {
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
-                }
-            }
-            #endif
         }
+    }
+
+    /// Builds the shared menu actions for THIS grid cell (flag/delete act on the whole
+    /// selection when this item is part of it, via actionIDs()).
+    private func gridPinMenuActions() -> PinMenuActions {
+        var revealFinder: (() -> Void)? = nil
+        #if os(macOS)
+        if let path = originalFilePath {
+            revealFinder = { NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "") }
+        }
+        #endif
+        return PinMenuActions(
+            isFlagged: item.location.isFlagged,
+            toggleFlag: { onToggleFlag?(actionIDs()) },
+            revealInFinder: revealFinder,
+            revealInList: onRevealInList.map { f in { f(item.location.id) } },
+            revealInGrid: nil,
+            revealOnMap: onRevealOnMap.map { f in { f(item.location.id) } },
+            delete: { onDelete?(actionIDs()) }
+        )
     }
 }
 

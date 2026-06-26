@@ -33,6 +33,69 @@ final class SelectionStore: ObservableObject {
     func contains(_ id: UUID) -> Bool { ids.contains(id) }
 }
 
+// MARK: - Shared pin context menu (sidebar, photo grid, and map all use this)
+
+/// Where the right-click happened — selects which "Reveal …" options appear.
+enum PinMenuOrigin { case sidebar, grid, map }
+
+/// The actions a pin's right-click menu can perform, pre-bound to a specific pin. A nil closure
+/// omits that item. Each surface builds this; the ORDER, titles, and which items show is defined
+/// once in `pinMenuEntries`, then rendered as SwiftUI buttons (sidebar/grid) or an NSMenu (map).
+struct PinMenuActions {
+    var isFlagged: Bool
+    var toggleFlag: () -> Void
+    var revealInFinder: (() -> Void)?
+    var revealInList: (() -> Void)?
+    var revealInGrid: (() -> Void)?
+    var revealOnMap: (() -> Void)?
+    var delete: () -> Void
+}
+
+struct PinMenuEntry: Identifiable {
+    let id = UUID()
+    var separatorBefore = false
+    let title: String
+    let systemImage: String
+    var destructive = false
+    let action: () -> Void
+}
+
+/// THE single source of menu structure/order/titles for a pin. Surface-specific reveal options
+/// are chosen by `origin`; everything else (Flag, Reveal in Finder, Delete) is identical.
+func pinMenuEntries(_ origin: PinMenuOrigin, _ a: PinMenuActions) -> [PinMenuEntry] {
+    var e: [PinMenuEntry] = []
+    e.append(.init(title: a.isFlagged ? "Unflag" : "Flag as Filming Location",
+                   systemImage: a.isFlagged ? "flag.slash" : "flag", action: a.toggleFlag))
+    if let f = a.revealInFinder {
+        e.append(.init(title: "Reveal in Finder", systemImage: "folder", action: f))
+    }
+    // Surface-specific "Reveal …" options, right below Reveal in Finder.
+    switch origin {
+    case .sidebar:
+        if let g = a.revealInGrid { e.append(.init(title: "Reveal in Photo Grid", systemImage: "square.grid.2x2", action: g)) }
+        if let m = a.revealOnMap  { e.append(.init(title: "Reveal on Map", systemImage: "map", action: m)) }
+    case .grid:
+        if let l = a.revealInList { e.append(.init(title: "Reveal in List", systemImage: "list.bullet", action: l)) }
+        if let m = a.revealOnMap  { e.append(.init(title: "Reveal on Map", systemImage: "map", action: m)) }
+    case .map:
+        if let g = a.revealInGrid { e.append(.init(title: "Reveal in Photo Grid", systemImage: "square.grid.2x2", action: g)) }
+        if let l = a.revealInList { e.append(.init(title: "Reveal in List", systemImage: "list.bullet", action: l)) }
+    }
+    e.append(.init(separatorBefore: true, title: "Delete", systemImage: "trash", destructive: true, action: a.delete))
+    return e
+}
+
+/// SwiftUI renderer (sidebar + photo grid). The map renders the same entries as an NSMenu.
+@ViewBuilder
+func pinContextMenuItems(_ origin: PinMenuOrigin, _ actions: PinMenuActions) -> some View {
+    ForEach(pinMenuEntries(origin, actions)) { entry in
+        if entry.separatorBefore { Divider() }
+        Button(role: entry.destructive ? .destructive : nil, action: entry.action) {
+            Label(entry.title, systemImage: entry.systemImage)
+        }
+    }
+}
+
 /// Caches the two expensive pieces of `rebuildPinCaches` so a visibility toggle (which
 /// changes neither a pin's data nor a list's membership) reuses results instead of
 /// recomputing them for thousands of pins on the main thread:
@@ -188,6 +251,10 @@ struct ContentView: View {
     /// mutating it never re-runs ContentView's body — only the leaf rows/cells that
     /// @ObservedObject it, and the map's Combine subscription, react. See SelectionStore.
     @State private var selection = SelectionStore()
+    /// Set by the "Reveal in List" command (grid/map right-click) to ask the sidebar to expand
+    /// the pin's list/folder chain and scroll to its row. A fresh value each time so re-revealing
+    /// the same pin still fires the sidebar's onChange.
+    @State private var revealInListUUID: UUID? = nil
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
     @State private var showExternalMoveSheet = false
     /// Duplicate pins found by the debug "Find Duplicates" scan, awaiting confirmation to trash.
@@ -357,7 +424,10 @@ struct ContentView: View {
                         }
                     },
                     onOpenCarousel: openInCarousel,
+                    onRevealInGrid: { id in revealInGrid(id) },
+                    onRevealOnMap: { id in revealOnMap(id) },
                     scrollToPinUUID: highlightedPinID,
+                    revealInListUUID: revealInListUUID,
                     externalMoveUUIDs: $externalMoveUUIDs
                 )
                 .frame(width: liveSidebarWidth.map { CGFloat(min(max($0, sidebarMinWidth), sidebarMaxWidth)) } ?? clampedSidebarWidth)
@@ -605,6 +675,7 @@ struct ContentView: View {
                 selection: selection,
                 locations: locations,
                 pinnedSections: cachedGridSections,
+                dataVersion: pinCacheVersion,
                 highlightedLocationID: highlightedPinID,
                 scrollTargetID: gridScrollTargetID,
                 onClearSearchResults: clearSearchResults,
@@ -616,6 +687,9 @@ struct ContentView: View {
                 },
                 onMoveToList: { uuids in externalMoveUUIDs = uuids },
                 onToggleFlag: { uuids in toggleFlag(uuids) },
+                onRevealInList: { id in revealInList(id) },
+                onRevealOnMap: { id in revealOnMap(id) },
+                onDelete: { uuids in trashPins(uuids) },
                 onRotate: { uuids in rotatePins(uuids) },
                 originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
             )
@@ -861,7 +935,7 @@ struct ContentView: View {
                     .filter { !$0.images.isEmpty })
                 if !locs.isEmpty {
                     sections.append(PhotoGridView.Section(
-                        title: project.lists.count > 1 ? "\(project.name) — \(list.name)" : project.name,
+                        title: gridSectionTitle(for: list),
                         locations: locs,
                         color: Color(hexString: list.colorHex)
                     ))
@@ -878,8 +952,7 @@ struct ContentView: View {
                 .map { displayCache.location(for: $0) }
                 .filter { !$0.images.isEmpty })
             if !imported.isEmpty {
-                let title = project.lists.isEmpty ? project.name : "\(project.name) — Uncategorized"
-                sections.append(PhotoGridView.Section(title: title, locations: imported))
+                sections.append(PhotoGridView.Section(title: "Uncategorized", locations: imported))
             }
         }
         // Active standalone lists not belonging to any project.
@@ -1083,6 +1156,15 @@ struct ContentView: View {
         if changed { try? modelContext.save() }
     }
 
+    /// Photo-grid section title for a list: the list name, prefixed by its folder ancestor
+    /// chain ("Folder / List"), and never the project name — matching how it reads in the sidebar.
+    private func gridSectionTitle(for list: LocationListData) -> String {
+        var parts = [list.name]
+        var node = list.parentList
+        while let n = node { parts.insert(n.name, at: 0); node = n.parentList }
+        return parts.joined(separator: " / ")
+    }
+
     /// Stable partition: flagged locations first (keeping their order), then the rest.
     private func flaggedFirst(_ locs: [ScoutLocation]) -> [ScoutLocation] {
         locs.filter(\.isFlagged) + locs.filter { !$0.isFlagged }
@@ -1099,6 +1181,55 @@ struct ContentView: View {
         rebuildPinCaches()   // isFlagged is in the cache signature → flagged-first re-sorts
     }
 
+    /// "Reveal in Photo Grid": switch to the grid, scroll to the photo, and select it.
+    private func revealInGrid(_ uuid: UUID) {
+        if photoViewer.isVisible { photoViewer.dismiss() }
+        let wasPhotos = (viewMode == .photos)
+        if !wasPhotos { withAnimation(.spring(duration: 0.3)) { viewMode = .photos } }
+        selection.ids = [uuid]; selection.anchor = uuid
+        // Reset the scroll target first so re-revealing the same photo still fires the grid's
+        // onChange. Defer past the viewMode switch (whose onChange sets its own scroll target).
+        gridScrollTargetID = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + (wasPhotos ? 0.05 : 0.35)) {
+            gridScrollTargetID = uuid
+            highlightedPinID = uuid
+        }
+    }
+
+    /// "Reveal on Map": select the pin and center/zoom the map on it (switching to map view).
+    private func revealOnMap(_ uuid: UUID) {
+        guard let pin = allPins.first(where: { $0.uuid == uuid }) else { return }
+        selection.ids = [uuid]; selection.anchor = uuid
+        zoomToPin(pin)
+    }
+
+    /// Soft-delete (trash) the given pins, updating selection and caches once.
+    private func trashPins(_ uuids: [UUID]) {
+        let pins = allPins.filter { uuids.contains($0.uuid) && $0.deletedAt == nil }
+        guard !pins.isEmpty else { return }
+        let now = Date()
+        for p in pins { p.deletedAt = now }
+        selection.ids.subtract(uuids)
+        try? modelContext.save()
+        rebuildPinCaches()
+    }
+
+    /// "Reveal in List": open the sidebar and ask it to expand the pin's list/folder chain and
+    /// scroll to its row.
+    private func revealInList(_ uuid: UUID) {
+        let wasClosed = !showProjectsPanel
+        if wasClosed {
+            withAnimation(.spring(duration: 0.3)) { showProjectsPanel = true }
+        }
+        // Re-set so onChange fires even when revealing the same pin twice in a row. When the
+        // panel was closed it must first mount and restore its nav stack, so fire after the
+        // open animation; otherwise a short hop is enough.
+        revealInListUUID = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + (wasClosed ? 0.4 : 0.05)) {
+            revealInListUUID = uuid
+        }
+    }
+
     private func deletePinFromCarousel(_ loc: ScoutLocation) {
         guard let pin = allPins.first(where: { $0.uuid == loc.id }) else { return }
         pin.deletedAt = Date()
@@ -1111,15 +1242,7 @@ struct ContentView: View {
     /// and "u" shortcuts — ContentView needs its own. Trashes EVERY selected photo (the whole
     /// shared multi-selection), not just the highlighted one.
     private func deleteSelectedPhotos() {
-        let ids = selection.ids
-        guard !ids.isEmpty else { return }
-        let pins = allPins.filter { ids.contains($0.uuid) && $0.deletedAt == nil }
-        guard !pins.isEmpty else { return }
-        let now = Date()
-        for pin in pins { pin.deletedAt = now }
-        selection.ids = []
-        try? modelContext.save()
-        rebuildPinCaches()
+        trashPins(Array(selection.ids))
     }
 
     /// Debug "Find Duplicates": scans every live photo in the project for duplicates
@@ -1350,6 +1473,11 @@ struct ContentView: View {
             availableLists: openProjectLists,
             onSaveToList: saveToList,
             onMoveSelectionToList: { if !selection.ids.isEmpty { externalMoveUUIDs = Array(selection.ids) } },
+            onRevealInList: { loc in revealInList(loc.id) },
+            onRevealInGrid: { loc in revealInGrid(loc.id) },
+            onToggleFlagLocation: { loc in toggleFlag([loc.id]) },
+            onDeleteLocation: { loc in trashPins([loc.id]) },
+            onOriginalFilePath: { loc in allPins.first(where: { $0.uuid == loc.id })?.originalFilePath },
             isSelectedPinned: allPins.contains(where: { $0.uuid == selectedLocation?.id }),
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,
