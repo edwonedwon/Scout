@@ -860,32 +860,41 @@ private struct ProjectDetailView: View {
 
     /// "Reveal in List": expand the pin's whole list/folder ancestor chain (so its row exists),
     /// select/highlight it, and scroll the sidebar to it.
-    private func revealPin(_ uuid: UUID) {
-        guard let pin = findPin(uuid: uuid) else { return }
+    /// Scrolls the sidebar list to a row, retrying since freshly-expanded rows are lazy.
+    private func scrollSidebar(to target: PersistentIdentifier, using proxy: ScrollViewProxy) {
+        for delay in [0.1, 0.35, 0.6] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                withAnimation { proxy.scrollTo(target, anchor: .center) }
+            }
+        }
+    }
+
+    /// Expands ONLY the revealed pin's list/folder chain (collapsing every other list), selects
+    /// it, and returns its scroll id (the caller scrolls to it via the ScrollViewReader proxy).
+    @discardableResult
+    private func revealPin(_ uuid: UUID) -> PersistentIdentifier? {
+        guard let pin = findPin(uuid: uuid) else { return nil }
         // A sidebar search filter can hide the pin's row entirely — clear it so the row exists.
         if !searchText.isEmpty { searchText = "" }
         var tx = Transaction(animation: .none); tx.disablesAnimations = true
         withTransaction(tx) {
             if let list = pin.list {
-                // Expand this list AND every ancestor folder so the pin's row is visible.
+                // Collapse everything else; expand ONLY this pin's list + ancestor folders.
+                var chain = Set<PersistentIdentifier>()
                 var node: LocationListData? = list
-                while let n = node { expandedListIDs.insert(n.persistentModelID); node = n.parentList }
+                while let n = node { chain.insert(n.persistentModelID); node = n.parentList }
+                expandedListIDs = chain
+                uncategorizedExpanded = false
             } else {
-                // Loose photo → expand the Uncategorized section.
+                // Loose photo → collapse lists, expand only Uncategorized.
+                expandedListIDs = []
                 uncategorizedExpanded = true
             }
         }
         // Highlight it in every view.
         selection.ids = [pin.uuid]
         selection.anchor = pin.uuid
-        // Scroll after expansion renders the row. The freshly-inserted (lazy) rows can take a
-        // moment to exist, so try a couple of times.
-        let target = pin.persistentModelID
-        for delay in [0.15, 0.4] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                withAnimation { listProxyHolder?.scrollTo(target, anchor: .center) }
-            }
-        }
+        return pin.persistentModelID
     }
 
     /// Flagged ("favorite filming location") pins first — keeping each group's sortOrder — so
@@ -1799,6 +1808,139 @@ private struct ProjectDetailView: View {
         return true
     }
 
+    /// One top-level sidebar row (extracted from the List ForEach to keep the body
+    /// type-checkable). Dispatches to the loose-photo, list, or uncategorized row.
+    @ViewBuilder
+    private func sidebarRow(_ item: SidebarItem) -> some View {
+        switch item {
+        case .photo(let pin):       topPhotoRow(pin, item: item)
+        case .list(let list):       listSection(list, item: item)
+        case .uncategorized(let p): uncategorizedSection(p, itemID: item.id)
+        }
+    }
+
+    /// A loose (top-level) photo row.
+    @ViewBuilder
+    private func topPhotoRow(_ pin: PinnedLocationData, item: SidebarItem) -> some View {
+        PinRow(
+            pin: pin,
+            selection: selection,
+            onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
+            onDoubleTap: { handleDoubleTap(pin.uuid) }
+        )
+        .contextMenu { pinContextMenu(pin) }
+        .background { rowHeightReader(item.id) }
+        .overlay { dropIndicator(for: item.id) }
+        .onDrag { beginItemDrag(item) }
+        .onDrop(of: [.text, .fileURL, .image],
+                delegate: SidebarRowDropDelegate(
+                    targetID: item.id,
+                    allowNest: false,
+                    height: { rowHeights[item.id] ?? 60 },
+                    onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                    onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                    onPerform: { mode, providers in performRowDrop(target: .photo(pin), mode: mode, providers: providers) }
+                ))
+    }
+
+    /// A list/folder header row, plus its expanded child lists and pins.
+    @ViewBuilder
+    private func listSection(_ list: LocationListData, item: SidebarItem) -> some View {
+        // While searching, force lists open so matching photos are visible.
+        let searching = !trimmedSearch.isEmpty
+        let isExpanded = searching || expandedListIDs.contains(list.persistentModelID)
+        let isFolder = !list.childLists.isEmpty
+        let isNested = list.parentList != nil
+        ListRow(
+            list: list,
+            isExpanded: isExpanded,
+            isFolder: isFolder,
+            isNested: isNested,
+            selection: selection,
+            onToggleExpand: {
+                var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                withTransaction(tx) {
+                    if isExpanded { expandedListIDs.remove(list.persistentModelID) }
+                    else { expandedListIDs.insert(list.persistentModelID) }
+                }
+            },
+            onTap: { shift, option in handleTap(list.uuid, shift: shift, option: option) },
+            onDoubleTap: { handleDoubleTap(list.uuid) },
+            activeListIDs: $activeListIDs,
+            onFitToList: onFitToList,
+            onRename: {
+                renameListText = list.name
+                renamingList = list
+            },
+            onToggleAllVisibility: { makeAllActive in
+                setProjectVisibility(makeAllActive)
+            },
+            onMoveToTopLevel: { unnestList(list) },
+            onDelete: { requestDeleteList(list) },
+            dragProvider: { beginItemDrag(item) }
+        )
+        .background { rowHeightReader(item.id) }
+        .overlay { dropIndicator(for: item.id) }
+        .onDrop(of: [.text, .fileURL, .image],
+                delegate: SidebarRowDropDelegate(
+                    targetID: item.id,
+                    allowNest: true,
+                    height: { rowHeights[item.id] ?? 36 },
+                    onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                    onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                    onPerform: { mode, providers in performRowDrop(target: .list(list), mode: mode, providers: providers) }
+                ))
+
+        if isExpanded {
+            // Child lists (folders) shown before pins.
+            let childLists = list.childLists
+                .filter { $0.deletedAt == nil }
+                .sorted {
+                    $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+                }.filter { !searching || nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) } }
+            ForEach(childLists, id: \.persistentModelID) { child in
+                childListRow(child, folder: list)
+            }
+
+            let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil })
+                .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
+            ForEach(Array(pins.enumerated()), id: \.element.persistentModelID) { idx, pin in
+                expandedPinRow(pin, in: list, indexBefore: idx > 0 ? pins[idx - 1] : nil)
+            }
+        }
+    }
+
+    /// A pin row shown inside an expanded list, with reorder drop support.
+    @ViewBuilder
+    private func expandedPinRow(_ pin: PinnedLocationData, in list: LocationListData,
+                                indexBefore beforeNeighbor: PinnedLocationData?) -> some View {
+        PinRow(
+            pin: pin,
+            selection: selection,
+            listColor: Color(hexString: list.colorHex),
+            onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
+            onDoubleTap: { handleDoubleTap(pin.uuid) }
+        )
+        .padding(.leading, 24)
+        .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+        .contextMenu { pinContextMenu(pin) }
+        .background { rowHeightReader(pin.persistentModelID) }
+        .overlay { dropIndicator(for: pin.persistentModelID) }
+        .onDrag { beginPhotoDrag("pin:\(pin.uuid.uuidString)") }
+        .onDrop(of: [.text, .fileURL, .image],
+                delegate: SidebarRowDropDelegate(
+                    targetID: pin.persistentModelID,
+                    allowNest: false,
+                    height: { rowHeights[pin.persistentModelID] ?? 60 },
+                    onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
+                    onExit: { id in clearDropTarget(ifOwnedBy: id) },
+                    onPerform: { mode, providers in
+                        reorderPinDrop(providers, list: list, target: pin,
+                                       beforeNeighbor: beforeNeighbor, mode: mode)
+                    }
+                ))
+    }
+
     /// One child-list row inside a folder, with drag-to-reorder and its pin expansion.
     @ViewBuilder
     private func childListRow(_ child: LocationListData, folder: LocationListData) -> some View {
@@ -1902,120 +2044,7 @@ private struct ProjectDetailView: View {
         sidebarSearchField
         List {
             ForEach(displayedItems) { item in
-                switch item {
-                case .photo(let pin):
-                    PinRow(
-                        pin: pin,
-                        selection: selection,
-                        onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
-                        onDoubleTap: { handleDoubleTap(pin.uuid) }
-                    )
-                    .contextMenu { pinContextMenu(pin) }
-                    .background { rowHeightReader(item.id) }
-                    .overlay { dropIndicator(for: item.id) }
-                    .onDrag { beginItemDrag(item) }
-                    .onDrop(of: [.text, .fileURL, .image],
-                            delegate: SidebarRowDropDelegate(
-                                targetID: item.id,
-                                allowNest: false,
-                                height: { rowHeights[item.id] ?? 60 },
-                                onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
-                                onExit: { id in clearDropTarget(ifOwnedBy: id) },
-                                onPerform: { mode, providers in performRowDrop(target: .photo(pin), mode: mode, providers: providers) }
-                            ))
-                case .list(let list):
-                    // While searching, force lists open so matching photos are visible.
-                    let searching = !trimmedSearch.isEmpty
-                    let isExpanded = searching || expandedListIDs.contains(list.persistentModelID)
-                    let isFolder = !list.childLists.isEmpty
-                    let isNested = list.parentList != nil
-                    ListRow(
-                        list: list,
-                        isExpanded: isExpanded,
-                        isFolder: isFolder,
-                        isNested: isNested,
-                        selection: selection,
-                        onToggleExpand: {
-                            var tx = Transaction(animation: .none); tx.disablesAnimations = true
-                            withTransaction(tx) {
-                                if isExpanded { expandedListIDs.remove(list.persistentModelID) }
-                                else { expandedListIDs.insert(list.persistentModelID) }
-                            }
-                        },
-                        onTap: { shift, option in handleTap(list.uuid, shift: shift, option: option) },
-                        onDoubleTap: { handleDoubleTap(list.uuid) },
-                        activeListIDs: $activeListIDs,
-                        onFitToList: onFitToList,
-                        onRename: {
-                            renameListText = list.name
-                            renamingList = list
-                        },
-                        onToggleAllVisibility: { makeAllActive in
-                            setProjectVisibility(makeAllActive)
-                        },
-                        onMoveToTopLevel: { unnestList(list) },
-                        onDelete: { requestDeleteList(list) },
-                        dragProvider: { beginItemDrag(item) }
-                    )
-                    .background { rowHeightReader(item.id) }
-                    .overlay { dropIndicator(for: item.id) }
-                    .onDrop(of: [.text, .fileURL, .image],
-                            delegate: SidebarRowDropDelegate(
-                                targetID: item.id,
-                                allowNest: true,
-                                height: { rowHeights[item.id] ?? 36 },
-                                onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
-                                onExit: { id in clearDropTarget(ifOwnedBy: id) },
-                                onPerform: { mode, providers in performRowDrop(target: .list(list), mode: mode, providers: providers) }
-                            ))
-
-                    if isExpanded {
-                        // Child lists (folders) shown before pins.
-                        let childLists = list.childLists
-                            .filter { $0.deletedAt == nil }
-                            .sorted {
-                                $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
-                            }.filter { !searching || nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) } }
-                        ForEach(childLists, id: \.persistentModelID) { child in
-                            childListRow(child, folder: list)
-                        }
-
-                        let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil })
-                            .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
-                        ForEach(Array(pins.enumerated()), id: \.element.persistentModelID) { idx, pin in
-                            PinRow(
-                                pin: pin,
-                                selection: selection,
-                                listColor: Color(hexString: list.colorHex),
-                                onTap: { shift, option in handleTap(pin.uuid, shift: shift, option: option) },
-                                onDoubleTap: { handleDoubleTap(pin.uuid) }
-                            )
-                            .padding(.leading, 24)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
-                            .contextMenu { pinContextMenu(pin) }
-                            .background { rowHeightReader(pin.persistentModelID) }
-                            .overlay { dropIndicator(for: pin.persistentModelID) }
-                            .onDrag { beginPhotoDrag("pin:\(pin.uuid.uuidString)") }
-                            // Use the drop delegate (like the other rows) so before/after
-                            // insertion lines show and reordering within the list works.
-                            .onDrop(of: [.text, .fileURL, .image],
-                                    delegate: SidebarRowDropDelegate(
-                                        targetID: pin.persistentModelID,
-                                        allowNest: false,
-                                        height: { rowHeights[pin.persistentModelID] ?? 60 },
-                                        onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
-                                        onExit: { id in clearDropTarget(ifOwnedBy: id) },
-                                        onPerform: { mode, providers in
-                                            reorderPinDrop(providers, list: list, target: pin,
-                                                           beforeNeighbor: idx > 0 ? pins[idx - 1] : nil,
-                                                           mode: mode)
-                                        }
-                                    ))
-                        }
-                    }
-                case .uncategorized(let proj):
-                    uncategorizedSection(proj, itemID: item.id)
-                }
+                sidebarRow(item)
             }
 
             trashSection
@@ -2174,8 +2203,8 @@ private struct ProjectDetailView: View {
             listProxyHolder?.scrollTo(pin.persistentModelID, anchor: nil)
         }
         .onChange(of: revealInListUUID) { _, uuid in
-            guard let uuid else { return }
-            revealPin(uuid)
+            guard let uuid, let target = revealPin(uuid) else { return }
+            scrollSidebar(to: target, using: listProxy)
         }
         } // VStack
         } // ScrollViewReader

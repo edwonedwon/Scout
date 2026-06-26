@@ -660,7 +660,8 @@ final class ZoomableMapView: MKMapView {
                 photo.layer?.zPosition = 100
                 photo.superview?.addSubview(photo)   // moves to last (topmost) sibling
             } else {
-                photo.layer?.zPosition = 0
+                // Restore the resting z — flagged photos stay floated above the rest.
+                photo.layer?.zPosition = photo.isFlagged ? 50 : 0
             }
         }
     }
@@ -1676,6 +1677,10 @@ struct ScoutMapView {
                     let selected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                     view.borderColor = selected ? .systemBlue : .clear
                     view.isFlagged = ann.location.isFlagged
+                    // Flagged photos float above other photos/pins (below hover=100 and the
+                    // user-location dot=10_000). displayPriority keeps them from being culled.
+                    view.layer?.zPosition = ann.location.isFlagged ? 50 : 0
+                    view.displayPriority = ann.location.isFlagged ? .required : .defaultHigh
                     view.setScale(scale)
                     view.configure(imageURL: ann.location.images.first?.url,
                                    rotationQuarterTurns: ann.location.images.first?.rotationQuarterTurns ?? 0)
@@ -1690,6 +1695,8 @@ struct ScoutMapView {
                     view.dotColor = ann.tintColor
                     view.isMultiSelected = (mapView as? ZoomableMapView)?.multiSelectedIDs.contains(ann.location.id) ?? false
                     view.isFlagged = ann.location.isFlagged
+                    view.layer?.zPosition = ann.location.isFlagged ? 50 : 0
+                    view.displayPriority = ann.location.isFlagged ? .required : .defaultHigh
                     view.setScale(scale)
                     if parent.controller.revealingPinIDs.contains(ann.location.id) {
                         view.reveal()
