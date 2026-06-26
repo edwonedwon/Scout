@@ -1971,6 +1971,13 @@ private struct ProjectDetailView: View {
                 ))
 
         if isExpanded {
+            // Script scenes assigned to this list — pinned at the TOP of the list (above photos
+            // and child lists). Click to jump to that spot in the script.
+            let scenes = list.sceneLinks.sorted { $0.rangeStart < $1.rangeStart }
+            ForEach(scenes, id: \.persistentModelID) { scene in
+                sceneRow(scene, color: Color(hexString: list.colorHex))
+            }
+
             // Child lists (folders) shown before pins.
             let childLists = list.childLists
                 .filter { $0.deletedAt == nil }
@@ -1985,12 +1992,6 @@ private struct ProjectDetailView: View {
                 .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
             ForEach(Array(pins.enumerated()), id: \.element.persistentModelID) { idx, pin in
                 expandedPinRow(pin, in: list, indexBefore: idx > 0 ? pins[idx - 1] : nil)
-            }
-
-            // Script scenes assigned to this list — click to jump to that spot in the script.
-            let scenes = list.sceneLinks.sorted { $0.rangeStart < $1.rangeStart }
-            ForEach(scenes, id: \.persistentModelID) { scene in
-                sceneRow(scene, color: Color(hexString: list.colorHex))
             }
         }
     }
@@ -2113,6 +2114,13 @@ private struct ProjectDetailView: View {
                 ))
 
         if childExpanded {
+            // Scene links pinned at the top of the child list too.
+            let scenes = child.sceneLinks.sorted { $0.rangeStart < $1.rangeStart }
+            ForEach(scenes, id: \.persistentModelID) { scene in
+                sceneRow(scene, color: Color(hexString: child.colorHex))
+                    .padding(.leading, 18)
+            }
+
             let childPins = flaggedFirst(child.pins.filter { $0.deletedAt == nil })
             ForEach(childPins) { pin in
                 PinRow(
