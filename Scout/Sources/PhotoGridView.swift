@@ -3,10 +3,15 @@ import ScoutKit
 
 struct PhotoGridView: View {
     /// THE shared selection store (sidebar + grid + map). Passed in by ContentView so a
-    /// selection made here shows up in the sidebar and on the map, and vice-versa. Held as a
-    /// plain `var` (the cells `@ObservedObject` it), so mutating it never re-runs the grid body
-    /// — which would otherwise recompute the full PhotoItem arrays on every click.
-    var selection: SelectionStore
+    /// selection made here shows up in the sidebar and on the map, and vice-versa.
+    ///
+    /// Observed at the grid level so the grid reliably repaints when the selection changes —
+    /// including changes made on the MAP. (Relying only on each cell's @ObservedObject failed
+    /// to update cells when the grid body itself never re-ran.) This is cheap because the
+    /// expensive display model is memoized by `inputSignature`, which deliberately does NOT
+    /// include the selection — so a selection change re-evaluates only the (lazy) view tree,
+    /// never `rebuildModel()`/the PhotoItem arrays.
+    @ObservedObject var selection: SelectionStore
     /// A named group of locations forming one visual section in the grid.
     struct Section {
         let title: String
@@ -231,14 +236,11 @@ struct PhotoGridView: View {
     private func selectItem(_ item: PhotoItem) {
         let allItems = model.allItems
         let id = item.location.id
-        #if os(macOS)
-        let shift = NSEvent.modifierFlags.contains(.shift)
-        let option = NSEvent.modifierFlags.contains(.option)
-        #else
-        // iOS has no keyboard modifiers during a tap; selection is single-tap only.
-        let shift = false
-        let option = false
-        #endif
+        // Read the modifiers snapshotted at mouse-DOWN (see ClickModifiers). Reading the live
+        // NSEvent.modifierFlags here is racy: the tap handler runs on mouse-UP / deferred, by
+        // which point Shift/Option may already be released — which is exactly why grid
+        // multi-select kept failing.
+        let (shift, option) = currentModifierFlags()
 
         if option {
             // Option: toggle this item in/out of a disparate selection.
@@ -255,8 +257,10 @@ struct PhotoGridView: View {
             // Plain click: single select.
             selection.ids = [id]
             selection.anchor = id
+            // Only update the single highlight (and thus the sidebar scroll-to) on a PLAIN
+            // click. Doing it for option/shift would churn `highlightedPinID` mid-multi-select.
+            onSelectLocation?(id)
         }
-        onSelectLocation?(id)
     }
 
     private func openCarousel(from item: PhotoItem) {
@@ -369,8 +373,13 @@ private struct MasonryCell: View {
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             #endif
         }
-        .onTapGesture(count: 2) { onDoubleTap?() }
+        // Single tap fires IMMEDIATELY (double-tap is a SEPARATE simultaneous gesture), so the
+        // modifier keys are still held when selectItem reads them. The old sequential
+        // .onTapGesture(count:2) + (count:1) made the single tap WAIT to rule out a double —
+        // by the time it fired, option/shift had been released, so every click fell through to
+        // plain single-select and multi-select didn't work. (Matches the sidebar's pattern.)
         .onTapGesture { onTap?() }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onDoubleTap?() })
         .if(item.isPinned) { view in
             view.onDrag(dragProvider, preview: {
                 if let url = item.image.url {

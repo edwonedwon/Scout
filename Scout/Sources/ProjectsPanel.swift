@@ -4,12 +4,39 @@ import ScoutKit
 import CoreLocation
 import UniformTypeIdentifiers
 
-/// Current keyboard modifier state, cross-platform. macOS reads live `NSEvent` flags;
-/// iOS has no equivalent during a tap, so both are false (single-tap behavior).
+#if os(macOS)
+/// Snapshots the modifier keys held at the instant of each left/right mouse-DOWN.
+///
+/// Why this exists: SwiftUI tap gestures fire on mouse-UP and are often DEFERRED (e.g. to
+/// disambiguate a possible double-tap). Reading the live global `NSEvent.modifierFlags` inside
+/// a tap handler therefore reads the state at an unpredictable later moment — if the user has
+/// released Shift/Option by then (which happens constantly with quick modifier-clicks), the
+/// click is misread as a plain click. That silently broke option/shift multi-select in the
+/// photo grid. A local mouse-DOWN monitor records the flags at the exact moment of the press,
+/// so tap handlers read what was actually held during the click — deterministically.
+final class ClickModifiers {
+    static let shared = ClickModifiers()
+    private(set) var shift = false
+    private(set) var option = false
+    private var monitor: Any?
+
+    /// Installs the global-to-app local monitor once. Safe to call repeatedly.
+    func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.shift = event.modifierFlags.contains(.shift)
+            self?.option = event.modifierFlags.contains(.option)
+            return event   // pass the event through unchanged
+        }
+    }
+}
+#endif
+
+/// Keyboard modifiers held during the most recent mouse-down — the correct thing to read in a
+/// (possibly deferred) tap handler. iOS has no equivalent during a tap, so both are false.
 func currentModifierFlags() -> (shift: Bool, option: Bool) {
     #if os(macOS)
-    let f = NSEvent.modifierFlags
-    return (f.contains(.shift), f.contains(.option))
+    return (ClickModifiers.shared.shift, ClickModifiers.shared.option)
     #else
     return (false, false)
     #endif
@@ -2031,9 +2058,12 @@ private struct ProjectDetailView: View {
         .onChange(of: scrollToPinUUID) { _, uuid in
             guard let uuid,
                   let pin = findPin(uuid: uuid) else { return }
-            // Select the row in the sidebar without scrolling or expanding lists.
-            selection.ids = [pin.uuid]
-            selection.anchor = pin.uuid
+            // Scroll the sidebar to this pin's row. Do NOT touch `selection` here: selection is
+            // now the shared store driven by actual selection actions (grid/map/sidebar clicks),
+            // and the sidebar rows already reflect it. Overwriting it with [pin.uuid] on every
+            // highlight change clobbered grid/map MULTI-select back to a single item — that was
+            // the long-standing "can't multi-select in the grid" bug.
+            listProxyHolder?.scrollTo(pin.persistentModelID, anchor: nil)
         }
         } // VStack
         } // ScrollViewReader

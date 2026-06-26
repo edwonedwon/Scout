@@ -15,6 +15,17 @@ import ScoutKit
 /// A reference type so it can be owned high up via plain @State and passed down without
 /// re-rendering the owner on every change. Only leaf rows/cells `@ObservedObject` it (and the
 /// map subscribes via Combine), so selecting thousands of items repaints just what's visible.
+///
+/// ⚠️ INVARIANT — DO NOT BREAK (this caused a long, painful multi-select bug):
+/// `ids` is mutated ONLY by deliberate selection actions: grid `selectItem`, sidebar
+/// `handleTap`/`moveSelection`, map option-click, and explicit clears (delete/move/dismiss).
+/// It must NEVER be overwritten as a side effect of a *highlight* change. The single-item
+/// highlight (`highlightedPinID`) and the map popover (`selectedLocation`) are SEPARATE concepts
+/// from this multi-selection set. A highlight may scroll a view or open a popover, but writing
+/// `selection.ids = [oneItem]` in response to a highlight change wipes an in-progress
+/// multi-select on every click. (That's exactly what the sidebar's `onChange(of:scrollToPinUUID)`
+/// used to do — it now only scrolls.) If you find a `selection.ids = [...]` reacting to a
+/// highlight/scroll/onChange rather than to a user's click, that's the bug — remove it.
 final class SelectionStore: ObservableObject {
     @Published var ids: Set<UUID> = []
     /// Anchor for shift-range selection (last single-clicked id).
@@ -215,6 +226,13 @@ struct ContentView: View {
 
     var body: some View {
         rootLayoutWithObservers
+            // Pin the window's size constraints to CONSTANTS so the window never auto-resizes
+            // because of internal content changes. A SwiftUI WindowGroup's default
+            // resizability makes the window track its content's MINIMUM size — so a transient
+            // change while the photo grid reloads (after an "m" move, etc.) was nudging the
+            // window's size. With a constant minimum and an unbounded, fill-to-window maximum,
+            // the content always adapts to the window instead of the other way around.
+            .frame(minWidth: 820, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
     }
 
     @ViewBuilder private var rootLayoutWithObservers: some View {
@@ -391,6 +409,11 @@ struct ContentView: View {
     }
 
     private func setupOnAppear() {
+        #if os(macOS)
+        // Start snapshotting modifier keys at mouse-down so option/shift multi-select works
+        // reliably regardless of when SwiftUI's (deferred) tap handlers actually fire.
+        ClickModifiers.shared.install()
+        #endif
         rebuildPinCaches()
         loadSavedRegions()   // restore this project's region filters
         // Always launch with the left projects panel open and the right search panel closed,
@@ -627,6 +650,14 @@ struct ContentView: View {
         .background {
             Button("") { mapController.toggleTracking() }
                 .keyboardShortcut("u", modifiers: [])
+                .opacity(0)
+                .allowsHitTesting(false)
+        }
+        // Delete key in grid/map mode: trash every selected photo. The sidebar has its own
+        // delete handler for when it's focused; this covers the center panel.
+        .background {
+            Button("", action: deleteSelectedPhotos)
+                .keyboardShortcut(.delete, modifiers: [])
                 .opacity(0)
                 .allowsHitTesting(false)
         }
@@ -1034,6 +1065,22 @@ struct ContentView: View {
     private func deletePinFromCarousel(_ loc: ScoutLocation) {
         guard let pin = allPins.first(where: { $0.uuid == loc.id }) else { return }
         pin.deletedAt = Date()
+        try? modelContext.save()
+        rebuildPinCaches()
+    }
+
+    /// Delete-key handler for the grid/map (center panel). The sidebar has its own delete
+    /// shortcut, but in grid/map mode the center panel is focused, so — exactly like the "m"
+    /// and "u" shortcuts — ContentView needs its own. Trashes EVERY selected photo (the whole
+    /// shared multi-selection), not just the highlighted one.
+    private func deleteSelectedPhotos() {
+        let ids = selection.ids
+        guard !ids.isEmpty else { return }
+        let pins = allPins.filter { ids.contains($0.uuid) && $0.deletedAt == nil }
+        guard !pins.isEmpty else { return }
+        let now = Date()
+        for pin in pins { pin.deletedAt = now }
+        selection.ids = []
         try? modelContext.save()
         rebuildPinCaches()
     }
