@@ -46,7 +46,10 @@ final class ScoutMapController: ObservableObject {
         // Always stop it explicitly first so the button icon stays in sync.
         // showsUserLocation is set ONCE in makeMap and NEVER touched here.
         // See: memory/project_scout_location_button.md
-        if mapView?.userTrackingMode != .none {
+        // Only act when the map exists AND is actually following. Note the explicit unwrap:
+        // `mapView?.userTrackingMode != .none` would compare the OPTIONAL against `nil`
+        // (Optional.none), not against MKUserTrackingMode.none — so it never checked the mode.
+        if let mode = mapView?.userTrackingMode, mode != .none {
             mapView?.setUserTrackingMode(.none, animated: false)
         }
         mapView?.setRegion(region, animated: animated)

@@ -319,6 +319,9 @@ private struct MasonryCell: View {
     }
 
     private func dragProvider() -> NSItemProvider {
+        // Tell the sidebar a PHOTO is being dragged, so list rows show "drop INTO" (no between-
+        // lists insertion line).
+        SidebarDragState.shared.kind = .photo
         let ids = actionIDs()
         let payload = ids.count == 1
             ? "photo:\(ids[0].uuidString)"

@@ -225,14 +225,17 @@ struct ContentView: View {
     }
 
     var body: some View {
-        rootLayoutWithObservers
-            // Pin the window's size constraints to CONSTANTS so the window never auto-resizes
-            // because of internal content changes. A SwiftUI WindowGroup's default
-            // resizability makes the window track its content's MINIMUM size — so a transient
-            // change while the photo grid reloads (after an "m" move, etc.) was nudging the
-            // window's size. With a constant minimum and an unbounded, fill-to-window maximum,
-            // the content always adapts to the window instead of the other way around.
-            .frame(minWidth: 820, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
+        // DECOUPLE window size from content size. A SwiftUI WindowGroup's default resizability
+        // tracks the content's measured min size, so a transient change during a photo-grid
+        // refresh (after an "m" move, etc.) was nudging the window. A root GeometryReader breaks
+        // that link: it reports only ITS OWN flexible size to the window and hands the content a
+        // concrete size — so nothing the content does internally can ever change the window's
+        // dimensions. The min floor is constant; macOS persists/restores the user's chosen size.
+        GeometryReader { geo in
+            rootLayoutWithObservers
+                .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .frame(minWidth: 820, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
     }
 
     @ViewBuilder private var rootLayoutWithObservers: some View {

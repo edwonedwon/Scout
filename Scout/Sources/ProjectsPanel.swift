@@ -42,6 +42,16 @@ func currentModifierFlags() -> (shift: Bool, option: Bool) {
     #endif
 }
 
+/// What the user is currently dragging, set at drag start. Lets the sidebar drop delegate decide
+/// whether a "between" (before/after) drop is meaningful: a PHOTO dropped on a list can only go
+/// INTO it (no insertion line), whereas a LIST can be reordered before/after another list.
+enum SidebarDragKind { case photo, list }
+final class SidebarDragState {
+    static let shared = SidebarDragState()
+    /// Defaults to `.list` so behavior is unchanged unless a photo drag explicitly sets `.photo`.
+    var kind: SidebarDragKind = .list
+}
+
 // MARK: - Finder drag helpers
 
 let imageExtensions: Set<String> = ["jpg","jpeg","png","heic","heif","tiff","tif","webp","gif","bmp","raw","arw","cr2","nef","dng"]
@@ -367,6 +377,12 @@ private enum SidebarItem: Identifiable {
         case .uncategorized: return "uncategorized"
         }
     }
+
+    /// Drag kind for SidebarDragState — photos suppress between-lists insertion lines.
+    var dragKind: SidebarDragKind {
+        if case .photo = self { return .photo }
+        return .list   // lists and the uncategorized pseudo-list reorder among top-level rows
+    }
 }
 
 // MARK: - Drag-to-reorder / nest
@@ -410,6 +426,14 @@ private struct SidebarRowDropDelegate: DropDelegate {
         let h = max(height(), 1)
         let y = info.location.y
         if allowNest {
+            // A PHOTO dragged onto a list can only be dropped INTO it — there's no meaningful
+            // "between lists" position for a photo — so highlight the whole row and never show a
+            // before/after insertion line. LIST drags keep the before/into/after zones so lists
+            // can still be reordered. (allowNest:false rows — pin rows — are unaffected: photos
+            // ARE reorderable among other photos there.)
+            #if os(macOS)
+            if SidebarDragState.shared.kind == .photo { return .into }
+            #endif
             if y < h * 0.30 { return .before }
             if y > h * 0.70 { return .after }
             return .into
@@ -819,6 +843,22 @@ private struct ProjectDetailView: View {
     /// Finds a list/folder anywhere in the project by its `uuid`.
     private func findList(uuid: UUID) -> LocationListData? {
         project.lists.first(where: { $0.uuid == uuid })
+    }
+
+    // Drag-start helpers. Each records the drag kind (so list rows can suppress the between-
+    // lists insertion line for photo drags) and returns the payload provider. Kept as small
+    // functions so the (already large) sidebar view body stays type-checkable.
+    private func beginItemDrag(_ item: SidebarItem) -> NSItemProvider {
+        SidebarDragState.shared.kind = item.dragKind
+        return NSItemProvider(object: item.dragID as NSString)
+    }
+    private func beginPhotoDrag(_ payload: String) -> NSItemProvider {
+        SidebarDragState.shared.kind = .photo
+        return NSItemProvider(object: payload as NSString)
+    }
+    private func beginListDrag(_ payload: String) -> NSItemProvider {
+        SidebarDragState.shared.kind = .list
+        return NSItemProvider(object: payload as NSString)
     }
 
     /// Removes a pin from wherever it currently lives (list or top-level).
@@ -1609,7 +1649,7 @@ private struct ProjectDetailView: View {
                 }
             }
             .contentShape(Rectangle())
-            .onDrag { NSItemProvider(object: "uncategorized" as NSString) }
+            .onDrag { beginListDrag("uncategorized") }
 
             Button {
                 let pid = proj.persistentModelID
@@ -1673,7 +1713,7 @@ private struct ProjectDetailView: View {
                         Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
                     }
                 }
-                .onDrag { NSItemProvider(object: "photo:\(pin.uuid.uuidString)" as NSString) }
+                .onDrag { beginPhotoDrag("photo:\(pin.uuid.uuidString)") }
                 .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
                     tryImportDrop(providers, into: nil) || loadDropPinToUncategorized(providers)
                 }
@@ -1725,7 +1765,7 @@ private struct ProjectDetailView: View {
             },
             onMoveToTopLevel: { unnestList(child) },
             onDelete: { requestDeleteList(child) },
-            dragProvider: { NSItemProvider(object: "list:\(child.uuid.uuidString)" as NSString) }
+            dragProvider: { beginListDrag("list:\(child.uuid.uuidString)") }
         )
         .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
         .padding(.leading, 18)
@@ -1810,7 +1850,7 @@ private struct ProjectDetailView: View {
                     }
                     .background { rowHeightReader(item.id) }
                     .overlay { dropIndicator(for: item.id) }
-                    .onDrag { NSItemProvider(object: item.dragID as NSString) }
+                    .onDrag { beginItemDrag(item) }
                     .onDrop(of: [.text, .fileURL, .image],
                             delegate: SidebarRowDropDelegate(
                                 targetID: item.id,
@@ -1852,7 +1892,7 @@ private struct ProjectDetailView: View {
                         },
                         onMoveToTopLevel: { unnestList(list) },
                         onDelete: { requestDeleteList(list) },
-                        dragProvider: { NSItemProvider(object: item.dragID as NSString) }
+                        dragProvider: { beginItemDrag(item) }
                     )
                     .background { rowHeightReader(item.id) }
                     .overlay { dropIndicator(for: item.id) }
@@ -1899,7 +1939,7 @@ private struct ProjectDetailView: View {
                                     Label(multi ? deleteSelectionLabel : "Delete Photo", systemImage: "trash")
                                 }
                             }
-                            .onDrag { NSItemProvider(object: "pin:\(pin.uuid.uuidString)" as NSString) }
+                            .onDrag { beginPhotoDrag("pin:\(pin.uuid.uuidString)") }
                             .onDrop(of: [.text, .fileURL, .image], isTargeted: nil) { providers in
                                 tryImportDrop(providers, into: list) || loadDropPin(providers, intoList: list, afterPin: pin)
                             }
