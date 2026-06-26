@@ -37,6 +37,22 @@ private struct RelinkProjectCommand: View {
 struct ScoutApp: App {
     @StateObject private var apiKeyState = APIKeyState.shared
 
+    /// Local-only store. Once the iCloud/CloudKit entitlement is present, SwiftData's default
+    /// `.modelContainer(for:)` AUTO-enables CloudKit — but the current model isn't CloudKit-
+    /// compatible (cascade delete rules, non-optional attributes), so the container failed to open
+    /// the existing store and the app launched empty. Pin `cloudKitDatabase: .none` to keep using
+    /// the local store until the deliberate Core Data + CloudKit migration (docs/collaboration-plan.md).
+    private let modelContainer: ModelContainer = {
+        let schema = Schema([ProjectData.self, LocationListData.self, PinnedLocationData.self,
+                             ScriptData.self, ScriptHighlight.self])
+        let config = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
+        do {
+            return try ModelContainer(for: schema, configurations: config)
+        } catch {
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }()
+
     var body: some Scene {
         WindowGroup {
             // No onboarding gate — open straight into the app. The Anthropic key (and any
@@ -44,7 +60,7 @@ struct ScoutApp: App {
             ContentView()
         }
         .environmentObject(apiKeyState)
-        .modelContainer(for: [ProjectData.self, LocationListData.self, PinnedLocationData.self, ScriptData.self, ScriptHighlight.self])
+        .modelContainer(modelContainer)
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         #endif
