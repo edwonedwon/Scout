@@ -500,6 +500,8 @@ private struct ProjectDetailView: View {
     @State private var renameListText = ""
     @State private var isBackfilling = false
     @State private var showMovePopup = false
+    /// The list whose scene-type popover is open (anchored to its row), or nil. Set by pressing "e".
+    @State private var sceneTypeEditID: UUID? = nil
     @State private var searchText = ""
     @State private var importProgress: (current: Int, total: Int)? = nil
     @State private var timelineProgress: (current: Int, total: Int, name: String)? = nil
@@ -867,6 +869,12 @@ private struct ProjectDetailView: View {
             if let p = list.pins.first(where: { $0.uuid == uuid }) { return p }
         }
         return nil
+    }
+
+    /// Lists currently selected in the sidebar (the shared selection holds list uuids too),
+    /// excluding trashed lists. Drives the "e" scene-type shortcut.
+    private var selectedLists: [LocationListData] {
+        selection.ids.compactMap { findList(uuid: $0) }.filter { $0.deletedAt == nil }
     }
 
     /// Finds a list/folder anywhere in the project by its `uuid`.
@@ -1956,7 +1964,8 @@ private struct ProjectDetailView: View {
             },
             onMoveToTopLevel: { unnestList(list) },
             onDelete: { requestDeleteList(list) },
-            dragProvider: { beginItemDrag(item) }
+            dragProvider: { beginItemDrag(item) },
+            sceneTypeEditID: $sceneTypeEditID
         )
         .background { rowHeightReader(item.id) }
         .overlay { dropIndicator(for: item.id) }
@@ -2087,7 +2096,8 @@ private struct ProjectDetailView: View {
             },
             onMoveToTopLevel: { unnestList(child) },
             onDelete: { requestDeleteList(child) },
-            dragProvider: { beginListDrag("list:\(child.uuid.uuidString)") }
+            dragProvider: { beginListDrag("list:\(child.uuid.uuidString)") },
+            sceneTypeEditID: $sceneTypeEditID
         )
         .listRowInsets(EdgeInsets(top: 0, leading: 18, bottom: 0, trailing: 0))
         .padding(.leading, 18)
@@ -2347,6 +2357,21 @@ private struct ProjectDetailView: View {
         } // ScrollViewReader
         .onKeyPress(.downArrow) { moveSelection(1); return .handled }
         .onKeyPress(.upArrow)   { moveSelection(-1); return .handled }
+        // "e" with a list selected: open the scene-type chooser as a popover anchored to the row.
+        // Lives here (not as a global keyboardShortcut) so a focused text field consumes "e"
+        // normally — only fires when the sidebar itself has keyboard focus.
+        .onKeyPress(KeyEquivalent("e")) {
+            guard let target = selectedLists.first else { return .ignored }
+            sceneTypeEditID = target.uuid
+            return .handled
+        }
+        // Enter with a list selected: rename it (reuses the row's rename flow).
+        .onKeyPress(.return) {
+            guard let target = selectedLists.first else { return .ignored }
+            renameListText = target.name
+            renamingList = target
+            return .handled
+        }
         // Hidden M key button — opens Move popup when sidebar pins are selected.
         .background {
             Button("") {
@@ -2542,6 +2567,9 @@ private struct ListRow: View {
     /// Supply a drag provider to make the name area a drag handle. Buttons are
     /// excluded so accidental drag on chevron/eye never triggers a reorder.
     var dragProvider: (() -> NSItemProvider)? = nil
+    /// Which list's scene-type popover is open (shared across rows); the popover anchors to the
+    /// row whose `list.uuid` matches. Set by clicking the chip or the panel's "e" shortcut.
+    var sceneTypeEditID: Binding<UUID?>? = nil
     @Environment(\.modelContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
@@ -2561,41 +2589,63 @@ private struct ListRow: View {
             || list.childLists.filter { $0.deletedAt == nil }.contains { hasFlagged($0) }
     }
 
-    private var sceneTypeBinding: Binding<String?> {
+    /// Scene-type chip: a fixed-size dark-grey rectangle with a light-grey border. Click (or press
+    /// "e" with the list selected) opens the None / INT / EXT / INT/EXT chooser as a popover
+    /// anchored here. "INT/EXT" is stacked (INT over EXT) so the chip stays compact and its width
+    /// never changes with the choice; unset shows a dimmed "INT/EXT" placeholder. It's a plain
+    /// Button (not a Menu) because `.menuStyle(.borderlessButton)` ignored the label's font/frame/
+    /// border — so the stacked text and outline weren't rendering.
+    private var sceneTypeMenu: some View {
+        Button {
+            sceneTypeEditID?.wrappedValue = list.uuid
+        } label: {
+            sceneTypeLabel
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: sceneTypePopoverBinding, arrowEdge: .top) {
+            SceneTypePickerSheet(
+                current: list.sceneType,
+                onPick: { newType in
+                    list.sceneType = newType
+                    try? modelContext.save()
+                    sceneTypeEditID?.wrappedValue = nil
+                },
+                onDismiss: { sceneTypeEditID?.wrappedValue = nil }
+            )
+        }
+    }
+
+    /// True when this row is the scene-type edit target (drives its popover).
+    private var sceneTypePopoverBinding: Binding<Bool> {
         Binding(
-            get: { list.sceneType },
-            set: { list.sceneType = $0; try? modelContext.save() }
+            get: { sceneTypeEditID?.wrappedValue == list.uuid },
+            set: { if !$0 { sceneTypeEditID?.wrappedValue = nil } }
         )
     }
 
-    /// Small grey scene-type label. Click → menu of None / INT / EXT / INT/EXT (arrow keys +
-    /// Enter to choose). Shows a faint tag when unset.
-    private var sceneTypeMenu: some View {
-        Menu {
-            Picker("Scene Type", selection: sceneTypeBinding) {
-                Text("None").tag(String?.none)
-                Text("INT").tag(String?.some("INT"))
-                Text("EXT").tag(String?.some("EXT"))
-                Text("INT/EXT").tag(String?.some("INT/EXT"))
-            }
-            .pickerStyle(.inline)
-        } label: {
-            Group {
-                if let t = list.sceneType {
-                    Text(t).font(.caption2.weight(.semibold))
-                } else {
-                    Image(systemName: "tag").font(.caption2)
+    @ViewBuilder
+    private var sceneTypeLabel: some View {
+        let isStacked = (list.sceneType == nil || list.sceneType == "INT/EXT")
+        // Placeholder (unset) is dimmer than a set value, but still visible in dark mode.
+        let textColor = list.sceneType == nil ? Color(white: 0.6) : Color(white: 0.95)
+        Group {
+            if isStacked {
+                // INT over EXT, each at ~half height so the pair stacks within a single line.
+                VStack(spacing: -2) {
+                    Text("INT")
+                    Text("EXT")
                 }
+                .font(.system(size: 7, weight: .bold))
+            } else {
+                Text(list.sceneType ?? "")
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .foregroundStyle(.secondary)
-            .opacity(list.sceneType == nil ? 0.5 : 1)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .background(Capsule().fill(Color.secondary.opacity(0.15)))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .lineLimit(1)
+        .foregroundStyle(textColor)
+        .frame(width: 34, height: 22)
+        .background(RoundedRectangle(cornerRadius: 3).fill(Color(white: 0.32)))
+        .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color(white: 0.72), lineWidth: 1))
     }
 
     var body: some View {
@@ -2611,31 +2661,30 @@ private struct ListRow: View {
             }
             .buttonStyle(.plain)
 
-            // Drag handle: only the icon + name initiate a reorder drag, keeping interactive
-            // controls (scene-type menu, eye) out so they don't trigger accidental drags.
-            HStack(spacing: 6) {
-                if isFolder {
-                    Image(systemName: isExpanded ? "folder.fill" : "folder")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 10)
-                } else {
-                    Circle()
-                        .fill(listColor)
-                        .frame(width: 10, height: 10)
-                        .padding(.trailing, 3)
-                }
-                Text(list.name)
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
+            // Color dot (or folder icon).
+            if isFolder {
+                Image(systemName: isExpanded ? "folder.fill" : "folder")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 10)
+            } else {
+                Circle()
+                    .fill(listColor)
+                    .frame(width: 10, height: 10)
             }
-            .contentShape(Rectangle())
-            .modifier(OptionalDrag(provider: dragProvider))
 
-            // Screenplay scene type (INT / EXT / INT/EXT), pickable via menu. Outside the drag
-            // handle so clicking it opens the menu rather than starting a drag.
+            // Screenplay scene type (INT / EXT / INT/EXT), pickable via menu. Sits between the
+            // dot and the title. Kept out of the drag handle so a click opens the menu rather
+            // than starting a reorder drag.
             sceneTypeMenu
+
+            // Drag handle: the list name initiates a reorder drag.
+            Text(list.name)
+                .font(.body)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .contentShape(Rectangle())
+                .modifier(OptionalDrag(provider: dragProvider))
 
             Spacer()
 
@@ -3080,6 +3129,63 @@ struct MoveToListSheet: View {
     private func commit() {
         guard highlighted < filtered.count else { return }
         onMove(filtered[highlighted])
+    }
+}
+
+/// Compact, keyboard-navigable scene-type chooser (None / INT / EXT / INT/EXT). Opened by pressing
+/// "e" with a list selected; ↑/↓ to move, Return to apply, Esc to cancel.
+struct SceneTypePickerSheet: View {
+    let current: String?
+    let onPick: (String?) -> Void
+    let onDismiss: () -> Void
+
+    private let options: [String?] = [nil, "INT", "EXT", "INT/EXT"]
+    @State private var highlighted = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Scene Type")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+            Divider()
+            VStack(spacing: 2) {
+                ForEach(options.indices, id: \.self) { idx in
+                    let opt = options[idx]
+                    let isHi = idx == highlighted
+                    HStack(spacing: 8) {
+                        Text(opt ?? "None").font(.subheadline)
+                        Spacer()
+                        if current == opt {
+                            Image(systemName: "checkmark").font(.caption2).foregroundStyle(.secondary)
+                        }
+                        if isHi {
+                            Image(systemName: "return").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(isHi ? Color.accentColor.opacity(0.15) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 6))
+                    .contentShape(Rectangle())
+                    .onTapGesture { onPick(opt) }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .frame(width: 220)
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            Button("") { move(1) }.keyboardShortcut(.downArrow, modifiers: []).opacity(0).allowsHitTesting(false)
+            Button("") { move(-1) }.keyboardShortcut(.upArrow, modifiers: []).opacity(0).allowsHitTesting(false)
+            Button("") { onPick(options[highlighted]) }.keyboardShortcut(.return, modifiers: []).opacity(0).allowsHitTesting(false)
+            Button("") { onDismiss() }.keyboardShortcut(.escape, modifiers: []).opacity(0).allowsHitTesting(false)
+        }
+        .onAppear { highlighted = options.firstIndex(where: { $0 == current }) ?? 0 }
+    }
+
+    private func move(_ delta: Int) {
+        highlighted = (highlighted + delta + options.count) % options.count
     }
 }
 
