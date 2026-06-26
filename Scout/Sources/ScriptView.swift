@@ -23,6 +23,15 @@ struct ScriptView: View {
                     scrollTarget: scrollTarget,
                     onAssign: onAssign
                 )
+                .overlay(alignment: .bottom) {
+                    Text("Select text and press  M  to assign it to a list")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.45))
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(.bottom, 10)
+                        .allowsHitTesting(false)
+                }
                 #else
                 ScrollView { Text(script.rawText).font(.system(.body, design: .monospaced)).padding() }
                 #endif
