@@ -10,6 +10,8 @@ struct ScriptView: View {
     let script: ScriptData?
     /// Called with the selected character range (into rawText) when the user presses `m`.
     var onAssign: ((NSRange) -> Void)? = nil
+    /// Called to create a new list and assign the range to it (right-click menu).
+    var onAssignNewList: ((NSRange) -> Void)? = nil
     /// When set, the view scrolls to & selects this range (used by "open scene from a list").
     var scrollTarget: NSRange? = nil
 
@@ -21,7 +23,8 @@ struct ScriptView: View {
                     text: script.rawText,
                     highlights: Self.highlightRanges(for: script),
                     scrollTarget: scrollTarget,
-                    onAssign: onAssign
+                    onAssign: onAssign,
+                    onAssignNewList: onAssignNewList
                 )
                 .overlay(alignment: .bottom) {
                     Text("Select text and press  M  to assign it to a list")
@@ -75,6 +78,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
     let highlights: [(NSRange, NSColor)]
     var scrollTarget: NSRange?
     var onAssign: ((NSRange) -> Void)?
+    var onAssignNewList: ((NSRange) -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -95,6 +99,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         tv.autoresizingMask = [.width]
         tv.textContainer?.widthTracksTextView = true
         tv.onAssign = onAssign
+        tv.onAssignNewList = onAssignNewList
 
         scroll.documentView = tv
         context.coordinator.textView = tv
@@ -105,6 +110,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let tv = scroll.documentView as? ScriptNSTextView else { return }
         tv.onAssign = onAssign
+        tv.onAssignNewList = onAssignNewList
         if context.coordinator.needsRender(text: text, highlights: highlights) {
             context.coordinator.render(text, highlights: highlights)
         }
@@ -150,9 +156,10 @@ struct ScriptTextRepresentable: NSViewRepresentable {
 }
 
 /// NSTextView that turns a plain `m` keypress (with a selection) into an "assign" callback,
-/// and offers the same action via a right-click menu.
+/// and offers the same actions via a right-click menu.
 final class ScriptNSTextView: NSTextView {
     var onAssign: ((NSRange) -> Void)?
+    var onAssignNewList: ((NSRange) -> Void)?
 
     override func keyDown(with event: NSEvent) {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -181,16 +188,23 @@ final class ScriptNSTextView: NSTextView {
         }
         guard range.length > 0 else { return nil }
         let menu = NSMenu()
-        let item = NSMenuItem(title: "Assign highlight to list",
-                              action: #selector(assignFromMenu), keyEquivalent: "")
-        item.target = self
-        menu.addItem(item)
+        let assign = NSMenuItem(title: "Assign to list", action: #selector(assignFromMenu), keyEquivalent: "")
+        assign.target = self
+        menu.addItem(assign)
+        let newList = NSMenuItem(title: "Create new list and assign", action: #selector(assignNewListFromMenu), keyEquivalent: "")
+        newList.target = self
+        menu.addItem(newList)
         return menu
     }
 
     @objc private func assignFromMenu() {
         let r = selectedRange()
         if r.length > 0 { onAssign?(r) }
+    }
+
+    @objc private func assignNewListFromMenu() {
+        let r = selectedRange()
+        if r.length > 0 { onAssignNewList?(r) }
     }
 }
 

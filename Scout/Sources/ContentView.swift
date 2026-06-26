@@ -261,6 +261,9 @@ struct ContentView: View {
     /// The script text range awaiting a list assignment (set when `m` is pressed in Script mode).
     @State private var pendingScriptRange: NSRange? = nil
     @State private var showScriptListPicker = false
+    /// New-list-and-assign flow from the Script view's right-click menu.
+    @State private var showScriptNewListSheet = false
+    @State private var scriptNewListName = ""
     /// When set, the Script view scrolls to & selects this range (jump-to-scene from a list).
     @State private var scriptScrollTarget: NSRange? = nil
 
@@ -722,6 +725,7 @@ struct ContentView: View {
                 .zIndex(10)
             ScriptView(script: activeScript,
                        onAssign: { range in beginScriptAssign(range) },
+                       onAssignNewList: { range in beginScriptAssignNewList(range) },
                        scrollTarget: scriptScrollTarget)
                 .opacity(viewMode == .script ? 1 : 0)
                 .allowsHitTesting(viewMode == .script)
@@ -821,6 +825,16 @@ struct ContentView: View {
                     onDismiss: { showScriptListPicker = false; pendingScriptRange = nil }
                 )
             }
+        }
+        // Script mode: create a new list and assign the highlighted section to it.
+        .sheet(isPresented: $showScriptNewListSheet, onDismiss: { pendingScriptRange = nil }) {
+            NameEntrySheet(
+                title: "New List for Scene",
+                placeholder: "List name",
+                text: $scriptNewListName,
+                confirmLabel: "Create & Assign",
+                onDismiss: { showScriptNewListSheet = false; pendingScriptRange = nil }
+            ) { name in createListAndAssignScene(named: name) }
         }
         .overlay(alignment: .top) {
             HStack {
@@ -1229,6 +1243,32 @@ struct ContentView: View {
     private func beginScriptAssign(_ range: NSRange) {
         pendingScriptRange = range
         showScriptListPicker = true
+    }
+
+    /// Right-click "Create new list and assign" → prompt for a name (pre-filled with the scene
+    /// heading), make the list, and assign the range to it.
+    private func beginScriptAssignNewList(_ range: NSRange) {
+        pendingScriptRange = range
+        scriptNewListName = activeScript.flatMap {
+            FountainParser.sceneHeading(in: $0.rawText, before: range.location)
+        } ?? ""
+        showScriptNewListSheet = true
+    }
+
+    /// Creates a new list in the open project and assigns the pending script range to it.
+    private func createListAndAssignScene(named name: String) {
+        defer { showScriptNewListSheet = false }
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let project = openProject else { return }
+        let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
+        let list = LocationListData(name: trimmed, colorHex: colorHex)
+        // New list at the top (matches the sidebar's "New List").
+        for existing in project.lists { existing.panelOrder += 1 }
+        project.importedPhotos.forEach { $0.panelOrder += 1 }
+        list.panelOrder = 0
+        modelContext.insert(list)
+        list.project = project
+        assignScriptSelection(to: list)   // creates the highlight + saves
     }
 
     /// Creates a ScriptHighlight linking the pending script range to the chosen list.
