@@ -56,6 +56,11 @@ struct BackupList: Codable {
     var sortOrder: Int
     var panelOrder: Int
     var pins: [BackupPin]
+    /// Optional fields (added later — nil when decoding older backups).
+    var sceneType: String? = nil
+    var deletedAt: Date? = nil
+    /// Nested child lists (folders), recursively. Older backups omit this (flat).
+    var childLists: [BackupList]? = nil
 }
 
 struct BackupPin: Codable {
@@ -81,6 +86,8 @@ struct BackupPin: Codable {
     var sourceURLString: String?
     var googleMapsURLString: String?
     var imageURL: String?
+    /// Trash state — preserved so importing is lossless (older backups omit it → nil = not trashed).
+    var deletedAt: Date? = nil
 }
 
 // MARK: - Service
@@ -99,8 +106,13 @@ enum BackupService {
         try fm.createDirectory(at: photosDir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: tmp) }
 
-        // --- Collect all pins for this project ---
-        let allPins = project.lists.flatMap(\.pins) + project.importedPhotos
+        // --- Collect all pins for this project (recursing nested lists) ---
+        func descendants(_ list: LocationListData) -> [LocationListData] {
+            [list] + list.childLists.flatMap(descendants)
+        }
+        let topLevelLists = project.lists.filter { $0.parentList == nil }
+        let everyList = topLevelLists.flatMap(descendants)
+        let allPins = everyList.flatMap(\.pins) + project.importedPhotos
 
         // --- Copy thumbnail files only (not full-res photoFiles) ---
         // Full-res photoFiles are 2048px JPEGs that dominate export size.
@@ -127,7 +139,9 @@ enum BackupService {
             lists: [],
             importedPhotos: []
         )
-        for list in project.lists.sorted(by: { $0.panelOrder < $1.panelOrder }) {
+        // Only top-level lists here; backupList recurses childLists so the hierarchy is preserved
+        // and each list is written exactly once.
+        for list in topLevelLists.sorted(by: { $0.panelOrder < $1.panelOrder }) {
             bp.lists.append(backupList(list))
         }
         for pin in project.importedPhotos.sorted(by: { $0.panelOrder < $1.panelOrder }) {
@@ -221,14 +235,18 @@ enum BackupService {
         // Original backup list-uuid → freshly created list, so script scene-links can be re-tied.
         var listsByOriginalUUID: [UUID: LocationListData] = [:]
 
-        func insertList(_ bl: BackupList, project: ProjectData?) -> LocationListData {
+        @discardableResult
+        func insertList(_ bl: BackupList, project: ProjectData?, parent: LocationListData? = nil) -> LocationListData {
             var fresh = bl; fresh.uuid = UUID()
             let list = LocationListData.fromBackup(fresh)
             context.insert(list)
             list.project = project
+            list.parentList = parent
             listsByOriginalUUID[bl.uuid] = list
             summary.listsAdded += 1
             for bp in bl.pins { insertPin(bp, list: list, project: nil) }
+            // Recurse nested folders, chaining each child to this list.
+            for child in (bl.childLists ?? []) { insertList(child, project: project, parent: list) }
             return list
         }
 
@@ -347,7 +365,8 @@ enum BackupService {
             googlePlaceId: pin.googlePlaceId,
             sourceURLString: pin.sourceURLString,
             googleMapsURLString: pin.googleMapsURLString,
-            imageURL: pin.imageURL
+            imageURL: pin.imageURL,
+            deletedAt: pin.deletedAt
         )
     }
 
@@ -359,7 +378,11 @@ enum BackupService {
             createdAt: list.createdAt,
             sortOrder: list.sortOrder,
             panelOrder: list.panelOrder,
-            pins: list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }).map(backupPin)
+            pins: list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }).map(backupPin),
+            sceneType: list.sceneType,
+            deletedAt: list.deletedAt,
+            // Recurse nested folders so the full hierarchy is preserved.
+            childLists: list.childLists.sorted(by: { $0.panelOrder < $1.panelOrder }).map(backupList)
         )
     }
 
@@ -453,6 +476,7 @@ extension PinnedLocationData {
         pin.sourceURLString  = b.sourceURLString
         pin.googleMapsURLString = b.googleMapsURLString
         pin.imageURL         = b.imageURL
+        pin.deletedAt        = b.deletedAt
         // originalFilePath is left nil — user relinks after import.
         return pin
     }
@@ -465,6 +489,8 @@ extension LocationListData {
         list.createdAt  = b.createdAt
         list.sortOrder  = b.sortOrder
         list.panelOrder = b.panelOrder
+        list.sceneType  = b.sceneType
+        list.deletedAt  = b.deletedAt
         return list
     }
 }
