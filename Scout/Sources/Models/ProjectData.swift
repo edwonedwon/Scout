@@ -7,9 +7,11 @@ import ScoutKit
 
 @Model
 final class ProjectData {
-    var name: String
-    var notes: String
-    var createdAt: Date
+    // Defaults on every non-optional attribute: CloudKit requires it (records can omit fields).
+    // Adding a default doesn't change the stored type, so it's not a store migration.
+    var name: String = ""
+    var notes: String = ""
+    var createdAt: Date = Date()
     var uuid: UUID = UUID()
     /// Sidebar order of the virtual "Uncategorized" row, in the same namespace as each
     /// top-level list's panelOrder. Lets Uncategorized be dragged among the lists.
@@ -33,13 +35,13 @@ final class ProjectData {
 @Model
 final class ScriptData {
     /// Display name (the imported filename without extension).
-    var name: String
+    var name: String = ""
     /// Full `.fountain` source text, copied into the store so it syncs (files are small).
-    var rawText: String
+    var rawText: String = ""
     var uuid: UUID = UUID()
-    var importedAt: Date
+    var importedAt: Date = Date()
     /// Bumped whenever a newer version is imported over this script.
-    var updatedAt: Date
+    var updatedAt: Date = Date()
     /// Order within the sidebar "Scripts" section.
     var sortOrder: Int = 0
     var project: ProjectData?
@@ -61,17 +63,17 @@ final class ScriptData {
 final class ScriptHighlight {
     var uuid: UUID = UUID()
     /// Character offset + length into the owning script's `rawText`.
-    var rangeStart: Int
-    var rangeLength: Int
+    var rangeStart: Int = 0
+    var rangeLength: Int = 0
     /// The highlighted text itself — the durable anchor used to re-locate the highlight when a
     /// newer version of the script is imported.
-    var excerpt: String
+    var excerpt: String = ""
     /// Short surrounding text, to disambiguate when the excerpt appears more than once.
-    var contextBefore: String
-    var contextAfter: String
+    var contextBefore: String = ""
+    var contextAfter: String = ""
     /// Nearest preceding scene heading, for display and matching.
     var sceneHeading: String?
-    var createdAt: Date
+    var createdAt: Date = Date()
     var script: ScriptData?
     /// The list this script section is assigned to (the location for this scene/part).
     var list: LocationListData?
@@ -92,9 +94,9 @@ final class ScriptHighlight {
 
 @Model
 final class LocationListData {
-    var name: String
-    var colorHex: String
-    var createdAt: Date
+    var name: String = ""
+    var colorHex: String = LocationListData.palette[0]
+    var createdAt: Date = Date()
     var uuid: UUID = UUID()
     var sortOrder: Int = 0
     /// Order within the project panel sidebar (shared namespace with importedPhotos).
@@ -145,12 +147,12 @@ final class LocationListData {
 
 @Model
 final class PinnedLocationData {
-    var name: String
-    var notes: String
-    var latitude: Double
-    var longitude: Double
-    var statusRaw: String
-    var createdAt: Date
+    var name: String = ""
+    var notes: String = ""
+    var latitude: Double = 0
+    var longitude: Double = 0
+    var statusRaw: String = ""
+    var createdAt: Date = Date()
     var uuid: UUID = UUID()
     var sortOrder: Int = 0
     /// Order within the project panel sidebar (shared namespace with lists).
