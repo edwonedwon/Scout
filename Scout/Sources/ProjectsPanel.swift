@@ -517,6 +517,12 @@ private struct ProjectDetailView: View {
     // Whether the current drag will reorder (line before/after the row) or nest into a list
     // (the whole row highlights). Decided from the cursor's vertical position within the row.
     @State private var dropMode: DropMode = .before
+    // Watchdog that clears the drop indicator shortly after drag activity stops — covers drags
+    // that end outside any row (or are cancelled), where SwiftUI doesn't fire dropExited and the
+    // mouse-up that ends a drag session isn't seen by the event monitor. Each drop update resets
+    // it; AppKit fires periodic drag updates while a drag is live, so it only triggers once the
+    // drag has actually ended.
+    @State private var dropClearWork: DispatchWorkItem? = nil
     // Measured heights per row so the drop delegate can map cursor-Y to a drop zone.
     @State private var rowHeights: [PersistentIdentifier: CGFloat] = [:]
     // macOS mouse-event monitor that clears a stuck drop indicator. SwiftUI's DropDelegate
@@ -1536,6 +1542,12 @@ private struct ProjectDetailView: View {
     private func setDropTarget(_ id: PersistentIdentifier?, mode: DropMode) {
         if dropTargetID != id { dropTargetID = id }
         if dropMode != mode { dropMode = mode }
+        // Re-arm the watchdog on every drag update; it fires only after updates stop (drag ended).
+        dropClearWork?.cancel()
+        guard id != nil else { return }
+        let work = DispatchWorkItem { dropTargetID = nil; dropMode = .before }
+        dropClearWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
     /// Clears the drag highlight only if `id` is still the active target (see onExit docs).
