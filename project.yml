@@ -10,6 +10,9 @@ options:
 packages:
   ScoutKit:
     path: ScoutKit
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: "0.9.19"
 
 targets:
   Scout:
@@ -27,6 +30,7 @@ targets:
         buildPhase: resources
     dependencies:
       - package: ScoutKit
+      - package: ZIPFoundation
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cutetech.scout
@@ -47,10 +51,7 @@ targets:
     entitlements:
       path: Scout/Scout.entitlements
       properties:
-        # Sandbox disabled: this is a personal-use debug build (not App Store).
-        # The sandbox blocked Process from spawning /usr/bin/zip, breaking
-        # backup export/import. Re-enable + use a zip library before any release.
-        com.apple.security.app-sandbox: false
+        com.apple.security.app-sandbox: true
         com.apple.security.personal-information.location: true
         com.apple.security.network.client: true
         # iCloud + CloudKit (project sharing / real-time sync — docs/collaboration-plan.md).

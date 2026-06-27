@@ -2,6 +2,9 @@ import Foundation
 import CoreData
 import CoreLocation
 import ScoutKit
+#if os(macOS)
+import ZIPFoundation
+#endif
 
 // MARK: - Backup manifest (Codable mirror of the SwiftData models)
 
@@ -487,32 +490,27 @@ enum BackupService {
         return f.string(from: Date())
     }
 
-    // MARK: - Zip / unzip via /usr/bin/zip
-    // Works in debug (non-sandboxed) builds. If sandbox is ever re-enabled,
-    // replace with a proper zip library (e.g. ZipFoundation).
+    // MARK: - Zip / unzip via ZIPFoundation (sandbox-safe)
 
     #if os(macOS)
     private static func zip(sourceDir: URL, to dest: URL) throws {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-        proc.arguments = ["-r", dest.path, "."]
-        proc.currentDirectoryURL = sourceDir
-        try proc.run()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
-            throw BackupError.zipFailed(proc.terminationStatus)
+        let archive = try Archive(url: dest, accessMode: .create)
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: sourceDir, includingPropertiesForKeys: nil) else {
+            throw BackupError.zipFailed(0)
+        }
+        for case let fileURL as URL in enumerator {
+            var isDir: ObjCBool = false
+            fm.fileExists(atPath: fileURL.path, isDirectory: &isDir)
+            guard !isDir.boolValue else { continue }
+            let relative = fileURL.path.replacingOccurrences(of: sourceDir.path + "/", with: "")
+            try archive.addEntry(with: relative, fileURL: fileURL)
         }
     }
 
-    private static func unzip(archive: URL, to dest: URL) throws {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        proc.arguments = ["-o", archive.path, "-d", dest.path]
-        try proc.run()
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
-            throw BackupError.unzipFailed(proc.terminationStatus)
-        }
+    private static func unzip(archive url: URL, to dest: URL) throws {
+        try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
+        try FileManager.default.unzipItem(at: url, to: dest)
     }
     #else
     private static func zip(sourceDir: URL, to dest: URL) throws {
