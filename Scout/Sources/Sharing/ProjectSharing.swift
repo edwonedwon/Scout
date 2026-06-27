@@ -30,8 +30,14 @@ enum ProjectSharing {
         macDelegate = delegate
         let picker = NSSharingServicePicker(items: [share])
         picker.delegate = delegate
-        let rect = NSRect(x: anchor.bounds.midX, y: anchor.bounds.maxY - 1, width: 1, height: 1)
-        picker.show(relativeTo: rect, of: anchor, preferredEdge: .minY)
+        // Anchor near the top-right (where the collaboration button lives) and drop downward.
+        // SwiftUI's hosting view is flipped (y=0 at top), so account for both orientations:
+        // the "top" edge is minY when flipped, maxY otherwise, and we drop from the matching edge.
+        let flipped = anchor.isFlipped
+        let topY = flipped ? anchor.bounds.minY + 4 : anchor.bounds.maxY - 4
+        let edge: NSRectEdge = flipped ? .maxY : .minY
+        let rect = NSRect(x: anchor.bounds.maxX - 80, y: topY, width: 1, height: 1)
+        picker.show(relativeTo: rect, of: anchor, preferredEdge: edge)
     }
     #else
     @MainActor
