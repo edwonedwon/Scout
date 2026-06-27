@@ -3,8 +3,14 @@ import SwiftData
 
 /// Debug tool: dumps EVERY record in the store and flags the ones that aren't reachable from a
 /// live project (i.e. exist in the data but never show in the UI — "orphans", e.g. lists/pins left
-/// behind by a deleted project). Compare against what you see in the sidebar, then delete the
-/// orphans. Read-only except for the explicit "Delete orphans" action.
+/// behind by a deleted project). Compare against the sidebar, then delete the orphans.
+///
+/// CRASH-SAFETY: a deleted project leaves dangling to-one references on its orphans
+/// (`list.project`, `pin.owningProject`). Reading an invalidated SwiftData instance hard-crashes
+/// ("backing data could no longer be found in the store"). So we do ALL relationship traversal in
+/// a single pass over the LIVE project graph (every object there is valid) to build reachable-id
+/// sets + display strings, then classify each record by ID membership only. We never dereference
+/// an individual record's own to-one relationship.
 struct DataInspectorView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
@@ -18,73 +24,88 @@ struct DataInspectorView: View {
     @State private var onlyOrphans = false
     @State private var showDeleteConfirm = false
 
-    // MARK: - Reachability (what the UI actually shows)
-
-    /// Lists reachable from a live project (walking childLists), keyed by id.
-    private var liveListIDs: Set<PersistentIdentifier> {
-        var ids = Set<PersistentIdentifier>()
-        func walk(_ ls: [LocationListData]) { for l in ls { if ids.insert(l.persistentModelID).inserted { walk(l.childLists) } } }
-        for p in projects { walk(p.lists) }
-        return ids
+    private struct Reachable {
+        var listIDs = Set<PersistentIdentifier>()
+        var pinIDs = Set<PersistentIdentifier>()
+        var scriptIDs = Set<PersistentIdentifier>()
+        var highlightIDs = Set<PersistentIdentifier>()
+        var listInfo: [PersistentIdentifier: String] = [:]
+        var pinInfo: [PersistentIdentifier: String] = [:]
     }
-    private var livePinIDs: Set<PersistentIdentifier> {
-        let liveLists = liveListIDs
-        var ids = Set<PersistentIdentifier>()
-        for p in projects { for pin in p.importedPhotos { ids.insert(pin.persistentModelID) } }
-        for l in lists where liveLists.contains(l.persistentModelID) {
-            for pin in l.pins { ids.insert(pin.persistentModelID) }
+
+    /// One safe traversal of the live projects (all valid). Builds reachable sets + subtitles.
+    private func computeReachable() -> Reachable {
+        var r = Reachable()
+        func walk(_ l: LocationListData, project: String, parent: String?) {
+            guard r.listIDs.insert(l.persistentModelID).inserted else { return }
+            var info = parent.map { "in folder: \($0)" } ?? "project: \(project)"
+            info += " · \(l.pins.count) pins"
+            if l.deletedAt != nil { info += " · trashed" }
+            r.listInfo[l.persistentModelID] = info
+            for pin in l.pins {
+                r.pinIDs.insert(pin.persistentModelID)
+                r.pinInfo[pin.persistentModelID] = "list: \(l.name)" + (pin.deletedAt != nil ? " · trashed" : "")
+            }
+            for child in l.childLists { walk(child, project: project, parent: l.name) }
         }
-        return ids
+        for p in projects {
+            for l in p.lists where l.parentList == nil { walk(l, project: p.name, parent: nil) }
+            for pin in p.importedPhotos {
+                r.pinIDs.insert(pin.persistentModelID)
+                r.pinInfo[pin.persistentModelID] = "loose in: \(p.name)" + (pin.deletedAt != nil ? " · trashed" : "")
+            }
+            for s in p.scripts {
+                r.scriptIDs.insert(s.persistentModelID)
+                for h in s.highlights { r.highlightIDs.insert(h.persistentModelID) }
+            }
+        }
+        return r
     }
-    private var liveScriptIDs: Set<PersistentIdentifier> { Set(projects.flatMap(\.scripts).map(\.persistentModelID)) }
-    private var liveHighlightIDs: Set<PersistentIdentifier> { Set(projects.flatMap(\.scripts).flatMap(\.highlights).map(\.persistentModelID)) }
-
-    private func isOrphanList(_ l: LocationListData) -> Bool { !liveListIDs.contains(l.persistentModelID) }
-    private func isOrphanPin(_ p: PinnedLocationData) -> Bool { !livePinIDs.contains(p.persistentModelID) }
-    private func isOrphanScript(_ s: ScriptData) -> Bool { !liveScriptIDs.contains(s.persistentModelID) }
-    private func isOrphanHighlight(_ h: ScriptHighlight) -> Bool { !liveHighlightIDs.contains(h.persistentModelID) }
-
-    private var orphanCount: Int {
-        lists.filter(isOrphanList).count + pins.filter(isOrphanPin).count
-            + scripts.filter(isOrphanScript).count + highlights.filter(isOrphanHighlight).count
-    }
-
-    // MARK: - Body
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
+        let r = computeReachable()
+        let orphanLists = lists.filter { !r.listIDs.contains($0.persistentModelID) }
+        let orphanPins = pins.filter { !r.pinIDs.contains($0.persistentModelID) }
+        let orphanScripts = scripts.filter { !r.scriptIDs.contains($0.persistentModelID) }
+        let orphanCount = orphanLists.count + orphanPins.count + orphanScripts.count
+
+        return VStack(spacing: 0) {
+            header(orphanCount: orphanCount, reachable: r)
             Divider()
             List {
-                section("Projects (\(projects.count))") {
+                Section {
                     ForEach(projects, id: \.persistentModelID) { p in
                         row(title: p.name.isEmpty ? "(untitled)" : p.name,
-                            subtitle: "\(p.lists.count) lists · \(p.importedPhotos.count) loose photos · \(p.scripts.count) scripts",
+                            subtitle: "\(p.lists.count) lists · \(p.importedPhotos.count) loose · \(p.scripts.count) scripts",
                             orphan: false)
                     }
-                }
-                let shownLists = lists.filter { !onlyOrphans || isOrphanList($0) }
-                section("Lists — \(lists.count) total, \(lists.filter(isOrphanList).count) orphaned") {
-                    ForEach(shownLists, id: \.persistentModelID) { l in
+                } header: { Text("Projects (\(projects.count))").font(.caption.bold()) }
+
+                Section {
+                    ForEach(onlyOrphans ? orphanLists : lists, id: \.persistentModelID) { l in
+                        let orphan = !r.listIDs.contains(l.persistentModelID)
                         row(title: l.name.isEmpty ? "(unnamed list)" : l.name,
-                            subtitle: listSubtitle(l),
-                            orphan: isOrphanList(l))
+                            subtitle: orphan ? "⚠️ no live project (deleted)" : (r.listInfo[l.persistentModelID] ?? ""),
+                            orphan: orphan)
                     }
-                }
-                let shownPins = pins.filter { !onlyOrphans || isOrphanPin($0) }
-                section("Pins — \(pins.count) total, \(pins.filter(isOrphanPin).count) orphaned") {
-                    ForEach(shownPins, id: \.persistentModelID) { p in
+                } header: { Text("Lists — \(lists.count) total, \(orphanLists.count) orphaned").font(.caption.bold()) }
+
+                Section {
+                    ForEach(onlyOrphans ? orphanPins : pins, id: \.persistentModelID) { p in
+                        let orphan = !r.pinIDs.contains(p.persistentModelID)
                         row(title: p.name.isEmpty ? "(unnamed pin)" : p.name,
-                            subtitle: pinSubtitle(p),
-                            orphan: isOrphanPin(p))
+                            subtitle: orphan ? "⚠️ orphaned" : (r.pinInfo[p.persistentModelID] ?? ""),
+                            orphan: orphan)
                     }
-                }
+                } header: { Text("Pins — \(pins.count) total, \(orphanPins.count) orphaned").font(.caption.bold()) }
+
                 if !scripts.isEmpty {
-                    section("Scripts — \(scripts.count) total, \(scripts.filter(isOrphanScript).count) orphaned") {
-                        ForEach(scripts.filter { !onlyOrphans || isOrphanScript($0) }, id: \.persistentModelID) { s in
-                            row(title: s.name, subtitle: "\(s.highlights.count) highlights", orphan: isOrphanScript(s))
+                    Section {
+                        ForEach(onlyOrphans ? orphanScripts : scripts, id: \.persistentModelID) { s in
+                            let orphan = !r.scriptIDs.contains(s.persistentModelID)
+                            row(title: s.name, subtitle: orphan ? "⚠️ orphaned" : "\(s.highlights.count) highlights", orphan: orphan)
                         }
-                    }
+                    } header: { Text("Scripts — \(scripts.count) total, \(orphanScripts.count) orphaned").font(.caption.bold()) }
                 }
             }
             .listStyle(.inset)
@@ -92,7 +113,7 @@ struct DataInspectorView: View {
         .frame(width: 640, height: 560)
     }
 
-    private var header: some View {
+    private func header(orphanCount: Int, reachable r: Reachable) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Data Inspector").font(.headline)
@@ -107,7 +128,7 @@ struct DataInspectorView: View {
             .disabled(orphanCount == 0)
             .confirmationDialog("Permanently delete \(orphanCount) orphaned record(s)?",
                                 isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-                Button("Delete \(orphanCount) orphans", role: .destructive) { deleteOrphans() }
+                Button("Delete \(orphanCount) orphans", role: .destructive) { deleteOrphans(reachable: r) }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("These belong to no live project and never appear in the UI. Your visible data is untouched.")
@@ -115,10 +136,6 @@ struct DataInspectorView: View {
             Button("Done") { dismiss() }
         }
         .padding(12)
-    }
-
-    private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        Section { content() } header: { Text(title).font(.caption.bold()) }
     }
 
     private func row(title: String, subtitle: String, orphan: Bool) -> some View {
@@ -137,43 +154,13 @@ struct DataInspectorView: View {
         .listRowBackground(orphan ? Color.red.opacity(0.08) : Color.clear)
     }
 
-    private func listSubtitle(_ l: LocationListData) -> String {
-        var parts: [String] = []
-        // NEVER touch l.project / l.parentList for an orphan: those references point at the
-        // DELETED project, and reading an invalidated SwiftData instance hard-crashes.
-        if isOrphanList(l) {
-            parts.append("⚠️ no live project")
-        } else if let parent = l.parentList {
-            parts.append("in folder: \(parent.name)")
-        } else if let proj = l.project {
-            parts.append("project: \(proj.name)")
-        }
-        parts.append("\(l.pins.count) pins")
-        if l.deletedAt != nil { parts.append("trashed") }
-        return parts.joined(separator: " · ")
-    }
-
-    private func pinSubtitle(_ p: PinnedLocationData) -> String {
-        var parts: [String] = []
-        // For orphans, only the list reference is safe to read (orphan lists are real rows);
-        // never read owningProject — it may point at the deleted project (invalidated → crash).
-        if isOrphanPin(p) {
-            if let l = p.list { parts.append("orphan list: \(l.name)") }
-            else { parts.append("⚠️ no live list/project") }
-        } else if let l = p.list {
-            parts.append("list: \(l.name)")
-        } else if let proj = p.owningProject {
-            parts.append("loose in: \(proj.name)")
-        }
-        if p.deletedAt != nil { parts.append("trashed") }
-        return parts.joined(separator: " · ")
-    }
-
-    private func deleteOrphans() {
-        for p in pins where isOrphanPin(p) { modelContext.delete(p) }
-        for l in lists where isOrphanList(l) { modelContext.delete(l) }
-        for s in scripts where isOrphanScript(s) { modelContext.delete(s) }
-        for h in highlights where isOrphanHighlight(h) { modelContext.delete(h) }
+    private func deleteOrphans(reachable r: Reachable) {
+        // Delete pins first, then lists (so cascade has nothing dangling to chase). We never read
+        // the orphans' .project/.owningProject — only their own id — so no invalidated access.
+        for p in pins where !r.pinIDs.contains(p.persistentModelID) { modelContext.delete(p) }
+        for l in lists where !r.listIDs.contains(l.persistentModelID) { modelContext.delete(l) }
+        for s in scripts where !r.scriptIDs.contains(s.persistentModelID) { modelContext.delete(s) }
+        for h in highlights where !r.highlightIDs.contains(h.persistentModelID) { modelContext.delete(h) }
         try? modelContext.save()
     }
 }
