@@ -896,15 +896,16 @@ struct ContentView: View {
                 )
             }
         }
-        // Script mode: create a new list and assign the highlighted section to it.
+        // Script mode: create a new list (optionally nested in a folder) and assign the scene to it.
         .sheet(isPresented: $showScriptNewListSheet, onDismiss: { pendingScriptRange = nil }) {
-            NameEntrySheet(
-                title: "New List for Scene",
-                placeholder: "List name",
-                text: $scriptNewListName,
-                confirmLabel: "Create & Assign",
-                onDismiss: { showScriptNewListSheet = false; pendingScriptRange = nil }
-            ) { name in createListAndAssignScene(named: name) }
+            if let project = openProject {
+                NewListForSceneSheet(
+                    project: project,
+                    name: $scriptNewListName,
+                    onDismiss: { showScriptNewListSheet = false; pendingScriptRange = nil },
+                    onConfirm: { name, parent in createListAndAssignScene(named: name, parent: parent) }
+                )
+            }
         }
         .overlay(alignment: .top) {
             // Hidden on the empty-state splash (no project open) so only the icon + name show.
@@ -1417,7 +1418,7 @@ struct ContentView: View {
     }
 
     /// Creates a new list in the open project and assigns the pending script range to it.
-    private func createListAndAssignScene(named name: String) {
+    private func createListAndAssignScene(named name: String, parent: LocationListData? = nil) {
         defer { showScriptNewListSheet = false }
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, let project = openProject else { return }
@@ -1428,6 +1429,8 @@ struct ContentView: View {
         project.importedPhotos.forEach { $0.panelOrder += 1 }
         list.panelOrder = 0
         list.project = project
+        // Optionally nest inside a chosen folder/list.
+        list.parentList = parent
         assignScriptSelection(to: list)   // creates the highlight + saves
     }
 

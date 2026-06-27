@@ -683,6 +683,12 @@ private struct ProjectDetailView: View {
     @State private var listsPendingDelete: [LocationListData] = []
     @State private var pinsPendingDelete: [PinnedLocationData] = []
     @State private var showDeleteListConfirm = false
+
+    /// True whenever a sidebar text field is active (rename, new-list name, or the move popup's
+    /// search). The bare-letter / Return key handlers must defer to it so typing isn't stolen.
+    private var isEditingListText: Bool {
+        renamingList != nil || showAddList || showMovePopup
+    }
     // Top-level row currently under a reorder drag — a blue insertion line is drawn at its
     // top edge to preview where the dragged item will land (it inserts before this row).
     @State private var dropTargetID: PersistentIdentifier? = nil
@@ -2588,19 +2594,19 @@ private struct ProjectDetailView: View {
         } // ScrollViewReader
         // All sidebar key handlers are suppressed while the rename popup is open so its text field
         // gets every keystroke — only its own Return (onSubmit) commits the name.
-        .onKeyPress(.downArrow) { renamingList != nil ? .ignored : { moveSelection(1); return .handled }() }
-        .onKeyPress(.upArrow)   { renamingList != nil ? .ignored : { moveSelection(-1); return .handled }() }
+        .onKeyPress(.downArrow) { isEditingListText ? .ignored : { moveSelection(1); return .handled }() }
+        .onKeyPress(.upArrow)   { isEditingListText ? .ignored : { moveSelection(-1); return .handled }() }
         // "e" with a list selected: open the scene-type chooser as a popover anchored to the row.
         // Lives here (not as a global keyboardShortcut) so a focused text field consumes "e"
         // normally — only fires when the sidebar itself has keyboard focus.
         .onKeyPress(KeyEquivalent("e")) {
-            guard renamingList == nil, let target = selectedLists.first else { return .ignored }
+            guard !isEditingListText, let target = selectedLists.first else { return .ignored }
             sceneTypeEditID = target.uuid
             return .handled
         }
         // Enter with a list selected: rename it (reuses the row's rename flow).
         .onKeyPress(.return) {
-            guard renamingList == nil, let target = selectedLists.first else { return .ignored }
+            guard !isEditingListText, let target = selectedLists.first else { return .ignored }
             renameListText = target.name
             renamingList = target
             return .handled
@@ -3144,6 +3150,107 @@ struct NameEntrySheet: View {
         }
         .padding(24)
         .frame(width: 280)
+    }
+}
+
+/// New-list sheet for the Script "Create new list and assign" flow: a name field plus an
+/// optional "nest inside" picker that reuses the same project.lists source and row style as the
+/// Move ("m") box. Selecting a folder nests the new list inside it; "Top level" keeps it loose.
+struct NewListForSceneSheet: View {
+    let project: ProjectData
+    @Binding var name: String
+    let onDismiss: () -> Void
+    let onConfirm: (String, LocationListData?) -> Void
+
+    @State private var parent: LocationListData?
+    @State private var query = ""
+    @FocusState private var nameFocused: Bool
+
+    // Same source + ordering the sidebar and Move box use; trashed excluded.
+    private var projectLists: [LocationListData] {
+        project.lists.filter { $0.deletedAt == nil }.sorted {
+            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+        }
+    }
+    private var filtered: [LocationListData] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return projectLists }
+        return projectLists.filter { $0.name.localizedCaseInsensitiveContains(q) }
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text("New List for Scene").font(.headline)
+            TextField("List name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit(commit)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("PUT INSIDE (OPTIONAL)")
+                    .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.tertiary).font(.caption)
+                    TextField("Filter folders…", text: $query).textFieldStyle(.plain)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        parentRow(label: "Top level (no folder)", color: nil, isSelected: parent == nil) {
+                            parent = nil
+                        }
+                        ForEach(filtered, id: \.persistentModelID) { list in
+                            parentRow(label: list.name,
+                                      color: Color(hexString: list.colorHex),
+                                      isSelected: parent?.persistentModelID == list.persistentModelID) {
+                                parent = list
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(height: 160)
+                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            HStack {
+                Button("Cancel", action: onDismiss)
+                Spacer()
+                Button("Create & Assign") { commit() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 340)
+        .onAppear { nameFocused = true }
+    }
+
+    @ViewBuilder
+    private func parentRow(label: String, color: Color?, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        HStack(spacing: 8) {
+            if let color {
+                Circle().fill(color).frame(width: 9, height: 9)
+            } else {
+                Image(systemName: "tray").font(.caption2).foregroundStyle(.secondary).frame(width: 9)
+            }
+            Text(label).font(.subheadline)
+            Spacer()
+            if isSelected { Image(systemName: "checkmark").font(.caption2).foregroundStyle(.tint) }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
+    }
+
+    private func commit() {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        onConfirm(trimmed, parent)
     }
 }
 
