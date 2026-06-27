@@ -1,5 +1,24 @@
 import CoreData
 import Foundation
+import Combine
+
+/// Observable photo-download progress for the always-visible sync bar. Updated by every
+/// `PhotoBlobSync.reconcile` pass: `total` referenced derivatives vs how many are on disk.
+@MainActor
+final class PhotoSyncProgress: ObservableObject {
+    static let shared = PhotoSyncProgress()
+    @Published private(set) var downloaded = 0
+    @Published private(set) var total = 0
+
+    /// True while there are still derivatives referenced by pins that aren't on disk yet.
+    var isDownloading: Bool { total > 0 && downloaded < total }
+    var fraction: Double { total > 0 ? Double(downloaded) / Double(total) : 0 }
+
+    func update(downloaded: Int, total: Int) {
+        self.downloaded = downloaded
+        self.total = total
+    }
+}
 
 /// Core Data entity that carries a photo's JPEG bytes through CloudKit.
 ///
@@ -84,6 +103,13 @@ enum PhotoBlobSync {
             }
 
             if ctx.hasChanges { try? ctx.save() }
+
+            // Report download progress: how many referenced derivatives are now on disk vs total.
+            let total = ownerByName.count
+            let onDisk = ownerByName.keys.reduce(0) { acc, name in
+                FileManager.default.fileExists(atPath: PinPhotoStore.fileURL(name).path) ? acc + 1 : acc
+            }
+            Task { @MainActor in PhotoSyncProgress.shared.update(downloaded: onDisk, total: total) }
 
             if materialized > 0 {
                 DispatchQueue.main.async {

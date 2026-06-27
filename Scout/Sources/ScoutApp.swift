@@ -67,11 +67,15 @@ struct ScoutApp: App {
         WindowGroup {
             // No onboarding gate — open straight into the app. The Anthropic key (and any
             // other keys) can be set anytime in Settings; AI features prompt if it's missing.
-            #if os(iOS)
-            ScoutIOSRootView()
-            #else
-            ContentView()
-            #endif
+            Group {
+                #if os(iOS)
+                ScoutIOSRootView()
+                #else
+                ContentView()
+                #endif
+            }
+            // Always-visible first-time photo download progress, on top of any view.
+            .overlay(alignment: .bottom) { PhotoSyncBar() }
         }
         .environmentObject(apiKeyState)
         .environment(\.managedObjectContext, persistence.viewContext)

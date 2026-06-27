@@ -54,7 +54,8 @@ struct IOSPinThumb: View {
         GooglePhotoImage(
             url: pin.thumbURL,
             rotationQuarterTurns: pin.rotationQuarterTurns,
-            targetPixelSize: targetPixelSize
+            targetPixelSize: targetPixelSize,
+            displayName: pin.name
         ) {
             Rectangle()
                 .fill(Color(.systemGray5))

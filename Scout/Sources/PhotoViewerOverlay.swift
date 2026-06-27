@@ -257,16 +257,23 @@ struct GooglePhotoImage<Placeholder: View>: View {
     /// (rounded up to a small bucket). The photo grid passes the cell's pixel width so big
     /// source files become tiny bitmaps — many more fit in cache, scrolling stops re-decoding.
     var targetPixelSize: CGFloat? = nil
+    /// Optional friendly label shown on the "not downloaded yet" placeholder. Falls back to the
+    /// file's name. Pass the pin's name so a collaborator sees which photo is still downloading.
+    var displayName: String? = nil
     let placeholder: () -> Placeholder
 
     @State private var image: ScoutImageType? = nil
     @State private var loadTask: Task<Void, Never>? = nil
+    /// True when the file isn't on disk yet (e.g. a shared photo still downloading from iCloud).
+    @State private var pendingDownload = false
 
     init(url: URL?, rotationQuarterTurns: Int = 0, targetPixelSize: CGFloat? = nil,
+         displayName: String? = nil,
          @ViewBuilder placeholder: @escaping () -> Placeholder) {
         self.url = url
         self.rotationQuarterTurns = rotationQuarterTurns
         self.targetPixelSize = targetPixelSize
+        self.displayName = displayName
         self.placeholder = placeholder
     }
 
@@ -287,6 +294,8 @@ struct GooglePhotoImage<Placeholder: View>: View {
                 #else
                 Image(uiImage: image).resizable()
                 #endif
+            } else if pendingDownload {
+                pendingPlaceholder
             } else {
                 placeholder()
             }
@@ -296,11 +305,41 @@ struct GooglePhotoImage<Placeholder: View>: View {
         .onChange(of: url?.absoluteString ?? "") { _, _ in load() }
         .onChange(of: rotationQuarterTurns) { _, _ in load() }
         .onChange(of: targetPixelSize.map(sizeBucket) ?? 0) { _, _ in load() }
+        // Reload when a photo blob is materialized to disk (shared photo finished downloading).
+        .onReceive(NotificationCenter.default.publisher(for: PhotoBlobSync.didMaterializeNotification)) { _ in
+            if pendingDownload { load() }
+        }
+    }
+
+    /// "Not downloaded yet" state: a download icon over the placeholder with the filename visible.
+    private var pendingPlaceholder: some View {
+        ZStack {
+            placeholder()
+            VStack(spacing: 4) {
+                Image(systemName: "photo.badge.arrow.down")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.secondary)
+                Text(displayName ?? url?.lastPathComponent ?? "Photo")
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+            }
+            .padding(6)
+        }
     }
 
     private func load() {
         loadTask?.cancel()
-        guard let url else { image = nil; return }
+        guard let url else { image = nil; pendingDownload = false; return }
+        // A local file that isn't on disk yet = a shared photo still downloading from iCloud.
+        if url.isFileURL, !FileManager.default.fileExists(atPath: url.path) {
+            image = nil
+            pendingDownload = true
+            return
+        }
+        pendingDownload = false
         // Downsampled path for the grid: tiny bitmaps, many more fit in cache.
         let bucket = targetPixelSize.map(sizeBucket) ?? 0
         if bucket > 0 {

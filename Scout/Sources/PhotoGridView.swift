@@ -371,7 +371,8 @@ private struct MasonryCell: View {
     var body: some View {
         GooglePhotoImage(url: item.image.url,
                          rotationQuarterTurns: item.image.rotationQuarterTurns,
-                         targetPixelSize: width * screenScale) {
+                         targetPixelSize: width * screenScale,
+                         displayName: item.location.name) {
             Color.gray.opacity(0.12)
         }
         // Fixed frame from the known aspect ratio → no reflow when the image loads. fill+clip
