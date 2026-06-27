@@ -368,6 +368,22 @@ struct ContentView: View {
         GeometryReader { geo in
             rootLayoutWithObservers
                 .frame(width: geo.size.width, height: geo.size.height)
+                // Centered share panel (a SwiftUI .sheet can't center on macOS — it drops from the
+                // top — so present it as a dimmed, window-centered overlay instead).
+                .overlay {
+                    if let project = sharingProject {
+                        ZStack {
+                            Color.black.opacity(0.35)
+                                .ignoresSafeArea()
+                                .onTapGesture { sharingProject = nil }
+                            ProjectShareSheet(project: project, onDismiss: { sharingProject = nil })
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                                .shadow(radius: 24)
+                        }
+                        .transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.15), value: sharingProject != nil)
         }
         .frame(minWidth: 820, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
     }
@@ -907,10 +923,6 @@ struct ContentView: View {
                     onConfirm: { name, parent in createListAndAssignScene(named: name, parent: parent) }
                 )
             }
-        }
-        // Project sharing: reliable invite-link sheet (works on macOS, unlike the AppKit picker).
-        .sheet(item: $sharingProject) { project in
-            ProjectShareSheet(project: project, onDismiss: { sharingProject = nil })
         }
         .overlay(alignment: .top) {
             // Hidden on the empty-state splash (no project open) so only the icon + name show.
