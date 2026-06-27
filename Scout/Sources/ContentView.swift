@@ -787,6 +787,11 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.2), value: photoViewer.isVisible)
                     .zIndex(20)
             }
+            // No project open → hide the (still-alive) map/grid behind an app splash.
+            if openProject == nil {
+                projectEmptyState
+                    .zIndex(30)
+            }
         }
         // M key: open move sheet from photo grid or map selection (sidebar handles its own M).
         .background {
@@ -902,27 +907,50 @@ struct ContentView: View {
             ) { name in createListAndAssignScene(named: name) }
         }
         .overlay(alignment: .top) {
-            HStack {
-                panelToggleButton(
-                    icon: showProjectsPanel ? "folder.fill" : "folder",
-                    action: { showProjectsPanel.toggle() }
-                )
-                Spacer()
-                viewModeToggle
-                Spacer()
-                HStack(spacing: 4) {
-                    if openProject != nil { collaborationButton }
-                    fitAllPinsButton
-                    locationTrackingButton
+            // Hidden on the empty-state splash (no project open) so only the icon + name show.
+            if openProject != nil {
+                HStack {
                     panelToggleButton(
-                        icon: "magnifyingglass",
-                        circle: true,
-                        action: { showRightPanel.toggle() }
+                        icon: showProjectsPanel ? "folder.fill" : "folder",
+                        action: { showProjectsPanel.toggle() }
                     )
+                    Spacer()
+                    viewModeToggle
+                    Spacer()
+                    HStack(spacing: 4) {
+                        collaborationButton
+                        // Focus + user-location are map-only; hide them in the photo grid.
+                        if viewMode != .photos {
+                            fitAllPinsButton
+                            locationTrackingButton
+                        }
+                        panelToggleButton(
+                            icon: "magnifyingglass",
+                            circle: true,
+                            action: { showRightPanel.toggle() }
+                        )
+                    }
                 }
+                .padding(.top, 14)
+                .padding(.horizontal, 8)
             }
-            .padding(.top, 14)
-            .padding(.horizontal, 8)
+        }
+    }
+
+    /// Shown over the center panel when no project is open: just the app icon and name.
+    private var projectEmptyState: some View {
+        ZStack {
+            Color(red: 22/255, green: 24/255, blue: 32/255)
+                .ignoresSafeArea()
+            VStack(spacing: 16) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .frame(width: 128, height: 128)
+                    .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                Text("Script Scout")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -1621,7 +1649,13 @@ struct ContentView: View {
             let panel = NSSavePanel()
             panel.nameFieldStringValue = zipURL.lastPathComponent
             panel.allowedContentTypes = [.zip]
-            guard panel.runModal() == .OK, let dest = panel.url else {
+            // Sandbox-safe: runModal() brings the panel up non-resizable; use async begin.
+            let dest: URL? = await withCheckedContinuation { cont in
+                DispatchQueue.main.async {
+                    panel.begin { cont.resume(returning: $0 == .OK ? panel.url : nil) }
+                }
+            }
+            guard let dest else {
                 try? FileManager.default.removeItem(at: zipURL)
                 isBackupBusy = false
                 return
@@ -1645,7 +1679,12 @@ struct ContentView: View {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.zip]
         panel.message = "Select a Scout backup archive"
-        guard panel.runModal() == .OK, let url = panel.url else { isBackupBusy = false; return }
+        let picked: URL? = await withCheckedContinuation { cont in
+            DispatchQueue.main.async {
+                panel.begin { cont.resume(returning: $0 == .OK ? panel.url : nil) }
+            }
+        }
+        guard let url = picked else { isBackupBusy = false; return }
         do {
             let s = try await BackupService.importBackup(from: url, context: modelContext)
             backupStatusMessage = "Imported \(s.projectsAdded) projects, \(s.listsAdded) lists, \(s.pinsAdded) pins. Skipped \(s.skippedDuplicates) duplicates."
@@ -1665,7 +1704,12 @@ struct ContentView: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.message = "Select folder containing your original photo files"
-        guard panel.runModal() == .OK, let url = panel.url else { isBackupBusy = false; return }
+        let picked: URL? = await withCheckedContinuation { cont in
+            DispatchQueue.main.async {
+                panel.begin { cont.resume(returning: $0 == .OK ? panel.url : nil) }
+            }
+        }
+        guard let url = picked else { isBackupBusy = false; return }
         backupProgress = 0
         let result = await BackupService.relinkOriginals(folder: url, context: modelContext) { stage, frac in
             Task { @MainActor in
