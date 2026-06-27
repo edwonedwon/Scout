@@ -649,6 +649,7 @@ private struct ProjectDetailView: View {
     // ⌘Z pops the last batch and restores those photos.
     @State private var trashUndoStack: [[PersistentIdentifier]] = []
     @State private var expandedTrash = false
+    @State private var expandedTrashListIDs: Set<PersistentIdentifier> = []
     // Lists awaiting a delete confirmation, plus any photos selected alongside them. A list is
     // never deleted without this confirm step; on confirm it (and its photos) go to the Trash.
     @State private var listsPendingDelete: [LocationListData] = []
@@ -1919,18 +1920,39 @@ private struct ProjectDetailView: View {
             }
     }
 
-    /// A single trashed-list row in the Trash section, with Put Back / Delete Permanently.
+    /// A trashed list row — collapsible, shows photos inside when expanded. Same visual
+    /// language as the live sidebar: chevron, list icon, name, count badge.
     @ViewBuilder
     private func trashedListRow(_ list: LocationListData) -> some View {
+        let pins = list.pins.sorted { $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt }
         let n = photoCount(in: list)
-        HStack(spacing: 6) {
+        let isExpanded = expandedTrashListIDs.contains(list.persistentModelID)
+
+        // Header row
+        HStack(spacing: 0) {
+            // Chevron — only show when there are photos to expand into
+            Button {
+                var tx = Transaction(animation: .none); tx.disablesAnimations = true
+                withTransaction(tx) {
+                    if isExpanded { expandedTrashListIDs.remove(list.persistentModelID) }
+                    else { expandedTrashListIDs.insert(list.persistentModelID) }
+                }
+            } label: {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption).foregroundStyle(n > 0 ? Color.secondary : Color.clear)
+                    .frame(width: 28, height: 32).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(n == 0)
+
             Image(systemName: list.childLists.isEmpty ? "list.bullet" : "folder")
                 .font(.caption).foregroundStyle(.secondary).frame(width: 14)
-            Text(list.name).font(.body).foregroundStyle(.primary)
+            Text(list.name).font(.body).foregroundStyle(.primary).padding(.leading, 6)
             Spacer()
-            if n > 0 { Text("\(n)").font(.caption).foregroundStyle(.secondary) }
+            if n > 0 {
+                Text("\(n)").font(.caption).foregroundStyle(.secondary).padding(.trailing, 4)
+            }
         }
-        .padding(.leading, 24)
         .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
         .opacity(0.6)
         .contextMenu {
@@ -1940,6 +1962,24 @@ private struct ProjectDetailView: View {
             Divider()
             Button(role: .destructive) { purgeList(list) } label: {
                 Label("Delete Permanently", systemImage: "trash")
+            }
+        }
+
+        // Expanded photos — same PinRow as the live sidebar, indented one more level
+        if isExpanded {
+            ForEach(pins, id: \.persistentModelID) { pin in
+                PinRow(pin: pin, selection: selection, onTap: { _, _ in }, onDoubleTap: {})
+                    .listRowInsets(EdgeInsets(top: 0, leading: 48, bottom: 0, trailing: 0))
+                    .opacity(0.6)
+                    .contextMenu {
+                        Button { pin.deletedAt = nil; restoreList(list); try? modelContext.save() } label: {
+                            Label("Put Back", systemImage: "arrow.uturn.backward")
+                        }
+                        Divider()
+                        Button(role: .destructive) { purgeList(list) } label: {
+                            Label("Delete Permanently", systemImage: "trash")
+                        }
+                    }
             }
         }
     }
