@@ -139,9 +139,15 @@ struct DataInspectorView: View {
 
     private func listSubtitle(_ l: LocationListData) -> String {
         var parts: [String] = []
-        if let parent = l.parentList { parts.append("in folder: \(parent.name)") }
-        else if let proj = l.project { parts.append("project: \(proj.name)") }
-        else { parts.append("⚠️ no project") }
+        // NEVER touch l.project / l.parentList for an orphan: those references point at the
+        // DELETED project, and reading an invalidated SwiftData instance hard-crashes.
+        if isOrphanList(l) {
+            parts.append("⚠️ no live project")
+        } else if let parent = l.parentList {
+            parts.append("in folder: \(parent.name)")
+        } else if let proj = l.project {
+            parts.append("project: \(proj.name)")
+        }
         parts.append("\(l.pins.count) pins")
         if l.deletedAt != nil { parts.append("trashed") }
         return parts.joined(separator: " · ")
@@ -149,9 +155,16 @@ struct DataInspectorView: View {
 
     private func pinSubtitle(_ p: PinnedLocationData) -> String {
         var parts: [String] = []
-        if let l = p.list { parts.append("list: \(l.name)") }
-        else if let proj = p.owningProject { parts.append("loose in: \(proj.name)") }
-        else { parts.append("⚠️ no list/project") }
+        // For orphans, only the list reference is safe to read (orphan lists are real rows);
+        // never read owningProject — it may point at the deleted project (invalidated → crash).
+        if isOrphanPin(p) {
+            if let l = p.list { parts.append("orphan list: \(l.name)") }
+            else { parts.append("⚠️ no live list/project") }
+        } else if let l = p.list {
+            parts.append("list: \(l.name)")
+        } else if let proj = p.owningProject {
+            parts.append("loose in: \(proj.name)")
+        }
         if p.deletedAt != nil { parts.append("trashed") }
         return parts.joined(separator: " · ")
     }
