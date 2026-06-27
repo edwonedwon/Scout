@@ -1,6 +1,7 @@
 import SwiftUI
 #if os(macOS)
 import AppKit
+import QuartzCore   // CAMediaTimingFunction for the animated scroll-to-scene
 #endif
 
 /// The third center-panel mode (Map / Photos / Script). Renders the active script's fountain
@@ -309,9 +310,10 @@ struct ScriptTextRepresentable: NSViewRepresentable {
         func removeHighlight(_ range: NSRange) { onRemoveHighlight?(range) }
         func highlightClicked(_ offset: Int) { onHighlightClick?(offset) }
 
-        /// Scrolls so the START of `range` sits at the top of the view (with a little space above),
-        /// without selecting it. Forces the position even if the range is already partly visible,
-        /// so re-clicking the same scene always re-centres it to the top.
+        /// Scrolls so the START of `range` sits near the top of the view (with breathing room
+        /// above), without selecting it. Forces the position even if the range is already partly
+        /// visible, so re-clicking the same scene always re-positions it. The scroll is animated
+        /// (~1s, ease in/out) so the motion is visible but still snappy.
         func scrollTo(range: NSRange) {
             guard let layout, let scroll, let storage, range.location < storage.length else { return }
             let glyph = layout.glyphIndexForCharacter(at: range.location)
@@ -323,10 +325,19 @@ struct ScriptTextRepresentable: NSViewRepresentable {
             // Line's y in document coords: page text view → sheet → doc.
             let frag = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
             let docY = frag.minY + tv.frame.minY + sheet.frame.minY
-            // Put that line ~24pt below the top edge (a touch of breathing room), always.
+            // Leave a comfortable gap above the landing line so it isn't jammed under the toolbar.
+            let topInset: CGFloat = 80
             let clip = scroll.contentView
-            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: max(0, docY - 24)))
-            scroll.reflectScrolledClipView(clip)
+            let target = NSPoint(x: clip.bounds.origin.x, y: max(0, docY - topInset))
+            // Animate the jump: ~1s, ease in/out, via the clip view's bounds-origin animator.
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 1.0
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                clip.animator().setBoundsOrigin(target)
+            }, completionHandler: { [weak scroll, weak clip] in
+                guard let scroll, let clip else { return }
+                scroll.reflectScrolledClipView(clip)
+            })
         }
     }
 }
