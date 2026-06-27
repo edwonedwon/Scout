@@ -30,10 +30,14 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cutetech.scout
+        PRODUCT_NAME: "Script Scout"
+        # iPhone-only for the beta (phone-first UI). Avoids the iPad multitasking
+        # orientation requirement; re-add iPad ("1,2") + iPad orientation keys later.
+        TARGETED_DEVICE_FAMILY: "1"
         DEVELOPMENT_TEAM: 2J8M8Z4QCX
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         SWIFT_VERSION: "5.9"
         ENABLE_HARDENED_RUNTIME: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -59,6 +63,18 @@ targets:
     info:
       path: Scout/Info.plist
       properties:
+        # On-device / Finder display name (bundle id stays com.cutetech.scout).
+        CFBundleDisplayName: "Script Scout"
+        # Drive version/build from the build settings above so bumps live in one place.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # App uses only standard HTTPS / Apple crypto → exempt from export compliance.
+        # Declaring this lets TestFlight uploads skip the per-build encryption question.
+        ITSAppUsesNonExemptEncryption: false
         NSQuitAlwaysKeepsWindows: false
         UIBackgroundModes:
           - remote-notification

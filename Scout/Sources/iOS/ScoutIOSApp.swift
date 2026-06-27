@@ -473,8 +473,10 @@ struct IOSSidebarDrawer: View {
 
 // MARK: - Previews
 
+#if DEBUG
 #Preview("Project List") {
     ScoutIOSRootView()
         .environment(\.managedObjectContext, PreviewData.context)
 }
+#endif
 #endif

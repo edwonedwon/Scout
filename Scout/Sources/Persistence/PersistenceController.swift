@@ -40,13 +40,27 @@ final class PersistenceController {
                                    : baseURL.appendingPathComponent("private.sqlite")
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-        // TODO(plan 1f): enable private CloudKit sync by restoring these two lines. Kept OFF for
-        // the local cut-over so store load can't fail on iCloud provisioning while we verify the
-        // SwiftData→Core Data migration + data bridge in isolation. (History tracking stays on so
-        // turning sync on later needs no store migration.)
-        // let privateOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
-        // privateOpts.databaseScope = .private
-        // privateDesc.cloudKitContainerOptions = privateOpts
+
+        // Private CloudKit sync — explicitly ON. This is the user's own data mirrored to their
+        // private CloudKit database (iCloud.com.cutetech.scout), so projects sync Mac ↔ iPhone.
+        //
+        // NOTE: `NSPersistentCloudKitContainer` already auto-attaches CloudKit options to its
+        // default store description when the app carries the CloudKit entitlement, so sync was
+        // in fact live even when these lines were commented out. We now set them explicitly so
+        // the behaviour is intentional, visible, and not dependent on that implicit default.
+        // For a true LOCAL-ONLY store, set `privateDesc.cloudKitContainerOptions = nil` instead.
+        //
+        // CloudKit schema requirements (audited — the model satisfies all): every relationship
+        // is optional, has an explicit inverse, and uses a Nullify delete rule (no .cascade on
+        // optional relationships); every attribute is optional or has a default value.
+        if inMemory {
+            // Previews / tests: never touch iCloud.
+            privateDesc.cloudKitContainerOptions = nil
+        } else {
+            let privateOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
+            privateOpts.databaseScope = .private
+            privateDesc.cloudKitContainerOptions = privateOpts
+        }
 
         // --- Shared database store (projects shared TO this user) ---
         // Added in the sharing phase (collaboration-plan.md phase 3). It's intentionally NOT
