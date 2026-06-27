@@ -155,12 +155,31 @@ struct DataInspectorView: View {
     }
 
     private func deleteOrphans(reachable r: Reachable) {
-        // Delete pins first, then lists (so cascade has nothing dangling to chase). We never read
-        // the orphans' .project/.owningProject — only their own id — so no invalidated access.
-        for p in pins where !r.pinIDs.contains(p.persistentModelID) { modelContext.delete(p) }
-        for l in lists where !r.listIDs.contains(l.persistentModelID) { modelContext.delete(l) }
-        for s in scripts where !r.scriptIDs.contains(s.persistentModelID) { modelContext.delete(s) }
-        for h in highlights where !r.highlightIDs.contains(h.persistentModelID) { modelContext.delete(h) }
-        try? modelContext.save()
+        // Per-object delete makes SwiftData read each orphan's .project to fix up the inverse —
+        // which faults on the DELETED project and crashes. Instead, collect the orphans' OWN
+        // uuids (safe — their own attribute) and BATCH delete by uuid. delete(model:where:) runs
+        // as a store-level SQL delete: it never materializes the objects or their relationships,
+        // so the dangling project is never touched.
+        let listUUIDs = lists.filter { !r.listIDs.contains($0.persistentModelID) }.map(\.uuid)
+        let pinUUIDs = pins.filter { !r.pinIDs.contains($0.persistentModelID) }.map(\.uuid)
+        let scriptUUIDs = scripts.filter { !r.scriptIDs.contains($0.persistentModelID) }.map(\.uuid)
+        let highlightUUIDs = highlights.filter { !r.highlightIDs.contains($0.persistentModelID) }.map(\.uuid)
+        do {
+            if !pinUUIDs.isEmpty {
+                try modelContext.delete(model: PinnedLocationData.self, where: #Predicate { pinUUIDs.contains($0.uuid) })
+            }
+            if !listUUIDs.isEmpty {
+                try modelContext.delete(model: LocationListData.self, where: #Predicate { listUUIDs.contains($0.uuid) })
+            }
+            if !scriptUUIDs.isEmpty {
+                try modelContext.delete(model: ScriptData.self, where: #Predicate { scriptUUIDs.contains($0.uuid) })
+            }
+            if !highlightUUIDs.isEmpty {
+                try modelContext.delete(model: ScriptHighlight.self, where: #Predicate { highlightUUIDs.contains($0.uuid) })
+            }
+            try modelContext.save()
+        } catch {
+            print("Orphan cleanup failed: \(error)")
+        }
     }
 }
