@@ -359,10 +359,19 @@ private struct MasonryCell: View {
         return NSItemProvider(object: payload as NSString)
     }
 
+    /// Backing scale of the main display — used to request crisp pixels for the thumbnail.
+    private var screenScale: CGFloat {
+        #if os(macOS)
+        return NSScreen.main?.backingScaleFactor ?? 2
+        #else
+        return UIScreen.main.scale
+        #endif
+    }
+
     var body: some View {
         GooglePhotoImage(url: item.image.url,
                          rotationQuarterTurns: item.image.rotationQuarterTurns,
-                         targetPixelSize: width * (NSScreen.main?.backingScaleFactor ?? 2)) {
+                         targetPixelSize: width * screenScale) {
             Color.gray.opacity(0.12)
         }
         // Fixed frame from the known aspect ratio → no reflow when the image loads. fill+clip

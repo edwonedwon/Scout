@@ -1407,8 +1407,8 @@ struct ScoutMapView {
 
         /// Brings the map view's working selection set + pin rings in line with `ids`.
         /// Only touches the pins whose membership actually changed, so it's cheap.
+        #if os(macOS)
         func reconcileSelection(_ ids: Set<UUID>, on map: ZoomableMapView) {
-            #if os(macOS)
             // Only pin uuids matter to the map; folder uuids in the set are ignored naturally
             // (no annotation has that id). Compare against the view's current working set.
             guard map.multiSelectedIDs != ids else { return }
@@ -1418,8 +1418,8 @@ struct ScoutMapView {
             where changed.contains(ann.location.id) {
                 map.applySelectionRing(to: ann, selected: ids.contains(ann.location.id))
             }
-            #endif
         }
+        #endif
 
         func wireReveal(controller: ScoutMapController, mapView: MKMapView) {
             #if os(macOS)
