@@ -535,6 +535,11 @@ final class ZoomableMapView: MKMapView {
         let windowPt = window.convertPoint(fromScreen: screenPt)
         let viewPt   = convert(windowPt, from: nil)
         let cursor   = convert(viewPt, toCoordinateFrom: self)
+        // The cursor can be over a floating overlay (e.g. the user-location button) or off
+        // the map entirely, in which case `convert` returns an out-of-range coordinate.
+        // Anchoring the zoom to that garbage produces an invalid region (lat > 90), which
+        // MapKit rejects with "Invalid Region". Bail instead of zooming to nonsense.
+        guard CLLocationCoordinate2DIsValid(cursor) else { return }
 
         let current = region
         let newLatDelta = min(max(current.span.latitudeDelta  * factor, 0.0005), 160)
@@ -545,13 +550,18 @@ final class ZoomableMapView: MKMapView {
         let latFrac = (cursor.latitude  - current.center.latitude)  / current.span.latitudeDelta
         let lngFrac = (cursor.longitude - current.center.longitude) / current.span.longitudeDelta
 
-        let newLat = cursor.latitude  - latFrac * newLatDelta
-        let newLng = cursor.longitude - lngFrac * newLngDelta
+        // Clamp the resulting center so the region edges stay inside MapKit's valid range,
+        // belt-and-suspenders against any drift in the math above.
+        let halfLat = newLatDelta / 2
+        let newLat = min(max(cursor.latitude  - latFrac * newLatDelta, -90 + halfLat), 90 - halfLat)
+        let newLng = min(max(cursor.longitude - lngFrac * newLngDelta, -180), 180)
 
-        setRegion(MKCoordinateRegion(
+        let proposed = MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: newLat, longitude: newLng),
             span: MKCoordinateSpan(latitudeDelta: newLatDelta, longitudeDelta: newLngDelta)
-        ), animated: false)
+        )
+        guard CLLocationCoordinate2DIsValid(proposed.center), newLat.isFinite, newLng.isFinite else { return }
+        setRegion(proposed, animated: false)
     }
 
     deinit { if let link = cvLink { CVDisplayLinkStop(link) } }
@@ -977,7 +987,6 @@ final class BoundaryLabelView: MKAnnotationView {
 
     override func draw(_ rect: NSRect) {
         let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
-        let color = BoundaryPolygon.palette[colorIndex % BoundaryPolygon.palette.count]
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
         shadow.shadowBlurRadius = 4
@@ -1229,7 +1238,7 @@ struct ScoutMapView {
             // Build desired lookup: id → (location, tint, imageURL). Use uniquingKeysWith
             // (keep first) so a stray duplicate id can never crash the map rebuild — a pin
             // briefly appearing twice during a move should drop a dupe, not trap.
-            var desiredMap: [UUID: (ScoutLocation, String?)] = Dictionary(
+            let desiredMap: [UUID: (ScoutLocation, String?)] = Dictionary(
                 desired.map { ($0.0.id, ($0.0, $0.1)) },
                 uniquingKeysWith: { first, _ in first }
             )

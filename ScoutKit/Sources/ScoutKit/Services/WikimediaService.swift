@@ -76,7 +76,7 @@ public final class WikimediaService {
         return pages.values.compactMap { page in
             guard isImageFile(page.title),
                   let info = page.imageinfo?.first,
-                  let thumbURL = info.thumburl.flatMap(URL.init) else { return nil }
+                  info.thumburl.flatMap(URL.init) != nil else { return nil }
 
             // Use coordinates if available; otherwise place at (0,0) and caller can filter
             let lat = page.coordinates?.first?.lat

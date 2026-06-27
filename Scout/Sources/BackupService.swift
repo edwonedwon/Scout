@@ -208,15 +208,45 @@ enum BackupService {
         var summary = ImportSummary()
         let photosDir = tmp.appendingPathComponent("photos")
 
-        // Existing project names for collision detection.
-        let existingProjects: [ProjectData] = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
-        let existingNames = Set(existingProjects.map(\.name))
+        // Existing project names for collision detection. Mutable: each name handed out is
+        // reserved back into the set so that two same-named projects within ONE import (or a
+        // base that already exists) each get a distinct suffix instead of colliding again.
+        // Only LIVE projects count for collision detection — trashed names must not leak into
+        // this live interaction (else importing after trashing a "Foo (1)" would jump to "(2)").
+        let existingProjects: [ProjectData] = (try? context.fetch(FetchDescriptor(ProjectData.self))) ?? []
+        var existingNames = Set(existingProjects.filter { $0.deletedAt == nil }.map(\.name))
+
+        // TEMP INSTRUMENTATION — diagnose "existing project gets renamed on import" report.
+        // Logs every naming decision to ~/Library/Application Support/Scout/import-debug.log.
+        func debugLog(_ s: String) {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Scout", isDirectory: true)
+            let url = dir.appendingPathComponent("import-debug.log")
+            let line = "\(ISO8601DateFormatter().string(from: Date()))  \(s)\n"
+            if let h = try? FileHandle(forWritingTo: url) {
+                h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close()
+            } else {
+                try? line.data(using: .utf8)!.write(to: url)
+            }
+        }
+        debugLog("=== IMPORT START ===")
+        for p in existingProjects {
+            debugLog("EXISTING project: name=\(p.name.debugDescription) uuid=\(p.uuid) deletedAt=\(String(describing: p.deletedAt))")
+        }
+        debugLog("LIVE existingNames seed = \(existingNames.sorted())")
 
         func uniqueName(_ base: String) -> String {
-            guard existingNames.contains(base) else { return base }
-            var n = 2
-            while existingNames.contains("\(base) \(n)") { n += 1 }
-            return "\(base) \(n)"
+            let chosen: String
+            if existingNames.contains(base) {
+                var n = 1
+                while existingNames.contains("\(base) (\(n))") { n += 1 }
+                chosen = "\(base) (\(n))"
+            } else {
+                chosen = base
+            }
+            existingNames.insert(chosen)   // reserve so the next call won't reuse it
+            debugLog("uniqueName(base=\(base.debugDescription)) -> chosen=\(chosen.debugDescription)")
+            return chosen
         }
 
         func copyPhotos(_ files: [String]) {
@@ -283,6 +313,7 @@ enum BackupService {
             var fresh = bp; fresh.uuid = UUID()
             fresh.name = uniqueName(bp.name)
             let project = ProjectData.fromBackup(fresh, context: context)
+            debugLog("CREATED new project: name=\(project.name.debugDescription) uuid=\(project.uuid) (from backup name=\(bp.name.debugDescription))")
             summary.projectsAdded += 1
             for bl in bp.lists           { _ = insertList(bl, project: project) }
             for pin in bp.importedPhotos { insertPin(pin, list: nil, project: project) }
@@ -337,7 +368,7 @@ enum BackupService {
                                 context: NSManagedObjectContext,
                                 progress: (@Sendable (String, Double) -> Void)? = nil) async -> RelinkSummary {
         // --- Snapshot the pins that still need work (main/context thread, value types only) ---
-        let allPins: [PinnedLocationData] = (try? context.fetch(FetchDescriptor<PinnedLocationData>())) ?? []
+        let allPins: [PinnedLocationData] = (try? context.fetch(FetchDescriptor(PinnedLocationData.self))) ?? []
         var objectIDs: [NSManagedObjectID] = []
         var infos: [RelinkPinInfo] = []
         var alreadyLinked = 0

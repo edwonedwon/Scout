@@ -84,7 +84,7 @@ enum PhotoImportService {
         var results: [ImportResult] = []
         let total = urls.count
         for (order, url) in urls.enumerated() {
-            await onProgress?(order, total)
+            onProgress?(order, total)
             // Fast filename check before touching the file.
             if dedup.filenames.contains(url.lastPathComponent) { continue }
 
@@ -231,7 +231,9 @@ enum PhotoImportService {
     }
 
     /// Image file extensions we treat as "originals" worth scanning for (camera RAW + HEIF + common).
-    static let originalExtensions: Set<String> = [
+    /// `nonisolated` so non-main-actor callers (BackupService helpers) can read this constant set
+    /// without an actor-isolation warning — it's an immutable literal, safe to read from anywhere.
+    nonisolated static let originalExtensions: Set<String> = [
         "jpg","jpeg","heic","heif","hif","png","tif","tiff",
         "arw","cr2","cr3","nef","dng","raw","orf","rw2",
     ]

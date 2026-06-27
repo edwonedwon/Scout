@@ -106,8 +106,8 @@ private let sidebarTopPadding: CGFloat = 55
 /// purgeTrigger handler), so no @ObservedObject view is bound to a model being deleted.
 @MainActor
 func purgeAllProjects(_ context: NSManagedObjectContext) {
-    let projects: [ProjectData] = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
-    let listsBefore: [LocationListData] = (try? context.fetch(FetchDescriptor<LocationListData>())) ?? []
+    let projects: [ProjectData] = (try? context.fetch(FetchDescriptor(ProjectData.self))) ?? []
+    let listsBefore: [LocationListData] = (try? context.fetch(FetchDescriptor(LocationListData.self))) ?? []
 
     DebugLogger.shared.log("--- BEFORE PURGE ---", level: .warning, tag: "Purge")
     DebugLogger.shared.log("Projects (\(projects.count)):", level: .info, tag: "Purge")
@@ -129,13 +129,13 @@ func purgeAllProjects(_ context: NSManagedObjectContext) {
     // (purgeTrigger), so no @ObservedObject is bound to a victim. We delete pins and lists
     // explicitly (relationships are Nullify, not cascade — cascade is done in code), and since
     // EVERYTHING is being removed there are no dangling references to fault on.
-    for pin in (try? context.fetch(FetchDescriptor<PinnedLocationData>())) ?? [] { context.delete(pin) }
-    for list in (try? context.fetch(FetchDescriptor<LocationListData>())) ?? [] { context.delete(list) }
-    for project in (try? context.fetch(FetchDescriptor<ProjectData>())) ?? [] { context.delete(project) }
+    for pin in (try? context.fetch(FetchDescriptor(PinnedLocationData.self))) ?? [] { context.delete(pin) }
+    for list in (try? context.fetch(FetchDescriptor(LocationListData.self))) ?? [] { context.delete(list) }
+    for project in (try? context.fetch(FetchDescriptor(ProjectData.self))) ?? [] { context.delete(project) }
     try? context.save()
 
-    let projectsAfter = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
-    let listsAfter = (try? context.fetch(FetchDescriptor<LocationListData>())) ?? []
+    let projectsAfter = (try? context.fetch(FetchDescriptor(ProjectData.self))) ?? []
+    let listsAfter = (try? context.fetch(FetchDescriptor(LocationListData.self))) ?? []
     DebugLogger.shared.log("--- AFTER PURGE ---", level: .warning, tag: "Purge")
     DebugLogger.shared.log("Projects remaining: \(projectsAfter.count)", level: projectsAfter.isEmpty ? .success : .error, tag: "Purge")
     DebugLogger.shared.log("Lists remaining: \(listsAfter.count)", level: listsAfter.isEmpty ? .success : .error, tag: "Purge")
@@ -194,6 +194,8 @@ struct ProjectsPanel: View {
     @State private var renameText = ""
     @State private var expandedProjectTrash = false
     @State private var showEmptyProjectTrashConfirm = false
+    /// Project highlighted by a single click. Single click only selects; double click opens.
+    @State private var selectedProjectID: NSManagedObjectID? = nil
 
     var body: some View {
         NavigationStack(path: $navPath) {
@@ -274,20 +276,34 @@ struct ProjectsPanel: View {
         List {
             Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
             ForEach(projects) { project in
-                NavigationLink(value: project) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(project.name)
-                            .font(.headline)
-                        let listCount = project.liveLists.count
-                        let photoCount = project.livePhotos.count
-                        if listCount + photoCount > 0 {
-                            Text("\(listCount) lists · \(photoCount) photos")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                let isSelected = selectedProjectID == project.persistentModelID
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(project.name)
+                        .font(.headline)
+                    let listCount = project.liveLists.count
+                    let photoCount = project.livePhotos.count
+                    if listCount + photoCount > 0 {
+                        Text("\(listCount) lists · \(photoCount) photos")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .padding(.vertical, 4)
                 }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+                )
+                // Single click selects only; double click opens. (A plain NavigationLink
+                // navigates on single click — not what we want for projects.)
+                .onTapGesture { selectedProjectID = project.persistentModelID }
+                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                    selectedProjectID = project.persistentModelID
+                    navPath = [project]
+                })
+                .listRowBackground(Color.clear)
                 .contextMenu {
                     Button {
                         renameText = project.name
@@ -431,16 +447,29 @@ struct ProjectsPanel: View {
     }
 
     private func hardDeleteProject(_ project: ProjectData) {
-        // Manually detach children before deleting to prevent cascade failures that leave
-        // orphaned records (SwiftData cascade isn't always honored with CloudKit store).
-        for list in project.lists {
+        // Cascade is NOT reliably honored with the CloudKit store, so we delete the whole graph
+        // by hand. CRITICAL: we must DELETE every child, not just detach it — an earlier version
+        // detached pins inside lists (`pin.list = nil`) but only deleted loose importedPhotos,
+        // leaking every in-list pin as an orphan (1,660 of them surfaced in the Data Inspector).
+        // Snapshot each relationship into an Array first: deleting / nil-ing the inverse mutates
+        // the live relationship set, which is unsafe to mutate mid-iteration.
+        // `project.lists` is the flat set of ALL lists (parent + child), so one pass covers them.
+        for list in Array(project.lists) {
+            for pin in Array(list.pins) {
+                pin.list = nil
+                modelContext.delete(pin)
+            }
             list.project = nil
-            for pin in list.pins { pin.list = nil }
+            list.parentList = nil
             modelContext.delete(list)
         }
-        for pin in project.importedPhotos {
+        for pin in Array(project.importedPhotos) {
             pin.owningProject = nil
             modelContext.delete(pin)
+        }
+        for script in Array(project.scripts) {
+            for h in Array(script.highlights) { modelContext.delete(h) }
+            modelContext.delete(script)
         }
         modelContext.delete(project)
         try? modelContext.save()
@@ -639,7 +668,11 @@ private struct ProjectDetailView: View {
     // not on every render triggered by selection or scroll state.
     @State private var cachedSidebarItems: [SidebarItem] = []
     // Held so moveSelection can scroll without needing to be inside the ScrollViewReader body.
-    @State private var listProxyHolder: ScrollViewProxy? = nil
+    // Stored in a reference box (not a plain @State ScrollViewProxy?) so body can stash the proxy
+    // without "Modifying state during view update" — mutating a property of a stable class
+    // instance is not a SwiftUI state change, and we never want stashing it to trigger a re-render.
+    private final class ProxyBox { var proxy: ScrollViewProxy? }
+    @State private var listProxyBox = ProxyBox()
     // Undo stack of trashed-photo batches (each batch = the persistent ids trashed together).
     // ⌘Z pops the last batch and restores those photos.
     @State private var trashUndoStack: [[PersistentIdentifier]] = []
@@ -843,7 +876,7 @@ private struct ProjectDetailView: View {
             let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil })
             if !pins.isEmpty {
                 var tx = Transaction(animation: .none); tx.disablesAnimations = true
-                withTransaction(tx) { expandedListIDs.insert(list.persistentModelID) }
+                withTransaction(tx) { _ = expandedListIDs.insert(list.persistentModelID) }
                 // Re-compute flat after expansion to find the pin's index.
                 let newFlat = flatVisibleRows
                 let targetPin = delta > 0 ? pins.first! : pins.last!
@@ -866,7 +899,7 @@ private struct ProjectDetailView: View {
 
         // .none anchor: only scrolls enough to make the row visible; doesn't re-center.
         // Scroll by the row's ScrollViewReader identity (PersistentIdentifier), not the uuid.
-        listProxyHolder?.scrollTo(target.scrollID, anchor: .none)
+        listProxyBox.proxy?.scrollTo(target.scrollID, anchor: .none)
     }
 
     private func rebuildSidebarItems() {
@@ -2369,7 +2402,7 @@ private struct ProjectDetailView: View {
 
     var body: some View {
         ScrollViewReader { listProxy in
-        let _ = { listProxyHolder = listProxy }()
+        let _ = { listProxyBox.proxy = listProxy }()
         VStack(spacing: 0) {
         sidebarSearchField
         List {
@@ -2541,7 +2574,7 @@ private struct ProjectDetailView: View {
             // and the sidebar rows already reflect it. Overwriting it with [pin.uuid] on every
             // highlight change clobbered grid/map MULTI-select back to a single item — that was
             // the long-standing "can't multi-select in the grid" bug.
-            listProxyHolder?.scrollTo(pin.persistentModelID, anchor: nil)
+            listProxyBox.proxy?.scrollTo(pin.persistentModelID, anchor: nil)
         }
         .onChange(of: revealInListUUID) { _, uuid in
             guard let uuid, let target = revealPin(uuid) else { return }
@@ -3475,7 +3508,7 @@ private enum SidebarPreviewData {
     static var context: NSManagedObjectContext { controller.viewContext }
 
     static var project: ProjectData {
-        (try? controller.viewContext.fetch(FetchDescriptor<ProjectData>()))?.first
+        (try? controller.viewContext.fetch(FetchDescriptor(ProjectData.self)))?.first
             ?? ProjectData(context: controller.viewContext, name: "Empty")
     }
 }

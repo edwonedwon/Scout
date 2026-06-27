@@ -444,9 +444,9 @@ extension ScriptHighlight: Identifiable { var id: NSManagedObjectID { objectID }
 extension LocationListData: Identifiable { var id: NSManagedObjectID { objectID } }
 extension PinnedLocationData: Identifiable { var id: NSManagedObjectID { objectID } }
 
-/// Migration shim for SwiftData's `FetchDescriptor<T>()` (always used here with no predicate/sort):
+/// Migration shim for SwiftData's `FetchDescriptor(T.self)` (always used here with no predicate/sort):
 /// returns a Core Data fetch request for all rows of the entity, so existing
-/// `context.fetch(FetchDescriptor<T>())` call sites compile unchanged.
+/// `context.fetch(FetchDescriptor(T.self))` call sites compile unchanged.
 func FetchDescriptor<T: NSManagedObject>(_ type: T.Type = T.self) -> NSFetchRequest<T> {
     NSFetchRequest<T>(entityName: String(describing: T.self))
 }

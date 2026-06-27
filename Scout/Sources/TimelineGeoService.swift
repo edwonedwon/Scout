@@ -83,7 +83,7 @@ enum TimelineGeoService {
         let (visits, fixes) = buildIndex(entries)
         let exifFmt = makeDateFormatter(timezone: detectedTZ)
 
-        let pins: [PinnedLocationData] = (try? context.fetch(FetchDescriptor<PinnedLocationData>())) ?? []
+        let pins: [PinnedLocationData] = (try? context.fetch(FetchDescriptor(PinnedLocationData.self))) ?? []
         // Candidates: photos with no GPS yet, OR photos whose GPS came from a *previous*
         // timeline backfill (so re-importing can correct them). Photos with GPS baked into
         // the original file are never touched.
@@ -92,7 +92,7 @@ enum TimelineGeoService {
         var result = BackfillResult(detectedTimezone: tzName)
         let total = candidates.count
         for (idx, pin) in candidates.enumerated() {
-            await onProgress?(idx, total, pin.name)
+            onProgress?(idx, total, pin.name)
             // Re-read EXIF date from the first photo file using the detected timezone.
             // This bypasses any timezone error baked into the stored dateTaken.
             let date = exifDate(from: pin, formatter: exifFmt) ?? pin.dateTaken

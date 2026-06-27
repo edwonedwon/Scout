@@ -1726,7 +1726,7 @@ struct ContentView: View {
         showProjectsPanel = false
         activeListIDs = []
         openProjectUUID = ""
-        let all = (try? modelContext.fetch(FetchDescriptor<ProjectData>())) ?? []
+        let all = (try? modelContext.fetch(FetchDescriptor(ProjectData.self))) ?? []
         for project in all { modelContext.delete(project) }
         try? modelContext.save()
     }

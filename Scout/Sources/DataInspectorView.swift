@@ -23,6 +23,15 @@ struct DataInspectorView: View {
 
     @State private var onlyOrphans = false
     @State private var showDeleteConfirm = false
+    @State private var searchText = ""
+
+    /// Case-insensitive match of the trimmed query against any of the given fields (name +
+    /// metadata). Empty query matches everything.
+    private func matches(_ fields: String...) -> Bool {
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return true }
+        return fields.contains { $0.lowercased().contains(q) }
+    }
 
     private struct Reachable {
         var listIDs = Set<PersistentIdentifier>()
@@ -69,43 +78,59 @@ struct DataInspectorView: View {
         let orphanScripts = scripts.filter { !r.scriptIDs.contains($0.persistentModelID) }
         let orphanCount = orphanLists.count + orphanPins.count + orphanScripts.count
 
+        let shownProjects = projects.filter { p in
+            matches(p.name, p.uuid.uuidString, p.deletedAt != nil ? "trashed" : "")
+        }
+        let shownLists = (onlyOrphans ? orphanLists : Array(lists)).filter { l in
+            matches(l.name, r.listInfo[l.persistentModelID] ?? "", l.uuid.uuidString,
+                    l.deletedAt != nil ? "trashed" : "")
+        }
+        let shownPins = (onlyOrphans ? orphanPins : Array(pins)).filter { p in
+            matches(p.name, r.pinInfo[p.persistentModelID] ?? "", p.uuid.uuidString,
+                    p.deletedAt != nil ? "trashed" : "")
+        }
+        let shownScripts = (onlyOrphans ? orphanScripts : Array(scripts)).filter { s in
+            matches(s.name, s.uuid.uuidString)
+        }
+
         return VStack(spacing: 0) {
             header(orphanCount: orphanCount, reachable: r)
+            searchBar
             Divider()
             List {
                 Section {
-                    ForEach(projects, id: \.persistentModelID) { p in
+                    ForEach(shownProjects, id: \.persistentModelID) { p in
                         row(title: p.name.isEmpty ? "(untitled)" : p.name,
                             subtitle: "\(p.lists.count) lists · \(p.importedPhotos.count) loose · \(p.scripts.count) scripts",
-                            orphan: false)
+                            orphan: false, trashed: p.deletedAt != nil)
                     }
-                } header: { Text("Projects (\(projects.count))").font(.caption.bold()) }
+                } header: { Text("Projects (\(shownProjects.count))").font(.caption.bold()) }
 
                 Section {
-                    ForEach(onlyOrphans ? orphanLists : Array(lists), id: \.persistentModelID) { l in
+                    ForEach(shownLists, id: \.persistentModelID) { l in
                         let orphan = !r.listIDs.contains(l.persistentModelID)
                         row(title: l.name.isEmpty ? "(unnamed list)" : l.name,
                             subtitle: orphan ? "⚠️ no live project (deleted)" : (r.listInfo[l.persistentModelID] ?? ""),
-                            orphan: orphan)
+                            orphan: orphan, trashed: l.deletedAt != nil)
                     }
-                } header: { Text("Lists — \(lists.count) total, \(orphanLists.count) orphaned").font(.caption.bold()) }
+                } header: { Text("Lists — \(shownLists.count) shown / \(lists.count) total, \(orphanLists.count) orphaned").font(.caption.bold()) }
 
                 Section {
-                    ForEach(onlyOrphans ? orphanPins : Array(pins), id: \.persistentModelID) { p in
+                    ForEach(shownPins, id: \.persistentModelID) { p in
                         let orphan = !r.pinIDs.contains(p.persistentModelID)
                         row(title: p.name.isEmpty ? "(unnamed pin)" : p.name,
                             subtitle: orphan ? "⚠️ orphaned" : (r.pinInfo[p.persistentModelID] ?? ""),
-                            orphan: orphan)
+                            orphan: orphan, trashed: p.deletedAt != nil)
                     }
-                } header: { Text("Pins — \(pins.count) total, \(orphanPins.count) orphaned").font(.caption.bold()) }
+                } header: { Text("Pins — \(shownPins.count) shown / \(pins.count) total, \(orphanPins.count) orphaned").font(.caption.bold()) }
 
                 if !scripts.isEmpty {
                     Section {
-                        ForEach(onlyOrphans ? orphanScripts : Array(scripts), id: \.persistentModelID) { s in
+                        ForEach(shownScripts, id: \.persistentModelID) { s in
                             let orphan = !r.scriptIDs.contains(s.persistentModelID)
-                            row(title: s.name, subtitle: orphan ? "⚠️ orphaned" : "\(s.highlights.count) highlights", orphan: orphan)
+                            row(title: s.name, subtitle: orphan ? "⚠️ orphaned" : "\(s.highlights.count) highlights", orphan: orphan, trashed: false)
                         }
-                    } header: { Text("Scripts — \(scripts.count) total, \(orphanScripts.count) orphaned").font(.caption.bold()) }
+                    } header: { Text("Scripts — \(shownScripts.count) shown / \(scripts.count) total, \(orphanScripts.count) orphaned").font(.caption.bold()) }
                 }
             }
             .listStyle(.inset)
@@ -138,8 +163,29 @@ struct DataInspectorView: View {
         .padding(12)
     }
 
-    private func row(title: String, subtitle: String, orphan: Bool) -> some View {
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.secondary)
+            TextField("Search by name, metadata, or UUID…", text: $searchText)
+                .textFieldStyle(.plain)
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private func row(title: String, subtitle: String, orphan: Bool, trashed: Bool) -> some View {
         HStack(spacing: 8) {
+            if trashed {
+                Image(systemName: "trash.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.red.opacity(0.8))
+                    .help("In the Trash")
+            }
             if orphan {
                 Text("ORPHAN").font(.system(size: 9, weight: .bold))
                     .padding(.horizontal, 5).padding(.vertical, 1)
@@ -151,7 +197,7 @@ struct DataInspectorView: View {
             }
             Spacer()
         }
-        .listRowBackground(orphan ? Color.red.opacity(0.08) : Color.clear)
+        .listRowBackground(orphan ? Color.red.opacity(0.08) : (trashed ? Color.red.opacity(0.04) : Color.clear))
     }
 
     private func deleteOrphans(reachable r: Reachable) {
