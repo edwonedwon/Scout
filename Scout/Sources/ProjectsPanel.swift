@@ -3162,8 +3162,11 @@ struct NewListForSceneSheet: View {
     let onDismiss: () -> Void
     let onConfirm: (String, LocationListData?) -> Void
 
+    /// The committed parent (nil = top level).
     @State private var parent: LocationListData?
     @State private var query = ""
+    /// Keyboard highlight index into `options` (0 = "Top level", then filtered lists).
+    @State private var highlighted = 0
     @FocusState private var nameFocused: Bool
 
     // Same source + ordering the sidebar and Move box use; trashed excluded.
@@ -3177,6 +3180,8 @@ struct NewListForSceneSheet: View {
         guard !q.isEmpty else { return projectLists }
         return projectLists.filter { $0.name.localizedCaseInsensitiveContains(q) }
     }
+    /// Selectable options: index 0 is "Top level" (nil), the rest are the filtered lists.
+    private var options: [LocationListData?] { [nil] + filtered }
 
     var body: some View {
         VStack(spacing: 14) {
@@ -3184,35 +3189,43 @@ struct NewListForSceneSheet: View {
             TextField("List name", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .focused($nameFocused)
-                .onSubmit(commit)
+                .onSubmit(handleReturn)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("PUT INSIDE (OPTIONAL)")
+                Text("PUT INSIDE (OPTIONAL) — ↑↓ to choose, ⏎ to select")
                     .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.tertiary).font(.caption)
                     TextField("Filter folders…", text: $query).textFieldStyle(.plain)
+                        .onSubmit(handleReturn)
                 }
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
 
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        parentRow(label: "Top level (no folder)", color: nil, isSelected: parent == nil) {
-                            parent = nil
-                        }
-                        ForEach(filtered, id: \.persistentModelID) { list in
-                            parentRow(label: list.name,
-                                      color: Color(hexString: list.colorHex),
-                                      isSelected: parent?.persistentModelID == list.persistentModelID) {
-                                parent = list
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(options.enumerated()), id: \.offset) { idx, opt in
+                                parentRow(
+                                    label: opt?.name ?? "Top level (no folder)",
+                                    color: opt.map { Color(hexString: $0.colorHex) },
+                                    isSelected: parent?.persistentModelID == opt?.persistentModelID,
+                                    isHighlighted: idx == highlighted
+                                ) {
+                                    highlighted = idx
+                                    parent = opt
+                                }
+                                .id(idx)
                             }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
+                    .frame(height: 160)
+                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                    .onChange(of: highlighted) { _, _ in
+                        withAnimation { proxy.scrollTo(min(max(highlighted, 0), options.count - 1), anchor: .center) }
+                    }
                 }
-                .frame(height: 160)
-                .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
             }
 
             HStack {
@@ -3225,11 +3238,20 @@ struct NewListForSceneSheet: View {
         }
         .padding(24)
         .frame(width: 340)
-        .onAppear { nameFocused = true }
+        // Arrow/escape via hidden shortcut buttons (not .onKeyPress on the field, which on macOS
+        // would stop the live text binding — see MoveToListSheet's notes).
+        .background {
+            Button("") { move(1) }.keyboardShortcut(.downArrow, modifiers: []).opacity(0).allowsHitTesting(false)
+            Button("") { move(-1) }.keyboardShortcut(.upArrow, modifiers: []).opacity(0).allowsHitTesting(false)
+            Button("") { onDismiss() }.keyboardShortcut(.escape, modifiers: []).opacity(0).allowsHitTesting(false)
+        }
+        .onAppear { DispatchQueue.main.async { nameFocused = true } }
+        .onChange(of: query) { highlighted = 0 }
     }
 
     @ViewBuilder
-    private func parentRow(label: String, color: Color?, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    private func parentRow(label: String, color: Color?, isSelected: Bool, isHighlighted: Bool,
+                           action: @escaping () -> Void) -> some View {
         HStack(spacing: 8) {
             if let color {
                 Circle().fill(color).frame(width: 9, height: 9)
@@ -3241,10 +3263,28 @@ struct NewListForSceneSheet: View {
             if isSelected { Image(systemName: "checkmark").font(.caption2).foregroundStyle(.tint) }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
-        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear,
+        .background(isHighlighted ? Color.accentColor.opacity(0.25)
+                    : (isSelected ? Color.accentColor.opacity(0.12) : Color.clear),
                     in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
         .onTapGesture(perform: action)
+    }
+
+    private func move(_ delta: Int) {
+        guard !options.isEmpty else { return }
+        highlighted = (highlighted + delta + options.count) % options.count
+    }
+
+    /// Return: if the highlighted option isn't the selected parent yet, SELECT it. If it's
+    /// already selected (or it's the preselected top level), CREATE the list.
+    private func handleReturn() {
+        guard !options.isEmpty else { commit(); return }
+        let opt = options[min(max(highlighted, 0), options.count - 1)]
+        if parent?.persistentModelID != opt?.persistentModelID {
+            parent = opt
+        } else {
+            commit()
+        }
     }
 
     private func commit() {
