@@ -152,7 +152,10 @@ func purgeAllProjects(_ context: ModelContext) {
 
 struct ProjectsPanel: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \ProjectData.createdAt) private var projects: [ProjectData]
+    @Query(filter: #Predicate<ProjectData> { $0.deletedAt == nil },
+           sort: \ProjectData.createdAt) private var projects: [ProjectData]
+    @Query(filter: #Predicate<ProjectData> { $0.deletedAt != nil },
+           sort: \ProjectData.createdAt) private var trashedProjects: [ProjectData]
 
     /// THE shared selection store (sidebar + grid + map), owned by ContentView.
     var selection: SelectionStore
@@ -194,6 +197,8 @@ struct ProjectsPanel: View {
     @State private var newProjectName = ""
     @State private var renamingProject: ProjectData? = nil
     @State private var renameText = ""
+    @State private var expandedProjectTrash = false
+    @State private var showEmptyProjectTrashConfirm = false
 
     var body: some View {
         NavigationStack(path: $navPath) {
@@ -231,6 +236,7 @@ struct ProjectsPanel: View {
                let project = projects.first(where: { $0.uuid.uuidString == openProjectUUID }) {
                 navPath = [project]
             }
+            purgeExpiredProjects()
         }
         .onChange(of: navPath) { _, path in
             openProjectUUID = path.first?.uuid.uuidString ?? ""
@@ -296,30 +302,22 @@ struct ProjectsPanel: View {
                     }
                     Divider()
                     Button(role: .destructive) {
-                        // Pop nav first so NavigationStack doesn't hold a reference
-                        // to the deleted project and crash when SwiftUI re-renders.
+                        // Soft-delete: move to Trash (auto-purged after 30 days).
                         if navPath.first?.persistentModelID == project.persistentModelID {
                             navPath = []
                             openProjectUUID = ""
                             expandedListUUIDs = ""
                         }
-                        // Manually detach children before deleting to avoid cascade failures
-                        // leaving orphaned lists in the store.
-                        for list in project.lists {
-                            list.project = nil
-                            for pin in list.pins { pin.list = nil }
-                            modelContext.delete(list)
-                        }
-                        for pin in project.importedPhotos {
-                            pin.owningProject = nil
-                            modelContext.delete(pin)
-                        }
-                        modelContext.delete(project)
+                        project.deletedAt = Date()
                         try? modelContext.save()
                     } label: {
-                        Label("Delete Project", systemImage: "trash")
+                        Label("Move to Trash", systemImage: "trash")
                     }
                 }
+            }
+            // Trash section — trashed projects, collapsible, with Empty Trash + 30-day auto-purge.
+            if !trashedProjects.isEmpty {
+                projectTrashSection
             }
         }
         .navigationTitle("Projects")
@@ -343,6 +341,134 @@ struct ProjectsPanel: View {
             }
             .keyboardShortcut(.defaultAction)
             Button("Cancel", role: .cancel) { renamingProject = nil }
+        }
+        .confirmationDialog("Permanently delete \(trashedProjects.count) project\(trashedProjects.count == 1 ? "" : "s") and all their contents?",
+                            isPresented: $showEmptyProjectTrashConfirm, titleVisibility: .visible) {
+            Button("Empty Trash", role: .destructive) { emptyProjectTrash() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This cannot be undone. All lists, photos, and scripts inside the trashed projects will be permanently deleted.")
+        }
+    }
+
+    // MARK: - Project Trash
+
+    private var projectTrashSection: some View {
+        Section {
+            // Header row: chevron + icon + "Trash" label + day count + Empty Trash button.
+            HStack(spacing: 6) {
+                Button {
+                    var tx = Transaction(); tx.disablesAnimations = false
+                    withTransaction(tx) { expandedProjectTrash.toggle() }
+                } label: {
+                    Image(systemName: expandedProjectTrash ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                Image(systemName: "trash").font(.caption).foregroundStyle(.secondary)
+                Text("Trash").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Text("(\(trashedProjects.count))").font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                Button(role: .destructive) { showEmptyProjectTrashConfirm = true } label: {
+                    Text("Empty").font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.red.opacity(0.8))
+            }
+            .listRowBackground(Color.clear)
+            .padding(.top, 4)
+
+            if expandedProjectTrash {
+                ForEach(trashedProjects) { project in
+                    trashedProjectRow(project)
+                }
+            }
+        }
+    }
+
+    private func trashedProjectRow(_ project: ProjectData) -> some View {
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(project.name.isEmpty ? "(untitled)" : project.name)
+                    .font(.subheadline).lineLimit(1).foregroundStyle(.secondary)
+                if let deletedAt = project.deletedAt {
+                    let daysLeft = max(0, 30 - Int(Date().timeIntervalSince(deletedAt) / 86400))
+                    Text("\(daysLeft) day\(daysLeft == 1 ? "" : "s") left")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer()
+            Button {
+                project.deletedAt = nil
+                try? modelContext.save()
+            } label: {
+                Text("Put Back").font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+
+            Button(role: .destructive) {
+                purgeProject(project)
+            } label: {
+                Text("Delete").font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.red.opacity(0.8))
+        }
+        .listRowBackground(Color.red.opacity(0.06))
+    }
+
+    /// Permanently deletes a trashed project and all its contents. Must pop nav first if open.
+    private func purgeProject(_ project: ProjectData) {
+        if navPath.first?.persistentModelID == project.persistentModelID {
+            var tx = Transaction(); tx.disablesAnimations = true
+            withTransaction(tx) { navPath = [] }
+            openProjectUUID = ""
+            expandedListUUIDs = ""
+            activeListIDs = []
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                hardDeleteProject(project)
+            }
+        } else {
+            hardDeleteProject(project)
+        }
+    }
+
+    private func hardDeleteProject(_ project: ProjectData) {
+        // Manually detach children before deleting to prevent cascade failures that leave
+        // orphaned records (SwiftData cascade isn't always honored with CloudKit store).
+        for list in project.lists {
+            list.project = nil
+            for pin in list.pins { pin.list = nil }
+            modelContext.delete(list)
+        }
+        for pin in project.importedPhotos {
+            pin.owningProject = nil
+            modelContext.delete(pin)
+        }
+        modelContext.delete(project)
+        try? modelContext.save()
+    }
+
+    /// Permanently deletes all trashed projects and their contents.
+    private func emptyProjectTrash() {
+        // Pop nav first if we're inside a trashed project.
+        if let open = navPath.first, open.deletedAt != nil {
+            var tx = Transaction(); tx.disablesAnimations = true
+            withTransaction(tx) { navPath = [] }
+            openProjectUUID = ""
+            expandedListUUIDs = ""
+            activeListIDs = []
+        }
+        for project in trashedProjects { hardDeleteProject(project) }
+    }
+
+    /// Auto-purges projects that have been in the Trash for more than 30 days.
+    private func purgeExpiredProjects() {
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        for project in trashedProjects where (project.deletedAt ?? .distantFuture) < cutoff {
+            purgeProject(project)
         }
     }
 }
