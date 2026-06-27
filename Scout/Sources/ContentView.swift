@@ -283,6 +283,7 @@ struct ContentView: View {
     /// Collaboration (project sharing) popover — UI shell; real iCloud sharing is wired later
     /// per docs/collaboration-plan.md.
     @State private var showCollaborationPopover = false
+    @State private var sharingProject: ProjectData? = nil
     @State private var addPersonEmail = ""
     @State private var addPersonRole: ShareRole = .editor
     /// Whole-page zoom for the Script view (Cmd +/-), persisted across launches. Starts a bit
@@ -907,6 +908,10 @@ struct ContentView: View {
                 )
             }
         }
+        // Project sharing: reliable invite-link sheet (works on macOS, unlike the AppKit picker).
+        .sheet(item: $sharingProject) { project in
+            ProjectShareSheet(project: project, onDismiss: { sharingProject = nil })
+        }
         .overlay(alignment: .top) {
             // Hidden on the empty-state splash (no project open) so only the icon + name show.
             if openProject != nil {
@@ -1029,7 +1034,7 @@ struct ContentView: View {
     private func shareProject() {
         guard let project = openProject else { return }
         showCollaborationPopover = false
-        Task { await ProjectSharing.presentShareUI(for: project) }
+        sharingProject = project
     }
 
     private var locationTrackingButton: some View {

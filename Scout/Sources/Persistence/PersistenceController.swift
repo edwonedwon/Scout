@@ -142,6 +142,30 @@ final class PersistenceController {
         return share
     }
 
+    enum SharingError: LocalizedError {
+        case noPrivateStore, noURL
+        var errorDescription: String? {
+            switch self {
+            case .noPrivateStore: return "iCloud private store isn't loaded."
+            case .noURL: return "CloudKit didn't return an invite link (is iCloud signed in and the schema deployed?)."
+            }
+        }
+    }
+
+    /// Create-or-fetch the project's share, set its link permission (anyone-with-link can edit or
+    /// view), persist it to CloudKit, and return the shareable invite URL. This is the reliable
+    /// cross-platform path (no dependency on the flaky AppKit sharing picker): the owner copies
+    /// the link and sends it; the recipient opens it and the app's accept handler runs.
+    func makeShareLink(for project: ProjectData, editor: Bool) async throws -> URL {
+        guard let privateStore else { throw SharingError.noPrivateStore }
+        let share = try await shareForProject(project)
+        share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
+        share.publicPermission = editor ? .readWrite : .readOnly
+        let saved = try await container.persistUpdatedShare(share, in: privateStore)
+        guard let url = saved.url else { throw SharingError.noURL }
+        return url
+    }
+
     /// Accept a share the user tapped (from Messages/Mail). Called by the app delegate.
     /// The accepted records are mirrored into the local SHARED store.
     func acceptShare(metadata: CKShare.Metadata) {
