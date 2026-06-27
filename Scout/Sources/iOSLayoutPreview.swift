@@ -9,7 +9,7 @@ import MapKit
 
 // MARK: - Mock data
 
-private struct MockPin: Identifiable {
+struct MockPin: Identifiable {
     let id = UUID()
     var name: String
     var notes: String
@@ -20,45 +20,34 @@ private struct MockPin: Identifiable {
     var dateTaken: Date?
 }
 
-private struct MockList: Identifiable {
+struct MockList: Identifiable {
     let id = UUID()
     var name: String
     var color: Color
     var pins: [MockPin]
-    /// Child lists — when non-empty this list renders as a folder (folder icon, indented kids).
     var children: [MockList] = []
 
     var isFolder: Bool { !children.isEmpty }
-    /// Pin count including all child lists (matches the Mac folder count badge).
     var totalPinCount: Int { pins.count + children.reduce(0) { $0 + $1.pins.count } }
-    /// Leaf lists that actually hold pins: self when not a folder, else the children.
     var leafLists: [MockList] { isFolder ? children : [self] }
 }
 
-private extension MockProject {
-    /// All photo-bearing lists, flattening folders into their child lists.
-    var leafLists: [MockList] { lists.flatMap(\.leafLists) }
-    /// Every pin in the project (across lists, folders, and uncategorized).
-    var allPins: [MockPin] { leafLists.flatMap(\.pins) + uncategorized }
-}
-
-private struct MockProject: Identifiable {
+struct MockProject: Identifiable {
     let id = UUID()
     var name: String
     var lists: [MockList]
     var uncategorized: [MockPin]
 }
 
-private struct MockTrack: Identifiable {
-    let id = UUID()
-    var name: String
-    var date: Date
-    var distanceKm: Double
-    var photoCount: Int
-    var durationMin: Int
+private extension MockProject {
+    var leafLists: [MockList] { lists.flatMap(\.leafLists) }
+    var allPins: [MockPin] { leafLists.flatMap(\.pins) + uncategorized }
+    /// All leaf list IDs — used to initialise the "all visible" default state.
+    var allLeafListIDs: Set<UUID> { Set(leafLists.map(\.id)) }
 }
 
-// Tokyo scouting project
+// MARK: - Mock content
+
 private let tokyoProject = MockProject(
     name: "Tokyo — Spring 2026",
     lists: [
@@ -76,7 +65,6 @@ private let tokyoProject = MockProject(
             MockPin(name: "Senso-ji Temple", notes: "Pre-dawn, before crowds. Long exposure on the lantern.", lat: 35.7147, lng: 139.7966, listColor: .green, dateTaken: Date()),
             MockPin(name: "Nakamise-dori", notes: "Leading lines down the shopping street", lat: 35.7133, lng: 139.7960, listColor: .green),
         ]),
-        // A folder: a list that holds other lists (matches the Mac folder feature).
         MockList(name: "Cycling Roads", color: .gray, pins: [], children: [
             MockList(name: "View From Road", color: .blue, pins: [
                 MockPin(name: "Arakawa Riverside", notes: "Long flat path, mountains in the distance", lat: 35.7600, lng: 139.7800, listColor: .blue, dateTaken: Date()),
@@ -92,7 +80,6 @@ private let tokyoProject = MockProject(
     ]
 )
 
-// A second project so the Projects tab can show a real project-list root.
 private let osakaProject = MockProject(
     name: "Osaka — Industrial",
     lists: [
@@ -114,37 +101,116 @@ private let tracks: [MockTrack] = [
     MockTrack(name: "Asakusa Pre-Dawn", date: Date().addingTimeInterval(-86400 * 3), distanceKm: 1.9, photoCount: 31, durationMin: 55),
 ]
 
-// MARK: - Root: iOS app tab structure
+struct MockTrack: Identifiable {
+    let id = UUID()
+    var name: String
+    var date: Date
+    var distanceKm: Double
+    var photoCount: Int
+    var durationMin: Int
+}
 
+// MARK: - Root: project picker → in-project tabs
+
+/// Entry point. Shows the project list; once a project is chosen, transitions into the
+/// in-project tab shell. The project switcher in the nav bar returns here.
 struct iOSAppPreview: View {
+    @State private var activeProject: MockProject? = nil
+
+    var body: some View {
+        if let project = activeProject {
+            iOSInProjectView(project: project, onSwitchProject: { activeProject = nil })
+                .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+        } else {
+            iOSProjectListView(onSelect: { p in
+                withAnimation(.easeInOut(duration: 0.28)) { activeProject = p }
+            })
+            .transition(.asymmetric(insertion: .move(edge: .leading), removal: .move(edge: .trailing)))
+        }
+    }
+}
+
+/// Full-screen project list — same root you'd see before entering a project.
+private struct iOSProjectListView: View {
+    let onSelect: (MockProject) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(allProjects) { project in
+                    Button {
+                        onSelect(project)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "folder.fill")
+                                .font(.title3)
+                                .foregroundStyle(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(project.name).font(.body).foregroundStyle(.primary)
+                                Text("\(project.lists.count) lists · \(project.allPins.count) locations")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("Projects")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { } label: { Image(systemName: "plus") }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - In-project shell
+
+/// Once inside a project, this TabView owns everything. All tabs are scoped to `project`.
+/// Visibility state lives here so the Lists tab and Map tab stay in sync.
+struct iOSInProjectView: View {
+    let project: MockProject
+    let onSwitchProject: () -> Void
+
+    /// Which leaf list IDs are visible on the map. Default: all on.
+    @State private var visibleListIDs: Set<UUID>
     @State private var selectedTab = 0
     @State private var showCamera = false
 
+    init(project: MockProject, onSwitchProject: @escaping () -> Void) {
+        self.project = project
+        self.onSwitchProject = onSwitchProject
+        _visibleListIDs = State(initialValue: project.allLeafListIDs)
+    }
+
     var body: some View {
         TabView(selection: $selectedTab) {
-            iOSMapTab()
+            iOSMapTab(project: project, visibleListIDs: $visibleListIDs, onBack: onSwitchProject)
                 .tabItem { Label("Map", systemImage: "map.fill") }
                 .tag(0)
 
-            iOSProjectsTab()
-                .tabItem { Label("Projects", systemImage: "folder.fill") }
+            iOSListsTab(project: project, visibleListIDs: $visibleListIDs, onBack: onSwitchProject)
+                .tabItem { Label("Locations", systemImage: "list.bullet") }
                 .tag(1)
 
-            // Centre camera tab — tapping it opens the camera sheet rather than
-            // navigating to a new screen, so this placeholder is never seen.
             Color.clear
                 .tabItem { Label("Camera", systemImage: "camera.fill") }
                 .tag(2)
 
-            iOSPhotosTab()
-                .tabItem { Label("Photos", systemImage: "photo.on.rectangle.angled") }
+            iOSScriptTab(onBack: onSwitchProject)
+                .tabItem { Label("Script", systemImage: "doc.text.fill") }
                 .tag(3)
 
-            iOSScoutTab()
+            iOSScoutTab(project: project, onBack: onSwitchProject)
                 .tabItem { Label("Scout", systemImage: "figure.walk") }
                 .tag(4)
         }
-        // Intercept the camera tab: snap back to the previous tab and open the sheet.
         .onChange(of: selectedTab) { old, new in
             if new == 2 {
                 selectedTab = old
@@ -152,7 +218,7 @@ struct iOSAppPreview: View {
             }
         }
         .fullScreenCover(isPresented: $showCamera) {
-            CameraSheetPreview()
+            CameraSheetPreview(project: project)
         }
     }
 }
@@ -160,17 +226,31 @@ struct iOSAppPreview: View {
 // MARK: - Map Tab
 
 struct iOSMapTab: View {
+    let project: MockProject
+    @Binding var visibleListIDs: Set<UUID>
+    let onBack: () -> Void
     @State private var selectedPin: MockPin? = nil
-    @State private var sheetHeight: PresentationDetent = .medium
-    private let tokyoRegion = MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917),
-        span: MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
-    )
+
+    private var visiblePins: [MockPin] {
+        project.leafLists
+            .filter { visibleListIDs.contains($0.id) }
+            .flatMap(\.pins)
+    }
+
+    private var mapCenter: CLLocationCoordinate2D {
+        guard let first = project.allPins.first else {
+            return CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917)
+        }
+        return CLLocationCoordinate2D(latitude: first.lat, longitude: first.lng)
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
-            Map(initialPosition: .region(tokyoRegion)) {
-                ForEach(tokyoProject.allPins) { pin in
+            Map(initialPosition: .region(MKCoordinateRegion(
+                center: mapCenter,
+                span: MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
+            ))) {
+                ForEach(visiblePins) { pin in
                     Annotation(pin.name, coordinate: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng)) {
                         PinDot(color: pin.listColor)
                             .onTapGesture { selectedPin = pin }
@@ -179,25 +259,29 @@ struct iOSMapTab: View {
             }
             .ignoresSafeArea()
 
-            // Search bar overlay
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                Text("Search locations…")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Image(systemName: "slider.horizontal.3")
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 36, height: 36)
+                        .background(.regularMaterial, in: Circle())
+                }
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    Text("Search locations…").foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "slider.horizontal.3").foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 12)
             .padding(.top, 8)
-
         }
         .sheet(item: $selectedPin) { pin in
-            PinCalloutSheet(pin: pin)
+            PinCalloutSheet(pin: pin, project: project)
                 .presentationDetents([.height(320), .large])
                 .presentationDragIndicator(.visible)
                 .presentationBackgroundInteraction(.enabled)
@@ -218,19 +302,15 @@ private struct PinDot: View {
 
 private struct PinCalloutSheet: View {
     let pin: MockPin
-    @State private var selectedList = 0
-    private let lists = tokyoProject.lists
+    let project: MockProject
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Photo strip
             RoundedRectangle(cornerRadius: 10)
                 .fill(Color(.systemGray5))
                 .frame(height: 130)
                 .overlay {
-                    Image(systemName: "photo")
-                        .font(.largeTitle)
-                        .foregroundStyle(.tertiary)
+                    Image(systemName: "photo").font(.largeTitle).foregroundStyle(.tertiary)
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -241,8 +321,7 @@ private struct PinCalloutSheet: View {
                     Text(pin.name).font(.headline)
                     Spacer()
                     Button { } label: {
-                        Image(systemName: "map")
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "map").foregroundStyle(.secondary)
                     }
                 }
 
@@ -257,9 +336,8 @@ private struct PinCalloutSheet: View {
 
                 HStack {
                     Menu {
-                        ForEach(lists) { list in
-                            Button {
-                            } label: {
+                        ForEach(project.leafLists) { list in
+                            Button { } label: {
                                 Label(list.name, systemImage: "mappin.circle")
                             }
                         }
@@ -268,8 +346,7 @@ private struct PinCalloutSheet: View {
                             .font(.subheadline.weight(.medium))
                     }
                     Spacer()
-                    Button {
-                    } label: {
+                    Button { } label: {
                         Label("Open in Photos", systemImage: "photo")
                             .font(.subheadline.weight(.medium))
                     }
@@ -280,49 +357,59 @@ private struct PinCalloutSheet: View {
     }
 }
 
-// MARK: - Projects Tab
+// MARK: - Locations Tab
 
-/// Projects tab root: a list of all projects → tap into a project's lists/folders.
-struct iOSProjectsTab: View {
+/// The Locations tab has two modes: list view (sidebar-style with eye toggles) and photo grid view.
+/// The toggle lives in the nav bar. Visibility changes here propagate to the Map tab.
+struct iOSListsTab: View {
+    let project: MockProject
+    @Binding var visibleListIDs: Set<UUID>
+    let onBack: () -> Void
+
+    @State private var isGridMode = false
+    @State private var expanded: Set<UUID> = []
+
     var body: some View {
         NavigationStack {
-            List {
-                ForEach(allProjects) { project in
-                    NavigationLink {
-                        iOSProjectDetailView(project: project)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: "folder.fill")
-                                .foregroundStyle(.orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(project.name).font(.body)
-                                Text("\(project.lists.count) lists")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
+            Group {
+                if isGridMode {
+                    iOSListsGridView(project: project)
+                } else {
+                    iOSListsListView(project: project, visibleListIDs: $visibleListIDs, expanded: $expanded)
                 }
             }
-            .navigationTitle("Projects")
+            .navigationTitle("Locations")
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: onBack) {
+                        Image(systemName: "chevron.left").font(.body.weight(.semibold))
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
-                    Button { } label: { Image(systemName: "plus") }
+                    HStack(spacing: 12) {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { isGridMode.toggle() }
+                        } label: {
+                            Image(systemName: isGridMode ? "list.bullet" : "square.grid.2x2")
+                                .contentTransition(.symbolEffect(.replace))
+                        }
+                        Menu {
+                            Button { } label: { Label("New Location", systemImage: "plus") }
+                            Button { } label: { Label("Import Photos", systemImage: "photo.badge.plus") }
+                        } label: { Image(systemName: "plus") }
+                    }
                 }
             }
         }
     }
 }
 
-/// A single project's lists (with folders) + uncategorized photos. Mirrors the Mac sidebar:
-/// eye toggles for visibility, folders that expand to show child lists, a folder acting as a
-/// master visibility gate over its children.
-struct iOSProjectDetailView: View {
-    fileprivate let project: MockProject
-    // Visibility set (eye on). A list is effectively visible only if it AND its ancestors are on.
-    @State private var visible: Set<UUID> = []
-    @State private var expanded: Set<UUID> = []
+/// List mode — sidebar-style rows with eye toggles driving map visibility.
+private struct iOSListsListView: View {
+    let project: MockProject
+    @Binding var visibleListIDs: Set<UUID>
+    @Binding var expanded: Set<UUID>
     @State private var search = ""
 
     var body: some View {
@@ -331,7 +418,7 @@ struct iOSProjectDetailView: View {
                 if list.isFolder {
                     folderRows(list)
                 } else {
-                    listRow(list, indent: 0, gatedOff: false)
+                    listRow(list, indent: 0, parentVisible: true)
                 }
             }
 
@@ -343,24 +430,14 @@ struct iOSProjectDetailView: View {
                 }
             }
         }
-        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search photos")
-        .navigationTitle(project.name)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button { } label: { Label("New List", systemImage: "plus") }
-                    Button { } label: { Label("Import Photos", systemImage: "photo.badge.plus") }
-                } label: { Image(systemName: "plus") }
-            }
-        }
+        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search locations")
     }
 
     @ViewBuilder
     private func folderRows(_ folder: MockList) -> some View {
         let isOpen = expanded.contains(folder.id)
-        let folderOff = !visible.contains(folder.id)
-        // Folder header row
+        let folderVisible = visibleListIDs.contains(folder.id)
+
         HStack(spacing: 10) {
             Button {
                 if isOpen { expanded.remove(folder.id) } else { expanded.insert(folder.id) }
@@ -379,14 +456,15 @@ struct iOSProjectDetailView: View {
 
         if isOpen {
             ForEach(folder.children) { child in
-                listRow(child, indent: 1, gatedOff: folderOff)
+                listRow(child, indent: 1, parentVisible: folderVisible)
             }
         }
     }
 
     @ViewBuilder
-    private func listRow(_ list: MockList, indent: Int, gatedOff: Bool) -> some View {
-        let off = gatedOff || !visible.contains(list.id)
+    private func listRow(_ list: MockList, indent: Int, parentVisible: Bool) -> some View {
+        let isVisible = visibleListIDs.contains(list.id)
+        let effectivelyVisible = parentVisible && isVisible
         NavigationLink {
             iOSListDetailView(list: list)
         } label: {
@@ -401,20 +479,77 @@ struct iOSProjectDetailView: View {
             }
             .padding(.leading, CGFloat(indent) * 18)
             .padding(.vertical, 2)
-            .opacity(off ? 0.45 : 1)
+            .opacity(effectivelyVisible ? 1 : 0.4)
         }
     }
 
     private func eyeButton(_ id: UUID) -> some View {
         Button {
-            if visible.contains(id) { visible.remove(id) } else { visible.insert(id) }
+            if visibleListIDs.contains(id) { visibleListIDs.remove(id) } else { visibleListIDs.insert(id) }
         } label: {
-            Image(systemName: visible.contains(id) ? "eye.fill" : "eye")
-                .foregroundStyle(visible.contains(id) ? Color.accentColor : .secondary)
+            Image(systemName: visibleListIDs.contains(id) ? "eye.fill" : "eye.slash")
+                .foregroundStyle(visibleListIDs.contains(id) ? Color.accentColor : .secondary)
         }
         .buttonStyle(.plain)
     }
 }
+
+/// Grid mode — photo-centric, grouped by list in the same order as the list view.
+private struct iOSListsGridView: View {
+    let project: MockProject
+    @State private var columns = 3
+    private let gap: CGFloat = 2
+
+    var body: some View {
+        GeometryReader { geo in
+            let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(project.leafLists) { list in
+                            if !list.pins.isEmpty {
+                                Text(list.name)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(.black)
+
+                                iOSMasonryGrid(pins: list.pins, colWidth: colWidth, gap: gap, columns: columns)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 60)
+                }
+
+                // Column count slider
+                HStack(spacing: 8) {
+                    Image(systemName: "photo").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
+                    Slider(
+                        value: Binding(
+                            get: { Double(9 - columns) },
+                            set: { columns = 9 - Int($0.rounded()) }
+                        ),
+                        in: 1...8, step: 1
+                    )
+                    .tint(.white.opacity(0.6))
+                    Image(systemName: "photo").font(.system(size: 15)).foregroundStyle(.white.opacity(0.5))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial.opacity(0.8))
+                .clipShape(Capsule())
+                .padding(.bottom, 10)
+                .frame(maxWidth: 220)
+            }
+        }
+        .background(.black)
+        .colorScheme(.dark)
+    }
+}
+
+// MARK: - List / Pin detail views (unchanged)
 
 struct iOSListDetailView: View {
     fileprivate let list: MockList
@@ -452,20 +587,15 @@ struct iOSPinDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Photo
                 RoundedRectangle(cornerRadius: 0)
                     .fill(Color(.systemGray5))
                     .frame(maxWidth: .infinity)
                     .frame(height: 260)
                     .overlay {
                         VStack(spacing: 8) {
-                            Image(systemName: "photo")
-                                .font(.largeTitle)
-                                .foregroundStyle(.tertiary)
+                            Image(systemName: "photo").font(.largeTitle).foregroundStyle(.tertiary)
                             if pin.dateTaken != nil {
-                                Text("Tap to open")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
+                                Text("Tap to open").font(.caption).foregroundStyle(.tertiary)
                             }
                         }
                     }
@@ -477,12 +607,9 @@ struct iOSPinDetailView: View {
                     }
 
                     if !pin.notes.isEmpty {
-                        Text(pin.notes)
-                            .font(.body)
-                            .foregroundStyle(.secondary)
+                        Text(pin.notes).font(.body).foregroundStyle(.secondary)
                     }
 
-                    // Mini map
                     Map(initialPosition: .region(MKCoordinateRegion(
                         center: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng),
                         span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
@@ -495,12 +622,10 @@ struct iOSPinDetailView: View {
 
                     HStack(spacing: 12) {
                         Label(String(format: "%.4f, %.4f", pin.lat, pin.lng), systemImage: "location.fill")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(.secondary)
                         if let d = pin.dateTaken {
                             Label(d.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -524,100 +649,383 @@ private struct PinRow: View {
                 .fill(Color(.systemGray5))
                 .frame(width: 44, height: 44)
                 .overlay {
-                    Image(systemName: "photo")
-                        .foregroundStyle(.tertiary)
-                        .font(.caption)
+                    Image(systemName: "photo").foregroundStyle(.tertiary).font(.caption)
                 }
             VStack(alignment: .leading, spacing: 2) {
                 Text(pin.name).font(.body)
                 if !pin.notes.isEmpty {
-                    Text(pin.notes)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    Text(pin.notes).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
             Spacer()
             if pin.dateTaken != nil {
-                Image(systemName: "photo.fill")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                Image(systemName: "photo.fill").font(.caption).foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 2)
     }
 }
 
-// MARK: - Photos Tab
+// MARK: - Script Tab
 
-struct iOSPhotosTab: View {
-    @State private var columns = 3
-    private let gap: CGFloat = 2
-    private let allPins = tokyoProject.leafLists.flatMap(\.pins)
+/// Script element types — drives rendering style.
+private enum ScriptElement {
+    case sceneHeading(String)
+    case action(String)
+    case character(String)
+    case dialogue(String)
+    case parenthetical(String)
+    case transition(String)
+}
+
+/// Mock screenplay excerpt — "The Neon Gardener", Act 1.
+private let mockScript: [ScriptElement] = [
+    .sceneHeading("INT. DETECTIVE'S OFFICE — NIGHT"),
+    .action("Rain hammers the skylight. The office smells of coffee and bad decisions. MARA YUEN (40s, sharp eyes, worn leather jacket) stares at a wall covered in photographs, strings of red thread connecting the faces."),
+    .character("MARA"),
+    .dialogue("Every city has a pulse. This one stopped three nights ago."),
+    .action("She pulls a photograph off the wall. Holds it under the lamp."),
+    .character("MARA"),
+    .parenthetical("to herself"),
+    .dialogue("Who are you?"),
+
+    .sceneHeading("EXT. SHIBUYA CROSSING — CONTINUOUS"),
+    .action("The crossing floods with bodies under neon light. Umbrellas bob like a sea of jellyfish. KENJI PARK (30s, rain-soaked, nervous) weaves through the crowd, glancing behind him every few steps."),
+    .action("He spots a surveillance camera. Ducks into a doorway. Presses his back against cold tile."),
+    .character("KENJI"),
+    .parenthetical("into phone, hushed"),
+    .dialogue("She's already looking. You said I had more time."),
+    .action("A beat. He listens. His face goes still."),
+    .character("KENJI"),
+    .dialogue("Then I'm already dead."),
+    .transition("CUT TO:"),
+
+    .sceneHeading("INT. NOODLE BAR — LATER"),
+    .action("Steam rises from a dozen bowls. The place is packed and loud. Mara slides into a booth across from HOSHI (60s, calm, reads people like menus)."),
+    .character("HOSHI"),
+    .dialogue("You look like you haven't slept."),
+    .character("MARA"),
+    .dialogue("I look like I haven't slept in three years. Tonight's new."),
+    .action("Hoshi sets down two cups of tea. Doesn't ask."),
+    .character("HOSHI"),
+    .dialogue("The man in the photograph — Kenji Park. He worked for the garden project. Underground hydroponics. Funded by people who don't like questions."),
+    .character("MARA"),
+    .dialogue("What kind of people?"),
+    .character("HOSHI"),
+    .parenthetical("long pause"),
+    .dialogue("The kind who plant things and wait."),
+    .action("Mara wraps both hands around her cup. Outside, rain streaks the glass. A shadow passes."),
+
+    .sceneHeading("EXT. SIDE STREET — NIGHT"),
+    .action("Mara steps out of the noodle bar. Looks both ways. The street is empty — then isn't."),
+    .action("A figure in a grey coat stands at the far end, perfectly still under a flickering lamp. They hold an umbrella open in one hand. In the other: a single white flower."),
+    .action("They turn. Walk away. Unhurried."),
+    .character("MARA"),
+    .parenthetical("under her breath"),
+    .dialogue("There you are."),
+    .transition("FADE OUT."),
+]
+
+struct iOSScriptTab: View {
+    let onBack: () -> Void
 
     var body: some View {
         NavigationStack {
-            GeometryReader { geo in
-                let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
-                ZStack(alignment: .bottom) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            ForEach(tokyoProject.leafLists) { list in
-                                if !list.pins.isEmpty {
-                                    // Section header
-                                    Text(list.name)
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .background(.black)
-
-                                    // Masonry grid (simplified 3-column)
-                                    iOSMasonryGrid(pins: list.pins, colWidth: colWidth, gap: gap, columns: columns)
-                                }
-                            }
-                        }
-                        .padding(.bottom, 52)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(mockScript.enumerated()), id: \.offset) { _, element in
+                        ScriptElementView(element: element)
                     }
-
-                    // Size slider
-                    HStack(spacing: 8) {
-                        Image(systemName: "photo").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
-                        Slider(
-                            value: Binding(
-                                get: { Double(9 - columns) },
-                                set: { columns = 9 - Int($0.rounded()) }
-                            ),
-                            in: 1...8, step: 1
-                        )
-                        .tint(.white.opacity(0.6))
-                        Image(systemName: "photo").font(.system(size: 15)).foregroundStyle(.white.opacity(0.5))
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 24)
+            }
+            .background(Color(.systemBackground))
+            .navigationTitle("The Neon Gardener")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: onBack) {
+                        Image(systemName: "chevron.left").font(.body.weight(.semibold))
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial.opacity(0.8))
-                    .clipShape(Capsule())
-                    .padding(.bottom, 10)
-                    .frame(maxWidth: 220)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button { } label: { Image(systemName: "textformat.size") }
                 }
             }
-            .background(.black)
-            .navigationTitle("Photos")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
-            .toolbarBackground(.black, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
         }
     }
 }
 
-private struct iOSMasonryGrid: View {
-    let pins: [MockPin]
-    let colWidth: CGFloat
-    let gap: CGFloat
-    let columns: Int
+private struct ScriptElementView: View {
+    let element: ScriptElement
 
+    var body: some View {
+        switch element {
+        case .sceneHeading(let text):
+            // Bold pill-style scene heading — easy to scan while scrolling
+            Text(text)
+                .font(.system(.footnote, design: .monospaced).weight(.bold))
+                .tracking(0.5)
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(.secondarySystemFill), in: RoundedRectangle(cornerRadius: 6))
+                .padding(.top, 28)
+                .padding(.bottom, 12)
+
+        case .action(let text):
+            Text(text)
+                .font(.system(.body, design: .serif))
+                .foregroundStyle(.primary)
+                .lineSpacing(5)
+                .padding(.bottom, 14)
+
+        case .character(let text):
+            Text(text)
+                .font(.system(.subheadline, design: .monospaced).weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 4)
+                .padding(.bottom, 2)
+
+        case .dialogue(let text):
+            Text(text)
+                .font(.system(.body, design: .serif))
+                .foregroundStyle(.primary)
+                .lineSpacing(4)
+                .padding(.leading, 28)
+                .padding(.trailing, 16)
+                .padding(.bottom, 10)
+
+        case .parenthetical(let text):
+            Text("(\(text))")
+                .font(.system(.subheadline, design: .serif).italic())
+                .foregroundStyle(.secondary)
+                .padding(.leading, 28)
+                .padding(.bottom, 2)
+
+        case .transition(let text):
+            Text(text)
+                .font(.system(.footnote, design: .monospaced).weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 16)
+                .padding(.bottom, 8)
+        }
+    }
+}
+
+// MARK: - Scout Tab
+
+struct iOSScoutTab: View {
+    let project: MockProject
+    let onBack: () -> Void
+    @State private var isRecording = false
+
+    var body: some View {
+        NavigationStack {
+            if isRecording {
+                iOSRecordingView(isRecording: $isRecording)
+            } else {
+                iOSScoutIdleView(project: project, isRecording: $isRecording, onBack: onBack)
+            }
+        }
+    }
+}
+
+private struct iOSScoutIdleView: View {
+    let project: MockProject
+    @Binding var isRecording: Bool
+    let onBack: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 28) {
+                VStack(spacing: 14) {
+                    Button { isRecording = true } label: {
+                        ZStack {
+                            Circle()
+                                .fill(LinearGradient(colors: [.orange, .red], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 110, height: 110)
+                                .shadow(color: .orange.opacity(0.4), radius: 16, y: 4)
+                            VStack(spacing: 4) {
+                                Image(systemName: "figure.walk").font(.system(size: 30, weight: .semibold))
+                                Text("Scout").font(.caption.weight(.bold))
+                            }
+                            .foregroundStyle(.white)
+                        }
+                    }
+                    Text("Start recording your scouting trip")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                .padding(.top, 32)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Recording to")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 16)
+                    HStack {
+                        Image(systemName: "folder.fill").foregroundStyle(.orange)
+                        Text(project.name).font(.body)
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(.tertiary).font(.caption)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 16)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Recent Trips")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.horizontal, 16)
+                    ForEach(tracks) { track in TrackRow(track: track) }
+                }
+            }
+        }
+        .navigationTitle("Scout")
+        .background(Color(.systemGroupedBackground))
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button(action: onBack) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.body.weight(.semibold))
+                        Text("Projects").font(.body)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct TrackRow: View {
+    let track: MockTrack
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(Color.orange.opacity(0.15)).frame(width: 44, height: 44)
+                Image(systemName: "figure.walk").foregroundStyle(.orange).font(.body.weight(.semibold))
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(track.name).font(.body)
+                HStack(spacing: 8) {
+                    Label(String(format: "%.1f km", track.distanceKm), systemImage: "location")
+                    Label("\(track.durationMin) min", systemImage: "clock")
+                    Label("\(track.photoCount) photos", systemImage: "camera")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(track.date.formatted(date: .abbreviated, time: .omitted))
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 16)
+    }
+}
+
+private struct iOSRecordingView: View {
+    @Binding var isRecording: Bool
+    @State private var elapsed: TimeInterval = 1847
+    @State private var showCamera = false
+    private let tokyoRegion = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 35.6940, longitude: 139.7020),
+        span: MKCoordinateSpan(latitudeDelta: 0.04, longitudeDelta: 0.04)
+    )
+
+    var body: some View {
+        ZStack {
+            Map(initialPosition: .region(tokyoRegion)) {
+                ForEach(tokyoProject.lists[0].pins) { pin in
+                    Annotation("", coordinate: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng)) {
+                        Circle().fill(.orange).frame(width: 8, height: 8)
+                    }
+                }
+                Annotation("", coordinate: CLLocationCoordinate2D(latitude: 35.6940, longitude: 139.7032)) {
+                    ZStack {
+                        Circle().fill(.white).frame(width: 20, height: 20)
+                        Circle().fill(.blue).frame(width: 14, height: 14)
+                        Circle().stroke(.blue.opacity(0.3), lineWidth: 1).frame(width: 36, height: 36)
+                    }
+                }
+            }
+            .ignoresSafeArea()
+
+            VStack {
+                HStack(spacing: 0) {
+                    StatChip(value: formatTime(elapsed), label: "elapsed", icon: "clock.fill")
+                    Divider().frame(height: 30)
+                    StatChip(value: "2.4 km", label: "distance", icon: "location.fill")
+                    Divider().frame(height: 30)
+                    StatChip(value: "7", label: "photos", icon: "camera.fill")
+                }
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal, 16).padding(.top, 8)
+
+                HStack(spacing: 6) {
+                    Circle().fill(.red).frame(width: 8, height: 8)
+                    Text("Recording — Tokyo Golden Gai Area").font(.caption.weight(.medium))
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+
+                Spacer()
+
+                HStack(spacing: 24) {
+                    Button { isRecording = false } label: {
+                        ZStack {
+                            Circle().fill(.ultraThinMaterial).frame(width: 60, height: 60)
+                            RoundedRectangle(cornerRadius: 4).fill(.red).frame(width: 22, height: 22)
+                        }
+                    }
+                    Button { showCamera = true } label: {
+                        ZStack {
+                            Circle()
+                                .fill(LinearGradient(colors: [.orange, .red], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 80, height: 80)
+                                .shadow(color: .orange.opacity(0.5), radius: 12)
+                            Image(systemName: "camera.fill").font(.title2.weight(.semibold)).foregroundStyle(.white)
+                        }
+                    }
+                    Button { } label: {
+                        ZStack {
+                            Circle().fill(.ultraThinMaterial).frame(width: 60, height: 60)
+                            Image(systemName: "location.fill").foregroundStyle(.blue).font(.title3)
+                        }
+                    }
+                }
+                .padding(.bottom, 40)
+            }
+        }
+        .navigationTitle("").navigationBarHidden(true)
+        .fullScreenCover(isPresented: $showCamera) {
+            CameraSheetPreview(project: tokyoProject)
+        }
+    }
+
+    private func formatTime(_ t: TimeInterval) -> String {
+        let m = Int(t) / 60; let s = Int(t) % 60
+        return String(format: "%d:%02d", m, s)
+    }
+}
+
+private struct StatChip: View {
+    let value: String; let label: String; let icon: String
+    var body: some View {
+        VStack(spacing: 1) {
+            HStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 9))
+                Text(value).font(.system(size: 15, weight: .semibold, design: .rounded))
+            }
+            Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity).padding(.vertical, 8)
+    }
+}
+
+// MARK: - Photo grid helpers
+
+private struct iOSMasonryGrid: View {
+    let pins: [MockPin]; let colWidth: CGFloat; let gap: CGFloat; let columns: Int
     var body: some View {
         HStack(alignment: .top, spacing: gap) {
             ForEach(0..<columns, id: \.self) { col in
@@ -632,296 +1040,25 @@ private struct iOSMasonryGrid: View {
 }
 
 private struct PhotoCell: View {
-    let pin: MockPin
-    let width: CGFloat
-    @State private var hovered = false
-
+    let pin: MockPin; let width: CGFloat
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 0)
                 .fill(pin.listColor.opacity(0.3))
                 .frame(width: width, height: width * 0.75)
-                .overlay {
-                    Image(systemName: "photo")
-                        .foregroundStyle(.white.opacity(0.3))
-                }
-
+                .overlay { Image(systemName: "photo").foregroundStyle(.white.opacity(0.3)) }
             LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
                 .frame(height: 36)
         }
-        .frame(width: width)
-        .clipped()
+        .frame(width: width).clipped()
     }
 }
 
-// MARK: - Scout Tab
-
-struct iOSScoutTab: View {
-    @State private var isRecording = false
-
-    var body: some View {
-        NavigationStack {
-            if isRecording {
-                iOSRecordingView(isRecording: $isRecording)
-            } else {
-                iOSScoutIdleView(isRecording: $isRecording)
-            }
-        }
-    }
-}
-
-private struct iOSScoutIdleView: View {
-    @Binding var isRecording: Bool
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 28) {
-                // Start button
-                VStack(spacing: 14) {
-                    Button {
-                        isRecording = true
-                    } label: {
-                        ZStack {
-                            Circle()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [.orange, .red],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .frame(width: 110, height: 110)
-                                .shadow(color: .orange.opacity(0.4), radius: 16, y: 4)
-
-                            VStack(spacing: 4) {
-                                Image(systemName: "figure.walk")
-                                    .font(.system(size: 30, weight: .semibold))
-                                Text("Scout")
-                                    .font(.caption.weight(.bold))
-                            }
-                            .foregroundStyle(.white)
-                        }
-                    }
-                    Text("Start recording your scouting trip")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 32)
-
-                // Project picker
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Recording to")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 16)
-
-                    HStack {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(.orange)
-                        Text(tokyoProject.name)
-                            .font(.body)
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .foregroundStyle(.tertiary)
-                            .font(.caption)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
-                    .padding(.horizontal, 16)
-                }
-
-                // Past trips
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Recent Trips")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 16)
-
-                    ForEach(tracks) { track in
-                        TrackRow(track: track)
-                    }
-                }
-            }
-        }
-        .navigationTitle("Scout")
-        .background(Color(.systemGroupedBackground))
-    }
-}
-
-private struct TrackRow: View {
-    let track: MockTrack
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(Color.orange.opacity(0.15))
-                    .frame(width: 44, height: 44)
-                Image(systemName: "figure.walk")
-                    .foregroundStyle(.orange)
-                    .font(.body.weight(.semibold))
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(track.name).font(.body)
-                HStack(spacing: 8) {
-                    Label(String(format: "%.1f km", track.distanceKm), systemImage: "location")
-                    Label("\(track.durationMin) min", systemImage: "clock")
-                    Label("\(track.photoCount) photos", systemImage: "camera")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Text(track.date.formatted(date: .abbreviated, time: .omitted))
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
-        .padding(.horizontal, 16)
-    }
-}
-
-private struct iOSRecordingView: View {
-    @Binding var isRecording: Bool
-    @State private var elapsed: TimeInterval = 1847  // mock: 30 min in
-    @State private var showCamera = false
-    private let tokyoRegion = MKCoordinateRegion(
-        center: CLLocationCoordinate2D(latitude: 35.6940, longitude: 139.7020),
-        span: MKCoordinateSpan(latitudeDelta: 0.04, longitudeDelta: 0.04)
-    )
-
-    var body: some View {
-        ZStack {
-            // Full-screen live map
-            Map(initialPosition: .region(tokyoRegion)) {
-                // Mock trail pins
-                ForEach(tokyoProject.lists[0].pins) { pin in
-                    Annotation("", coordinate: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng)) {
-                        Circle().fill(.orange).frame(width: 8, height: 8)
-                    }
-                }
-                // Current position
-                Annotation("", coordinate: CLLocationCoordinate2D(latitude: 35.6940, longitude: 139.7032)) {
-                    ZStack {
-                        Circle().fill(.white).frame(width: 20, height: 20)
-                        Circle().fill(.blue).frame(width: 14, height: 14)
-                        Circle().stroke(.blue.opacity(0.3), lineWidth: 1).frame(width: 36, height: 36)
-                    }
-                }
-            }
-            .ignoresSafeArea()
-
-            VStack {
-                // Stats bar
-                HStack(spacing: 0) {
-                    StatChip(value: formatTime(elapsed), label: "elapsed", icon: "clock.fill")
-                    Divider().frame(height: 30)
-                    StatChip(value: "2.4 km", label: "distance", icon: "location.fill")
-                    Divider().frame(height: 30)
-                    StatChip(value: "7", label: "photos", icon: "camera.fill")
-                }
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-
-                // Recording indicator
-                HStack(spacing: 6) {
-                    Circle().fill(.red).frame(width: 8, height: 8)
-                    Text("Recording — Tokyo Golden Gai Area")
-                        .font(.caption.weight(.medium))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial, in: Capsule())
-
-                Spacer()
-
-                // Bottom controls
-                HStack(spacing: 24) {
-                    Button {
-                        isRecording = false
-                    } label: {
-                        ZStack {
-                            Circle().fill(.ultraThinMaterial).frame(width: 60, height: 60)
-                            RoundedRectangle(cornerRadius: 4).fill(.red).frame(width: 22, height: 22)
-                        }
-                    }
-
-                    Button {
-                        showCamera = true
-                    } label: {
-                        ZStack {
-                            Circle()
-                                .fill(LinearGradient(colors: [.orange, .red], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .frame(width: 80, height: 80)
-                                .shadow(color: .orange.opacity(0.5), radius: 12)
-                            Image(systemName: "camera.fill")
-                                .font(.title2.weight(.semibold))
-                                .foregroundStyle(.white)
-                        }
-                    }
-
-                    Button { } label: {
-                        ZStack {
-                            Circle().fill(.ultraThinMaterial).frame(width: 60, height: 60)
-                            Image(systemName: "location.fill")
-                                .foregroundStyle(.blue)
-                                .font(.title3)
-                        }
-                    }
-                }
-                .padding(.bottom, 40)
-            }
-        }
-        .navigationTitle("")
-        .navigationBarHidden(true)
-        .fullScreenCover(isPresented: $showCamera) {
-            CameraSheetPreview()
-        }
-    }
-
-    private func formatTime(_ t: TimeInterval) -> String {
-        let m = Int(t) / 60
-        let s = Int(t) % 60
-        return String(format: "%d:%02d", m, s)
-    }
-}
-
-private struct StatChip: View {
-    let value: String
-    let label: String
-    let icon: String
-    var body: some View {
-        VStack(spacing: 1) {
-            HStack(spacing: 3) {
-                Image(systemName: icon).font(.system(size: 9))
-                Text(value).font(.system(size: 15, weight: .semibold, design: .rounded))
-            }
-            Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-    }
-}
-
-/// One selectable lens, mirroring the native Camera app's zoom chips. The real device set
-/// comes from AVCaptureDevice.DiscoverySession (e.g. a Pro phone exposes 0.5×/1×/2×/3×,
-/// a base phone only 0.5×/1×); here it's mocked.
-private struct CameraLens: Identifiable, Equatable {
-    let id = UUID()
-    let zoom: Double          // e.g. 0.5, 1, 2
-    let label: String         // "0.5", "1", "2"
-}
+// MARK: - Camera sheet
 
 private struct CameraSheetPreview: View {
+    let project: MockProject
     @Environment(\.dismiss) private var dismiss
-    // A Pro-style lens set. On a base iPhone this would be just [0.5×, 1×].
     private let lenses: [CameraLens] = [
         CameraLens(zoom: 0.5, label: ".5"),
         CameraLens(zoom: 1, label: "1"),
@@ -930,54 +1067,34 @@ private struct CameraSheetPreview: View {
     ]
     @State private var selectedZoom: Double = 1
     @State private var flashOn = false
-    // Which list newly-shot photos drop into (nil = leave uncategorized).
-    @State private var targetListID: UUID? = tokyoProject.lists.first?.id
+    @State private var targetListID: UUID?
 
-    private var targetListName: String {
-        tokyoProject.leafLists.first { $0.id == targetListID }?.name ?? "Uncategorized"
+    init(project: MockProject) {
+        self.project = project
+        _targetListID = State(initialValue: project.leafLists.first?.id)
     }
 
-    private var zoomLabel: String {
-        selectedZoom == selectedZoom.rounded() ? String(Int(selectedZoom)) : String(selectedZoom)
+    private var targetListName: String {
+        project.leafLists.first { $0.id == targetListID }?.name ?? "Uncategorized"
     }
 
     var body: some View {
         ZStack {
-            // Full-screen viewfinder background
             Color.black.ignoresSafeArea()
-
-            // Simulated live viewfinder — in the real app this is an AVCaptureVideoPreviewLayer
             Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [Color(white: 0.08), Color(white: 0.04)],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
+                .fill(LinearGradient(colors: [Color(white: 0.08), Color(white: 0.04)], startPoint: .top, endPoint: .bottom))
                 .ignoresSafeArea()
                 .overlay {
                     VStack(spacing: 10) {
-                        Image(systemName: "camera.viewfinder")
-                            .font(.system(size: 72))
-                            .foregroundStyle(.white.opacity(0.12))
-                        Text("Live viewfinder")
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.18))
-                        Text("\(zoomLabel)×")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.18))
+                        Image(systemName: "camera.viewfinder").font(.system(size: 72)).foregroundStyle(.white.opacity(0.12))
+                        Text("Live viewfinder").font(.caption2).foregroundStyle(.white.opacity(0.18))
                     }
                 }
 
-            // Controls float over the full-screen viewfinder
             VStack(spacing: 0) {
-                // Top bar: close + flash
                 HStack {
                     Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
+                        Image(systemName: "xmark").font(.title3.weight(.semibold)).foregroundStyle(.white).frame(width: 44, height: 44)
                     }
                     Spacer()
                     Button { flashOn.toggle() } label: {
@@ -987,12 +1104,10 @@ private struct CameraSheetPreview: View {
                             .frame(width: 44, height: 44)
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.top, 12)
+                .padding(.horizontal, 8).padding(.top, 12)
 
                 Spacer()
 
-                // Lens selector pill — sits just above the bottom controls like native Camera
                 HStack(spacing: 6) {
                     ForEach(lenses) { lens in
                         let isSel = lens.zoom == selectedZoom
@@ -1007,17 +1122,15 @@ private struct CameraSheetPreview: View {
                         }
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(Capsule().fill(.black.opacity(0.35)))
                 .padding(.bottom, 16)
 
-                // List picker
                 Menu {
                     Button { targetListID = nil } label: {
                         Label("Uncategorized", systemImage: targetListID == nil ? "checkmark" : "tray")
                     }
-                    ForEach(tokyoProject.leafLists) { list in
+                    ForEach(project.leafLists) { list in
                         Button { targetListID = list.id } label: {
                             Label(list.name, systemImage: targetListID == list.id ? "checkmark" : "mappin.circle")
                         }
@@ -1028,55 +1141,56 @@ private struct CameraSheetPreview: View {
                         Text("Adding to: \(targetListName)")
                         Image(systemName: "chevron.up.chevron.down").font(.caption2)
                     }
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.white)
+                    .font(.subheadline.weight(.medium)).foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .background(Capsule().fill(.white.opacity(0.15)))
                 }
                 .padding(.bottom, 20)
 
-                // Bottom controls: shutter · flip (no gallery — use the Photos tab)
                 HStack {
                     Spacer()
-                    // camera shutter button
                     ZStack {
                         Circle().stroke(.white, lineWidth: 3).frame(width: 78, height: 78)
                         Circle().fill(.white).frame(width: 66, height: 66)
                     }
                     Spacer()
-                    // flip camera between selfie/rear button
-//                    Button { } label: {
-//                        Image(systemName: "arrow.triangle.2.circlepath.camera")
-//                            .font(.title2.weight(.semibold))
-//                            .foregroundStyle(.white)
-//                            .frame(width: 52, height: 52)
-//                            .background(Circle().fill(.white.opacity(0.15)))
-//                    }
                 }
-                .padding(.horizontal, 50)
-                .padding(.bottom, 44)
+                .padding(.horizontal, 50).padding(.bottom, 44)
             }
         }
     }
 }
 
+private struct CameraLens: Identifiable, Equatable {
+    let id = UUID()
+    let zoom: Double
+    let label: String
+}
+
 // MARK: - Previews
 
-#Preview("Full App", traits: .sizeThatFitsLayout) {
+#Preview("Full App") {
     iOSAppPreview()
 }
 
+#Preview("Project List") {
+    iOSProjectListView(onSelect: { _ in })
+}
+
+#Preview("In Project — Locations tab") {
+    iOSInProjectView(project: tokyoProject, onSwitchProject: { })
+}
+
 #Preview("Map Tab") {
-    iOSMapTab()
+    iOSMapTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), onBack: { })
 }
 
-#Preview("Map — Pin Selected") {
-    PinCalloutSheet(pin: tokyoProject.lists[0].pins[0])
-        .presentationDetents([.height(320)])
+#Preview("Locations Tab — List mode") {
+    iOSListsTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), onBack: { })
 }
 
-#Preview("Projects Tab") {
-    iOSProjectsTab()
+#Preview("Script Tab") {
+    iOSScriptTab(onBack: { })
 }
 
 #Preview("List Detail") {
@@ -1091,12 +1205,8 @@ private struct CameraSheetPreview: View {
     }
 }
 
-#Preview("Photos Tab") {
-    iOSPhotosTab()
-}
-
 #Preview("Scout — Idle") {
-    iOSScoutTab()
+    iOSScoutTab(project: tokyoProject, onBack: { })
 }
 
 #Preview("Scout — Recording") {
@@ -1106,6 +1216,6 @@ private struct CameraSheetPreview: View {
 }
 
 #Preview("In-Trip Camera") {
-    CameraSheetPreview()
+    CameraSheetPreview(project: tokyoProject)
 }
 #endif
