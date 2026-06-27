@@ -41,7 +41,7 @@ targets:
         DEVELOPMENT_TEAM: 2J8M8Z4QCX
         CODE_SIGN_STYLE: Automatic
         MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "9"
+        CURRENT_PROJECT_VERSION: "10"
         SWIFT_VERSION: "5.9"
         ENABLE_HARDENED_RUNTIME: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -53,8 +53,9 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.files.user-selected.read-write: true
-        com.apple.security.keychain-access-groups:
-          - $(AppIdentifierPrefix)com.cutetech.scout
+        # NOTE: com.apple.security.keychain-access-groups is NOT supported for Mac App Store
+        # uploads (rejected with error 90285) — do not re-add it. It applies to both platforms
+        # from this single block, so it broke the macOS upload.
         com.apple.security.personal-information.location: true
         com.apple.security.network.client: true
         # iCloud + CloudKit (project sharing / real-time sync — docs/collaboration-plan.md).
