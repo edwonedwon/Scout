@@ -646,6 +646,8 @@ private struct ProjectDetailView: View {
     @Environment(\.managedObjectContext) private var modelContext
     @State private var showAddList = false
     @State private var newListName = ""
+    /// Global "show flagged only" filter — shared with the grid/map via AppStorage.
+    @AppStorage("filter.flaggedOnly") private var flaggedOnly = false
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
     // Whether the Uncategorized pseudo-list is expanded to show its loose photos.
     @State private var uncategorizedExpanded = false
@@ -2028,7 +2030,8 @@ private struct ProjectDetailView: View {
     private func uncategorizedSection(_ proj: ProjectData, itemID: PersistentIdentifier) -> some View {
         let searching = !trimmedSearch.isEmpty
         let isExpanded = searching || uncategorizedExpanded
-        let photos = searching ? loosePhotos.filter { nameMatches($0.name) } : loosePhotos
+        let photos = (searching ? loosePhotos.filter { nameMatches($0.name) } : loosePhotos)
+            .filter { !flaggedOnly || $0.isFlagged }
 
         HStack(spacing: 6) {
             Button {
@@ -2229,7 +2232,7 @@ private struct ProjectDetailView: View {
                 childListRow(child, folder: list)
             }
 
-            let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil })
+            let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) })
                 .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
             ForEach(Array(pins.enumerated()), id: \.element.persistentModelID) { idx, pin in
                 expandedPinRow(pin, in: list, indexBefore: idx > 0 ? pins[idx - 1] : nil)
@@ -2364,7 +2367,7 @@ private struct ProjectDetailView: View {
                     .padding(.leading, 18)
             }
 
-            let childPins = flaggedFirst(child.pins.filter { $0.deletedAt == nil })
+            let childPins = flaggedFirst(child.pins.filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) })
             ForEach(childPins) { pin in
                 PinRow(
                     pin: pin,
@@ -2497,7 +2500,7 @@ private struct ProjectDetailView: View {
         }
         .navigationTitle(project.name)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
                 Menu {
                     Button {
                         newListName = ""
@@ -2520,6 +2523,12 @@ private struct ProjectDetailView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                // Show-only-flagged filter — applies everywhere (sidebar, grid, map).
+                Button { flaggedOnly.toggle() } label: {
+                    Image(systemName: flaggedOnly ? "flag.fill" : "flag")
+                        .foregroundStyle(flaggedOnly ? .orange : .secondary)
+                }
+                .help(flaggedOnly ? "Showing flagged only — click to show all" : "Show flagged only")
             }
         }
         // A sheet (not .alert) so the field reliably shows the existing name pre-filled — a

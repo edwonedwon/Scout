@@ -284,6 +284,9 @@ struct ContentView: View {
     /// per docs/collaboration-plan.md.
     @State private var showCollaborationPopover = false
     @State private var sharingProject: ProjectData? = nil
+    /// Global "show flagged only" filter — shared with the sidebar via AppStorage; applies to
+    /// the map and photo grid through rebuildPinCaches.
+    @AppStorage("filter.flaggedOnly") private var flaggedOnly = false
     @State private var addPersonEmail = ""
     @State private var addPersonRole: ShareRole = .editor
     /// Whole-page zoom for the Script view (Cmd +/-), persisted across launches. Starts a bit
@@ -408,6 +411,7 @@ struct ContentView: View {
             .onChange(of: allLists.count)        { rebuildPinCaches() }
             .onChange(of: allProjects.count)     { rebuildPinCaches() }
             .onChange(of: pinListAssignmentHash) { rebuildPinCaches() }
+            .onChange(of: flaggedOnly)           { rebuildPinCaches() }
             #if os(macOS)
             .onReceive(NotificationCenter.default.publisher(for: .scoutExportBackup))    { _ in Task { await handleExport() } }
             .onReceive(NotificationCenter.default.publisher(for: .scoutImportBackup))    { _ in Task { await handleImport() } }
@@ -1138,12 +1142,13 @@ struct ContentView: View {
     private func rebuildPinCaches() {
         let active = allLists.filter { isEffectivelyActive($0) }
         var mapPins: [(ScoutLocation, String)] = active.flatMap { list in
-            list.pins.filter { $0.hasGPS && $0.deletedAt == nil }.map { (displayCache.location(for: $0), list.colorHex) }
+            list.pins.filter { $0.hasGPS && $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) }
+                .map { (displayCache.location(for: $0), list.colorHex) }
         }
         for project in allProjects {
             // Skip uncategorized pins for projects whose "Uncategorized" eye is off.
             guard !hiddenUncategorizedProjectIDs.contains(project.persistentModelID) else { continue }
-            for pin in project.importedPhotos where pin.hasGPS && pin.deletedAt == nil {
+            for pin in project.importedPhotos where pin.hasGPS && pin.deletedAt == nil && (!flaggedOnly || pin.isFlagged) {
                 mapPins.append((displayCache.location(for: pin), Self.generalPinColor))
             }
         }
@@ -1163,7 +1168,7 @@ struct ContentView: View {
             for list in sortedLists {
                 let ordered = displayCache.proximityOrdered(
                     list.persistentModelID,
-                    pins: list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder }
+                    pins: list.pins.filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) }.sorted { $0.sortOrder < $1.sortOrder }
                 ) { proximityOrdered($0) }
                 let locs = flaggedFirst(ordered
                     .map { displayCache.location(for: $0) }
@@ -1181,7 +1186,7 @@ struct ContentView: View {
             let importedPins = hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
                 ? []
                 : project.importedPhotos
-                .filter { $0.deletedAt == nil }
+                .filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) }
                 .sorted { $0.sortOrder < $1.sortOrder }
             let imported = flaggedFirst(displayCache.proximityOrdered(project.persistentModelID, pins: importedPins) { proximityOrdered($0) }
                 .map { displayCache.location(for: $0) }
@@ -1194,7 +1199,7 @@ struct ContentView: View {
         for list in active.filter({ $0.project == nil }).sorted(by: { $0.createdAt < $1.createdAt }) {
             let ordered = displayCache.proximityOrdered(
                 list.persistentModelID,
-                pins: list.pins.filter { $0.deletedAt == nil }.sorted { $0.sortOrder < $1.sortOrder }
+                pins: list.pins.filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) }.sorted { $0.sortOrder < $1.sortOrder }
             ) { proximityOrdered($0) }
             let locs = flaggedFirst(ordered
                 .map { displayCache.location(for: $0) }
