@@ -6,6 +6,7 @@
 #if os(iOS) && DEBUG
 import SwiftUI
 import MapKit
+import UniformTypeIdentifiers
 
 // MARK: - Mock data
 
@@ -39,11 +40,276 @@ struct MockProject: Identifiable {
     var uncategorized: [MockPin]
 }
 
+extension MockPin {
+    /// A deterministic placeholder photo per pin. Lorem Picsum returns a stable image
+    /// for a given seed — generic stock photography standing in for real location shots.
+    /// (Swap these for bundled Japan photos / live SwiftData images when wired up.)
+    var photoSeed: String {
+        let base = imageName ?? name
+        return String(base.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "-" })
+    }
+    func imageURL(width: Int, height: Int) -> URL? {
+        URL(string: "https://picsum.photos/seed/\(photoSeed)/\(width)/\(height)")
+    }
+}
+
+/// Reusable async photo with a graceful placeholder.
+private struct MockPhoto: View {
+    let pin: MockPin
+    var width: Int = 700
+    var height: Int = 525
+    var contentMode: ContentMode = .fill
+
+    var body: some View {
+        AsyncImage(url: pin.imageURL(width: width, height: height)) { phase in
+            switch phase {
+            case .success(let image):
+                image.resizable().aspectRatio(contentMode: contentMode)
+            case .failure:
+                placeholder
+            default:
+                ZStack { placeholder; ProgressView().tint(.secondary) }
+            }
+        }
+    }
+
+    private var placeholder: some View {
+        Rectangle()
+            .fill(Color(.systemGray5))
+            .overlay { Image(systemName: "photo").foregroundStyle(.tertiary) }
+    }
+}
+
 private extension MockProject {
     var leafLists: [MockList] { lists.flatMap(\.leafLists) }
     var allPins: [MockPin] { leafLists.flatMap(\.pins) + uncategorized }
     /// All leaf list IDs — used to initialise the "all visible" default state.
     var allLeafListIDs: Set<UUID> { Set(leafLists.map(\.id)) }
+}
+
+// MARK: - Mutating helpers (drive sidebar drag & drop)
+
+extension MockProject {
+    /// Pull a list out of wherever it lives (top level or inside a folder).
+    mutating func extractList(_ id: UUID) -> MockList? {
+        if let idx = lists.firstIndex(where: { $0.id == id }) {
+            return lists.remove(at: idx)
+        }
+        for i in lists.indices {
+            if let idx = lists[i].children.firstIndex(where: { $0.id == id }) {
+                return lists[i].children.remove(at: idx)
+            }
+        }
+        return nil
+    }
+
+    /// Drop one list onto another → the target becomes a folder containing it.
+    mutating func nestList(_ draggedID: UUID, into targetID: UUID) {
+        guard draggedID != targetID, let dragged = extractList(draggedID) else { return }
+        if let idx = lists.firstIndex(where: { $0.id == targetID }) {
+            lists[idx].children.append(dragged)
+            return
+        }
+        // Target is itself a child — append into that child (one extra nesting level).
+        for i in lists.indices {
+            if let idx = lists[i].children.firstIndex(where: { $0.id == targetID }) {
+                lists[i].children[idx].children.append(dragged)
+                return
+            }
+        }
+    }
+
+    /// Reorder a list relative to a target at the target's level.
+    mutating func reorderList(_ draggedID: UUID, near targetID: UUID, after: Bool) {
+        guard draggedID != targetID, let dragged = extractList(draggedID) else { return }
+        if let idx = lists.firstIndex(where: { $0.id == targetID }) {
+            lists.insert(dragged, at: after ? idx + 1 : idx)
+            return
+        }
+        for i in lists.indices {
+            if let idx = lists[i].children.firstIndex(where: { $0.id == targetID }) {
+                lists[i].children.insert(dragged, at: after ? idx + 1 : idx)
+                return
+            }
+        }
+        lists.append(dragged)
+    }
+
+    /// Move a list back out to the top level.
+    mutating func promoteList(_ draggedID: UUID) {
+        guard let dragged = extractList(draggedID) else { return }
+        lists.append(dragged)
+    }
+
+    mutating func extractPin(_ id: UUID) -> MockPin? {
+        if let idx = uncategorized.firstIndex(where: { $0.id == id }) {
+            return uncategorized.remove(at: idx)
+        }
+        for i in lists.indices {
+            if let idx = lists[i].pins.firstIndex(where: { $0.id == id }) {
+                return lists[i].pins.remove(at: idx)
+            }
+            for j in lists[i].children.indices {
+                if let idx = lists[i].children[j].pins.firstIndex(where: { $0.id == id }) {
+                    return lists[i].children[j].pins.remove(at: idx)
+                }
+            }
+        }
+        return nil
+    }
+
+    mutating func withLeafList(_ id: UUID, _ body: (inout MockList) -> Void) {
+        for i in lists.indices {
+            if lists[i].id == id { body(&lists[i]); return }
+            for j in lists[i].children.indices {
+                if lists[i].children[j].id == id { body(&lists[i].children[j]); return }
+            }
+        }
+    }
+
+    /// Move a pin into a list (appended at the end).
+    mutating func movePin(_ pinID: UUID, intoList listID: UUID) {
+        guard let pin = extractPin(pinID) else { return }
+        withLeafList(listID) { $0.pins.append(pin) }
+    }
+
+    /// Reorder a pin relative to another pin (works within or across lists).
+    mutating func reorderPin(_ pinID: UUID, nearPin targetPinID: UUID, after: Bool) {
+        guard pinID != targetPinID, let pin = extractPin(pinID) else { return }
+        func insert(_ list: inout MockList) -> Bool {
+            if let idx = list.pins.firstIndex(where: { $0.id == targetPinID }) {
+                list.pins.insert(pin, at: after ? idx + 1 : idx)
+                return true
+            }
+            return false
+        }
+        for i in lists.indices {
+            if insert(&lists[i]) { return }
+            for j in lists[i].children.indices {
+                if insert(&lists[i].children[j]) { return }
+            }
+        }
+        if let idx = uncategorized.firstIndex(where: { $0.id == targetPinID }) {
+            uncategorized.insert(pin, at: after ? idx + 1 : idx)
+        }
+    }
+}
+
+// MARK: - Sidebar drag & drop plumbing
+
+/// Where on a row a drop landed: above it, on it (nest / move-into), or below it.
+private enum DropZone: Equatable { case before, into, after }
+
+private struct DropHighlight: Equatable {
+    let id: UUID
+    let zone: DropZone
+}
+
+/// What a droppable row represents — controls which drops are legal.
+private enum RowTargetKind: Equatable {
+    case list(canNest: Bool)
+    case pin
+}
+
+private struct SidebarDropDelegate: DropDelegate {
+    let targetID: UUID
+    let kind: RowTargetKind
+    let rowHeight: CGFloat
+    @Binding var highlight: DropHighlight?
+    let onPerform: (String, DropZone) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.text]) }
+
+    func dropEntered(info: DropInfo) {
+        highlight = DropHighlight(id: targetID, zone: zone(info))
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        highlight = DropHighlight(id: targetID, zone: zone(info))
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        if highlight?.id == targetID { highlight = nil }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let z = zone(info)
+        highlight = nil
+        guard let provider = info.itemProviders(for: [UTType.text]).first else { return false }
+        _ = provider.loadObject(ofClass: NSString.self) { obj, _ in
+            guard let payload = obj as? String else { return }
+            DispatchQueue.main.async { onPerform(payload, z) }
+        }
+        return true
+    }
+
+    private func zone(_ info: DropInfo) -> DropZone {
+        switch kind {
+        case .pin:
+            // Pins only reorder — pick the nearer edge.
+            return info.location.y < rowHeight / 2 ? .before : .after
+        case .list(let canNest):
+            guard canNest else {
+                return info.location.y < rowHeight / 2 ? .before : .after
+            }
+            let third = rowHeight / 3
+            if info.location.y < third { return .before }
+            if info.location.y > third * 2 { return .after }
+            return .into
+        }
+    }
+}
+
+/// Wraps a row so it can both initiate a drag and accept drops, with a live drop indicator.
+private struct DraggableRow<Content: View>: View {
+    let dragPayload: String
+    let targetID: UUID
+    let kind: RowTargetKind
+    @Binding var highlight: DropHighlight?
+    let onPerform: (String, DropZone) -> Void
+    @ViewBuilder var content: () -> Content
+
+    @State private var height: CGFloat = 44
+
+    private var hl: DropHighlight? { highlight?.id == targetID ? highlight : nil }
+
+    var body: some View {
+        content()
+            .background(
+                GeometryReader { g in
+                    Color.clear
+                        .onAppear { height = g.size.height }
+                        .onChange(of: g.size.height) { _, h in height = h }
+                }
+            )
+            .background(alignment: .center) {
+                if hl?.zone == .into {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.accentColor.opacity(0.18))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 1.5))
+                }
+            }
+            .overlay(alignment: .top) {
+                if hl?.zone == .before {
+                    Capsule().fill(Color.accentColor).frame(height: 2.5)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if hl?.zone == .after {
+                    Capsule().fill(Color.accentColor).frame(height: 2.5)
+                }
+            }
+            .contentShape(Rectangle())
+            .onDrag { NSItemProvider(object: dragPayload as NSString) }
+            .onDrop(
+                of: [UTType.text],
+                delegate: SidebarDropDelegate(
+                    targetID: targetID, kind: kind, rowHeight: height,
+                    highlight: $highlight, onPerform: onPerform
+                )
+            )
+    }
 }
 
 // MARK: - Mock content
@@ -173,57 +439,102 @@ private struct iOSProjectListView: View {
 // MARK: - In-project shell
 
 /// Once inside a project, this TabView owns everything. All tabs are scoped to `project`.
-/// Visibility state lives here so the Lists tab and Map tab stay in sync.
+/// The project is held as mutable state so the sidebar can reorder lists & pins.
 struct iOSInProjectView: View {
-    let project: MockProject
     let onSwitchProject: () -> Void
 
+    @State private var project: MockProject
     /// Which leaf list IDs are visible on the map. Default: all on.
     @State private var visibleListIDs: Set<UUID>
     @State private var selectedTab = 0
     @State private var showCamera = false
-    /// Set by the Locations tab when the user taps a pin's mini-map; drives the Map tab camera.
+    /// Slide-in sidebar (the hamburger drawer).
+    @State private var showSidebar = false
+    /// Set when the user taps a pin's mini-map; drives the Map tab camera.
     @State private var mapFocusPin: MockPin? = nil
 
     init(project: MockProject, onSwitchProject: @escaping () -> Void) {
-        self.project = project
         self.onSwitchProject = onSwitchProject
+        _project = State(initialValue: project)
         _visibleListIDs = State(initialValue: project.allLeafListIDs)
     }
 
+    private func openSidebar() {
+        withAnimation(.easeOut(duration: 0.28)) { showSidebar = true }
+    }
+    private func closeSidebar() {
+        withAnimation(.easeIn(duration: 0.24)) { showSidebar = false }
+    }
+
     var body: some View {
-        TabView(selection: $selectedTab) {
-            iOSMapTab(project: project, visibleListIDs: $visibleListIDs, focusPin: $mapFocusPin, onBack: onSwitchProject)
-                .tabItem { Label("Map", systemImage: "map.fill") }
-                .tag(0)
+        ZStack {
+            TabView(selection: $selectedTab) {
+                iOSMapTab(project: project, visibleListIDs: $visibleListIDs, focusPin: $mapFocusPin, onMenu: openSidebar)
+                    .tabItem { Label("Map", systemImage: "map.fill") }
+                    .tag(0)
 
-            iOSListsTab(project: project, visibleListIDs: $visibleListIDs, onBack: onSwitchProject, onOpenPinOnMap: { pin in
-                mapFocusPin = pin
-                selectedTab = 0
-            })
-                .tabItem { Label("Locations", systemImage: "list.bullet") }
-                .tag(1)
+                iOSPhotosTab(project: project, onMenu: openSidebar)
+                    .tabItem { Label("Photos", systemImage: "photo.on.rectangle") }
+                    .tag(1)
 
-            Color.clear
-                .tabItem { Label("Camera", systemImage: "camera.fill") }
-                .tag(2)
+                Color.clear
+                    .tabItem { Label("Camera", systemImage: "camera.fill") }
+                    .tag(2)
 
-            iOSScriptTab(onBack: onSwitchProject)
-                .tabItem { Label("Script", systemImage: "doc.text.fill") }
-                .tag(3)
+                iOSScriptTab(onMenu: openSidebar)
+                    .tabItem { Label("Script", systemImage: "doc.text.fill") }
+                    .tag(3)
 
-            iOSScoutTab(project: project, onBack: onSwitchProject)
-                .tabItem { Label("Scout", systemImage: "figure.walk") }
-                .tag(4)
-        }
-        .onChange(of: selectedTab) { old, new in
-            if new == 2 {
-                selectedTab = old
-                showCamera = true
+                iOSScoutTab(project: project, onMenu: openSidebar)
+                    .tabItem { Label("Scout", systemImage: "figure.walk") }
+                    .tag(4)
+            }
+            .onChange(of: selectedTab) { old, new in
+                if new == 2 {
+                    selectedTab = old
+                    showCamera = true
+                }
+            }
+
+            // Dimming scrim + sliding drawer
+            if showSidebar {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                    .onTapGesture { closeSidebar() }
+
+                HStack(spacing: 0) {
+                    iOSSidebarDrawer(
+                        project: $project,
+                        visibleListIDs: $visibleListIDs,
+                        onBackToProjects: onSwitchProject,
+                        onClose: closeSidebar,
+                        onOpenPinOnMap: { pin in
+                            mapFocusPin = pin
+                            selectedTab = 0
+                            closeSidebar()
+                        }
+                    )
+                    .frame(width: 320)
+                    .frame(maxHeight: .infinity)
+                    .background(Color(.systemBackground))
+                    Spacer(minLength: 0)
+                }
+                .transition(.move(edge: .leading))
             }
         }
         .fullScreenCover(isPresented: $showCamera) {
             CameraSheetPreview(project: project)
+        }
+    }
+}
+
+/// A small reusable hamburger button for each tab's nav bar.
+private struct MenuButton: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "line.3.horizontal").font(.body.weight(.semibold))
         }
     }
 }
@@ -234,9 +545,32 @@ struct iOSMapTab: View {
     let project: MockProject
     @Binding var visibleListIDs: Set<UUID>
     @Binding var focusPin: MockPin?
-    let onBack: () -> Void
+    let onMenu: () -> Void
     @State private var selectedPin: MockPin? = nil
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var mapStyleChoice: MapStyleChoice = .standard
+    /// false → pin dots, true → photo thumbnails (mirrors the Mac photo/pin toggle).
+    @State private var showPhotos = false
+
+    enum MapStyleChoice: String, CaseIterable, Identifiable {
+        case standard, satellite, hybrid
+        var id: String { rawValue }
+        var label: String { rawValue.capitalized }
+        var icon: String {
+            switch self {
+            case .standard: "map"
+            case .satellite: "globe.americas.fill"
+            case .hybrid: "map.fill"
+            }
+        }
+        var style: _MapKit_SwiftUI.MapStyle {
+            switch self {
+            case .standard: .standard
+            case .satellite: .imagery
+            case .hybrid: .hybrid
+            }
+        }
+    }
 
     private var visiblePins: [MockPin] {
         project.leafLists
@@ -256,11 +590,17 @@ struct iOSMapTab: View {
             Map(position: $cameraPosition) {
                 ForEach(visiblePins) { pin in
                     Annotation(pin.name, coordinate: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng)) {
-                        PinDot(color: pin.listColor)
-                            .onTapGesture { selectedPin = pin }
+                        if showPhotos {
+                            PhotoMarker(pin: pin)
+                                .onTapGesture { selectedPin = pin }
+                        } else {
+                            PinDot(color: pin.listColor)
+                                .onTapGesture { selectedPin = pin }
+                        }
                     }
                 }
             }
+            .mapStyle(mapStyleChoice.style)
             .ignoresSafeArea()
             .onAppear {
                 cameraPosition = .region(defaultRegion)
@@ -278,8 +618,8 @@ struct iOSMapTab: View {
             }
 
             HStack(spacing: 8) {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
+                Button(action: onMenu) {
+                    Image(systemName: "line.3.horizontal")
                         .font(.body.weight(.semibold))
                         .foregroundStyle(.primary)
                         .frame(width: 36, height: 36)
@@ -294,6 +634,24 @@ struct iOSMapTab: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+
+                Menu {
+                    Picker("Map Type", selection: $mapStyleChoice) {
+                        ForEach(MapStyleChoice.allCases) { choice in
+                            Label(choice.label, systemImage: choice.icon).tag(choice)
+                        }
+                    }
+                    Picker("Show", selection: $showPhotos) {
+                        Label("Pins", systemImage: "mappin").tag(false)
+                        Label("Photos", systemImage: "photo").tag(true)
+                    }
+                } label: {
+                    Image(systemName: "square.3.layers.3d")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 36, height: 36)
+                        .background(.regularMaterial, in: Circle())
+                }
             }
             .padding(.horizontal, 12)
             .padding(.top, 8)
@@ -318,18 +676,36 @@ private struct PinDot: View {
     }
 }
 
+/// Photo-thumbnail map annotation — used when the map is in "Photos" mode.
+private struct PhotoMarker: View {
+    let pin: MockPin
+    var body: some View {
+        MockPhoto(pin: pin, width: 120, height: 120)
+            .frame(width: 48, height: 48)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.white, lineWidth: 2.5)
+            }
+            .overlay(alignment: .bottom) {
+                Circle().fill(pin.listColor).frame(width: 9, height: 9)
+                    .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                    .offset(y: 5)
+            }
+            .shadow(radius: 3)
+    }
+}
+
 private struct PinCalloutSheet: View {
     let pin: MockPin
     let project: MockProject
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color(.systemGray5))
+            MockPhoto(pin: pin, width: 800, height: 400)
                 .frame(height: 130)
-                .overlay {
-                    Image(systemName: "photo").font(.largeTitle).foregroundStyle(.tertiary)
-                }
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
 
@@ -375,142 +751,31 @@ private struct PinCalloutSheet: View {
     }
 }
 
-// MARK: - Locations Tab
+// MARK: - Photos Tab
 
-/// The Locations tab has two modes: list view (sidebar-style with eye toggles) and photo grid view.
-/// The toggle lives in the nav bar. Visibility changes here propagate to the Map tab.
-struct iOSListsTab: View {
+/// Photo-centric grid, grouped by list — mirrors the Mac photos grid. The hamburger
+/// opens the sidebar; the sidebar is where lists/visibility/drag-reordering live.
+struct iOSPhotosTab: View {
     let project: MockProject
-    @Binding var visibleListIDs: Set<UUID>
-    let onBack: () -> Void
-    let onOpenPinOnMap: (MockPin) -> Void
-
-    @State private var isGridMode = false
-    @State private var expanded: Set<UUID> = []
+    let onMenu: () -> Void
 
     var body: some View {
         NavigationStack {
-            Group {
-                if isGridMode {
-                    iOSListsGridView(project: project)
-                } else {
-                    iOSListsListView(project: project, visibleListIDs: $visibleListIDs, expanded: $expanded, onOpenPinOnMap: onOpenPinOnMap)
-                }
-            }
-            .navigationTitle("Locations")
-            .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: onBack) {
-                        Image(systemName: "chevron.left").font(.body.weight(.semibold))
+            iOSListsGridView(project: project)
+                .navigationTitle("Photos")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        MenuButton(action: onMenu)
                     }
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    HStack(spacing: 12) {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { isGridMode.toggle() }
-                        } label: {
-                            Image(systemName: isGridMode ? "list.bullet" : "square.grid.2x2")
-                                .contentTransition(.symbolEffect(.replace))
-                        }
+                    ToolbarItem(placement: .primaryAction) {
                         Menu {
-                            Button { } label: { Label("New Location", systemImage: "plus") }
                             Button { } label: { Label("Import Photos", systemImage: "photo.badge.plus") }
-                        } label: { Image(systemName: "plus") }
+                            Button { } label: { Label("Select", systemImage: "checkmark.circle") }
+                        } label: { Image(systemName: "ellipsis.circle") }
                     }
                 }
-            }
         }
-    }
-}
-
-/// List mode — sidebar-style rows with eye toggles driving map visibility.
-private struct iOSListsListView: View {
-    let project: MockProject
-    @Binding var visibleListIDs: Set<UUID>
-    @Binding var expanded: Set<UUID>
-    let onOpenPinOnMap: (MockPin) -> Void
-    @State private var search = ""
-
-    var body: some View {
-        List {
-            ForEach(project.lists) { list in
-                if list.isFolder {
-                    folderRows(list)
-                } else {
-                    listRow(list, indent: 0, parentVisible: true)
-                }
-            }
-
-            if !project.uncategorized.isEmpty {
-                Section("Uncategorized") {
-                    ForEach(project.uncategorized) { pin in
-                        NavigationLink { iOSPinDetailView(pin: pin, onOpenOnMap: onOpenPinOnMap) } label: { PinRow(pin: pin) }
-                    }
-                }
-            }
-        }
-        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search locations")
-    }
-
-    @ViewBuilder
-    private func folderRows(_ folder: MockList) -> some View {
-        let isOpen = expanded.contains(folder.id)
-        let folderVisible = visibleListIDs.contains(folder.id)
-
-        HStack(spacing: 10) {
-            Button {
-                if isOpen { expanded.remove(folder.id) } else { expanded.insert(folder.id) }
-            } label: {
-                Image(systemName: isOpen ? "chevron.down" : "chevron.right")
-                    .font(.caption).foregroundStyle(.secondary).frame(width: 16)
-            }
-            .buttonStyle(.plain)
-            Image(systemName: isOpen ? "folder.fill" : "folder").foregroundStyle(.secondary)
-            Text(folder.name).font(.body)
-            Spacer()
-            Text("\(folder.totalPinCount)").font(.caption).foregroundStyle(.secondary)
-            eyeButton(folder.id)
-        }
-        .padding(.vertical, 2)
-
-        if isOpen {
-            ForEach(folder.children) { child in
-                listRow(child, indent: 1, parentVisible: folderVisible)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func listRow(_ list: MockList, indent: Int, parentVisible: Bool) -> some View {
-        let isVisible = visibleListIDs.contains(list.id)
-        let effectivelyVisible = parentVisible && isVisible
-        NavigationLink {
-            iOSListDetailView(list: list, onOpenPinOnMap: onOpenPinOnMap)
-        } label: {
-            HStack(spacing: 10) {
-                Circle().fill(list.color).frame(width: 12, height: 12)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(list.name).font(.body)
-                    Text("\(list.pins.count) locations").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                eyeButton(list.id)
-            }
-            .padding(.leading, CGFloat(indent) * 18)
-            .padding(.vertical, 2)
-            .opacity(effectivelyVisible ? 1 : 0.4)
-        }
-    }
-
-    private func eyeButton(_ id: UUID) -> some View {
-        Button {
-            if visibleListIDs.contains(id) { visibleListIDs.remove(id) } else { visibleListIDs.insert(id) }
-        } label: {
-            Image(systemName: visibleListIDs.contains(id) ? "eye.fill" : "eye.slash")
-                .foregroundStyle(visibleListIDs.contains(id) ? Color.accentColor : .secondary)
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -569,6 +834,269 @@ private struct iOSListsGridView: View {
     }
 }
 
+// MARK: - Sidebar drawer (hamburger menu)
+
+/// The slide-in sidebar — the iOS equivalent of the Mac app's locations sidebar.
+/// Shows the project's lists/folders hierarchy with eye toggles, and supports drag &
+/// drop to reorder lists, nest a list into another (creating a folder), reorder photos
+/// within a list, and move photos between lists. Top-left returns to the project list.
+private struct iOSSidebarDrawer: View {
+    @Binding var project: MockProject
+    @Binding var visibleListIDs: Set<UUID>
+    let onBackToProjects: () -> Void
+    let onClose: () -> Void
+    let onOpenPinOnMap: (MockPin) -> Void
+
+    @State private var expanded: Set<UUID> = []
+    @State private var highlight: DropHighlight? = nil
+    @State private var search = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    sectionHeader("LISTS")
+
+                    ForEach(project.lists) { list in
+                        if list.isFolder {
+                            folderRows(list)
+                        } else {
+                            leafListRow(list, indent: 0, parentVisible: true)
+                        }
+                    }
+
+                    if !project.uncategorized.isEmpty {
+                        sectionHeader("UNCATEGORIZED")
+                        ForEach(project.uncategorized) { pin in
+                            pinRow(pin, indent: 0)
+                        }
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+
+            Divider()
+            searchBar
+        }
+        .tint(.accentColor)
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button(action: onBackToProjects) {
+                    Image(systemName: "chevron.left")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 34, height: 34)
+                        .background(Color(.secondarySystemFill), in: Circle())
+                }
+                Spacer()
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, height: 34)
+                        .background(Color(.secondarySystemFill), in: Circle())
+                }
+            }
+            Text(project.name)
+                .font(.title.bold())
+                .lineLimit(2)
+
+            Button { } label: {
+                Label("New List", systemImage: "plus")
+                    .font(.subheadline.weight(.medium))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var searchBar: some View {
+        HStack {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Search", text: $search)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color(.secondarySystemFill), in: Capsule())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    private func sectionHeader(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: Rows
+
+    @ViewBuilder
+    private func folderRows(_ folder: MockList) -> some View {
+        let isOpen = expanded.contains(folder.id)
+        let folderVisible = visibleListIDs.contains(folder.id)
+
+        DraggableRow(
+            dragPayload: "list:\(folder.id)",
+            targetID: folder.id,
+            kind: .list(canNest: true),
+            highlight: $highlight,
+            onPerform: { payload, zone in handleDrop(payload, target: folder.id, targetIsList: true, zone: zone) }
+        ) {
+            HStack(spacing: 8) {
+                expandChevron(folder.id, isOpen: isOpen)
+                Image(systemName: isOpen ? "folder.fill" : "folder").foregroundStyle(.secondary)
+                Text(folder.name).font(.body)
+                Spacer()
+                Text("\(folder.totalPinCount)").font(.caption).foregroundStyle(.secondary)
+                eyeButton(folder.id)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+
+        if isOpen {
+            ForEach(folder.children) { child in
+                leafListRow(child, indent: 1, parentVisible: folderVisible)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func leafListRow(_ list: MockList, indent: Int, parentVisible: Bool) -> some View {
+        let isOpen = expanded.contains(list.id)
+        let visible = parentVisible && visibleListIDs.contains(list.id)
+
+        DraggableRow(
+            dragPayload: "list:\(list.id)",
+            targetID: list.id,
+            kind: .list(canNest: true),
+            highlight: $highlight,
+            onPerform: { payload, zone in handleDrop(payload, target: list.id, targetIsList: true, zone: zone) }
+        ) {
+            HStack(spacing: 8) {
+                if list.pins.isEmpty {
+                    Spacer().frame(width: 16)
+                } else {
+                    expandChevron(list.id, isOpen: isOpen)
+                }
+                Circle().fill(list.color).frame(width: 11, height: 11)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(list.name).font(.body)
+                    Text("\(list.pins.count) locations").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                eyeButton(list.id)
+            }
+            .padding(.leading, 16 + CGFloat(indent) * 18)
+            .padding(.trailing, 16)
+            .padding(.vertical, 7)
+            .opacity(visible ? 1 : 0.4)
+            .contentShape(Rectangle())
+        }
+
+        if isOpen {
+            ForEach(list.pins) { pin in
+                pinRow(pin, indent: indent + 1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func pinRow(_ pin: MockPin, indent: Int) -> some View {
+        DraggableRow(
+            dragPayload: "pin:\(pin.id)",
+            targetID: pin.id,
+            kind: .pin,
+            highlight: $highlight,
+            onPerform: { payload, zone in handleDrop(payload, target: pin.id, targetIsList: false, zone: zone) }
+        ) {
+            Button {
+                onOpenPinOnMap(pin)
+            } label: {
+                HStack(spacing: 8) {
+                    MockPhoto(pin: pin, width: 90, height: 90)
+                        .frame(width: 30, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    Text(pin.name).font(.subheadline).foregroundStyle(.primary).lineLimit(1)
+                    Spacer()
+                }
+                .padding(.leading, 16 + CGFloat(indent) * 18)
+                .padding(.trailing, 16)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func expandChevron(_ id: UUID, isOpen: Bool) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                if isOpen { expanded.remove(id) } else { expanded.insert(id) }
+            }
+        } label: {
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(isOpen ? 90 : 0))
+                .frame(width: 16)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func eyeButton(_ id: UUID) -> some View {
+        Button {
+            if visibleListIDs.contains(id) { visibleListIDs.remove(id) } else { visibleListIDs.insert(id) }
+        } label: {
+            Image(systemName: visibleListIDs.contains(id) ? "eye.fill" : "eye.slash")
+                .font(.subheadline)
+                .foregroundStyle(visibleListIDs.contains(id) ? Color.accentColor : .secondary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Drop handling
+
+    private func handleDrop(_ payload: String, target targetID: UUID, targetIsList: Bool, zone: DropZone) {
+        let parts = payload.split(separator: ":")
+        guard parts.count == 2, let draggedID = UUID(uuidString: String(parts[1])) else { return }
+        let isListDrag = (parts[0] == "list")
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            if targetIsList {
+                if isListDrag {
+                    switch zone {
+                    case .into:   project.nestList(draggedID, into: targetID)
+                    case .before: project.reorderList(draggedID, near: targetID, after: false)
+                    case .after:  project.reorderList(draggedID, near: targetID, after: true)
+                    }
+                } else {
+                    project.movePin(draggedID, intoList: targetID)
+                }
+            } else if !isListDrag {
+                project.reorderPin(draggedID, nearPin: targetID, after: zone == .after)
+            }
+        }
+        // Any newly surfaced leaf lists default to visible.
+        visibleListIDs.formUnion(project.allLeafListIDs)
+    }
+}
+
 // MARK: - List / Pin detail views (unchanged)
 
 struct iOSListDetailView: View {
@@ -609,18 +1137,10 @@ struct iOSPinDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                RoundedRectangle(cornerRadius: 0)
-                    .fill(Color(.systemGray5))
+                MockPhoto(pin: pin, width: 1000, height: 750)
                     .frame(maxWidth: .infinity)
                     .frame(height: 260)
-                    .overlay {
-                        VStack(spacing: 8) {
-                            Image(systemName: "photo").font(.largeTitle).foregroundStyle(.tertiary)
-                            if pin.dateTaken != nil {
-                                Text("Tap to open").font(.caption).foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
+                    .clipped()
 
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
@@ -679,12 +1199,9 @@ private struct PinRow: View {
     let pin: MockPin
     var body: some View {
         HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color(.systemGray5))
+            MockPhoto(pin: pin, width: 120, height: 120)
                 .frame(width: 44, height: 44)
-                .overlay {
-                    Image(systemName: "photo").foregroundStyle(.tertiary).font(.caption)
-                }
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 2) {
                 Text(pin.name).font(.body)
                 if !pin.notes.isEmpty {
@@ -761,7 +1278,7 @@ private let mockScript: [ScriptElement] = [
 ]
 
 struct iOSScriptTab: View {
-    let onBack: () -> Void
+    let onMenu: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -779,9 +1296,7 @@ struct iOSScriptTab: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: onBack) {
-                        Image(systemName: "chevron.left").font(.body.weight(.semibold))
-                    }
+                    MenuButton(action: onMenu)
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { } label: { Image(systemName: "textformat.size") }
@@ -853,7 +1368,7 @@ private struct ScriptElementView: View {
 
 struct iOSScoutTab: View {
     let project: MockProject
-    let onBack: () -> Void
+    let onMenu: () -> Void
     @State private var isRecording = false
 
     var body: some View {
@@ -861,7 +1376,7 @@ struct iOSScoutTab: View {
             if isRecording {
                 iOSRecordingView(isRecording: $isRecording)
             } else {
-                iOSScoutIdleView(project: project, isRecording: $isRecording, onBack: onBack)
+                iOSScoutIdleView(project: project, isRecording: $isRecording, onMenu: onMenu)
             }
         }
     }
@@ -870,7 +1385,7 @@ struct iOSScoutTab: View {
 private struct iOSScoutIdleView: View {
     let project: MockProject
     @Binding var isRecording: Bool
-    let onBack: () -> Void
+    let onMenu: () -> Void
 
     var body: some View {
         ScrollView {
@@ -919,12 +1434,7 @@ private struct iOSScoutIdleView: View {
         .background(Color(.systemGroupedBackground))
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: onBack) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left").font(.body.weight(.semibold))
-                        Text("Projects").font(.body)
-                    }
-                }
+                MenuButton(action: onMenu)
             }
         }
     }
@@ -1077,10 +1587,9 @@ private struct PhotoCell: View {
     let pin: MockPin; let width: CGFloat
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: 0)
-                .fill(pin.listColor.opacity(0.3))
+            MockPhoto(pin: pin, width: 400, height: 300)
                 .frame(width: width, height: width * 0.75)
-                .overlay { Image(systemName: "photo").foregroundStyle(.white.opacity(0.3)) }
+                .clipped()
             LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
                 .frame(height: 36)
         }
@@ -1211,20 +1720,28 @@ private struct CameraLens: Identifiable, Equatable {
     iOSProjectListView(onSelect: { _ in })
 }
 
-#Preview("In Project — Locations tab") {
+#Preview("In Project") {
     iOSInProjectView(project: tokyoProject, onSwitchProject: { })
 }
 
 #Preview("Map Tab") {
-    iOSMapTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), focusPin: .constant(nil), onBack: { })
+    iOSMapTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), focusPin: .constant(nil), onMenu: { })
 }
 
-#Preview("Locations Tab — List mode") {
-    iOSListsTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), onBack: { }, onOpenPinOnMap: { _ in })
+#Preview("Photos Tab") {
+    iOSPhotosTab(project: tokyoProject, onMenu: { })
+}
+
+#Preview("Sidebar Drawer") {
+    iOSSidebarDrawer(
+        project: .constant(tokyoProject),
+        visibleListIDs: .constant(tokyoProject.allLeafListIDs),
+        onBackToProjects: { }, onClose: { }, onOpenPinOnMap: { _ in }
+    )
 }
 
 #Preview("Script Tab") {
-    iOSScriptTab(onBack: { })
+    iOSScriptTab(onMenu: { })
 }
 
 #Preview("List Detail") {
@@ -1240,7 +1757,7 @@ private struct CameraLens: Identifiable, Equatable {
 }
 
 #Preview("Scout — Idle") {
-    iOSScoutTab(project: tokyoProject, onBack: { })
+    iOSScoutTab(project: tokyoProject, onMenu: { })
 }
 
 #Preview("Scout — Recording") {
