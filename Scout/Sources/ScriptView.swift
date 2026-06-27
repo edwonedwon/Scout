@@ -2,6 +2,13 @@ import SwiftUI
 #if os(macOS)
 import AppKit
 import QuartzCore   // CAMediaTimingFunction for the animated scroll-to-scene
+/// Platform colour used for highlight tints. NSColor on macOS (consumed by the NSTextView
+/// renderer); UIColor on iOS — where the script is shown as plain text and highlights are
+/// ignored, but the type must still exist so the cross-platform `ScriptView` API compiles.
+typealias ScriptHighlightColor = NSColor
+#else
+import UIKit
+typealias ScriptHighlightColor = UIColor
 #endif
 
 /// The third center-panel mode (Map / Photos / Script). Renders the active script's fountain
@@ -11,7 +18,7 @@ import QuartzCore   // CAMediaTimingFunction for the animated scroll-to-scene
 struct ScriptView: View {
     let script: ScriptData?
     /// List-coloured highlight ranges to tint (supplied reactively by the owner).
-    var highlights: [(NSRange, NSColor)] = []
+    var highlights: [(NSRange, ScriptHighlightColor)] = []
     /// Called with the selected character range (into rawText) when the user presses `m`.
     var onAssign: ((NSRange) -> Void)? = nil
     /// Called to create a new list and assign the range to it (right-click menu).
