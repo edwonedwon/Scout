@@ -1424,13 +1424,19 @@ struct ContentView: View {
         guard !trimmed.isEmpty, let project = openProject else { return }
         let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
         let list = LocationListData(context: modelContext, name: trimmed, colorHex: colorHex)
-        // New list at the top (matches the sidebar's "New List").
-        for existing in project.lists { existing.panelOrder += 1 }
-        project.importedPhotos.forEach { $0.panelOrder += 1 }
-        list.panelOrder = 0
         list.project = project
         // Optionally nest inside a chosen folder/list.
         list.parentList = parent
+        if let parent {
+            // Nested: place at the BOTTOM of the parent's existing children.
+            let maxOrder = parent.childLists.filter { $0.deletedAt == nil }.map(\.panelOrder).max() ?? -1
+            list.panelOrder = maxOrder + 1
+        } else {
+            // Top level: place at the top (matches the sidebar's "New List").
+            for existing in project.lists where existing.parentList == nil { existing.panelOrder += 1 }
+            project.importedPhotos.forEach { $0.panelOrder += 1 }
+            list.panelOrder = 0
+        }
         assignScriptSelection(to: list)   // creates the highlight + saves
     }
 
