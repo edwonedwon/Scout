@@ -2464,7 +2464,7 @@ private struct ProjectDetailView: View {
             }
         }
         .confirmationDialog(
-            "Delete List",
+            "Move to Trash",
             isPresented: $showDeleteListConfirm,
             titleVisibility: .visible
         ) {
@@ -2941,7 +2941,7 @@ private struct ListRow: View {
             Button(role: .destructive) {
                 onDelete?()
             } label: {
-                Label("Delete List", systemImage: "trash")
+                Label("Move to Trash", systemImage: "trash")
             }
         }
     }

@@ -88,7 +88,7 @@ func pinMenuEntries(_ origin: PinMenuOrigin, _ a: PinMenuActions) -> [PinMenuEnt
         if let g = a.revealInGrid { e.append(.init(title: "Reveal in Photo Grid", systemImage: "square.grid.2x2", action: g)) }
         if let l = a.revealInList { e.append(.init(title: "Reveal in List", systemImage: "list.bullet", action: l)) }
     }
-    e.append(.init(separatorBefore: true, title: "Delete", systemImage: "trash", destructive: true, action: a.delete))
+    e.append(.init(separatorBefore: true, title: "Move to Trash", systemImage: "trash", destructive: true, action: a.delete))
     return e
 }
 
