@@ -215,6 +215,11 @@ struct ScriptTextRepresentable: NSViewRepresentable {
 
         func rebuild(text: String, highlights: [(NSRange, NSColor)]) {
             guard let scroll else { return }
+            // When only the highlights changed (e.g. assigning a scene to a list), the layout is
+            // identical — preserve the scroll position so the page doesn't jump. Capture BEFORE
+            // updating lastText (which still holds the previous text here).
+            let textUnchanged = (text == lastText)
+            let savedOrigin = scroll.contentView.bounds.origin
             lastText = text; lastHL = highlights
 
             let storage = NSTextStorage(attributedString: ScreenplayRenderer.attributedString(text, highlights: highlights))
@@ -308,6 +313,14 @@ struct ScriptTextRepresentable: NSViewRepresentable {
             doc.frame = NSRect(x: 0, y: 0, width: initialW, height: docH)
             scroll.documentView = doc
             doc.needsLayout = true
+
+            // Restore the prior scroll position for a highlight-only rebuild so assigning a list
+            // (or creating + assigning one) doesn't scroll/move the script at all.
+            if textUnchanged {
+                doc.layoutSubtreeIfNeeded()
+                scroll.contentView.setBoundsOrigin(savedOrigin)
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
         }
 
         /// Called by a page's text view to forward an assign action (selectedRange is in the
