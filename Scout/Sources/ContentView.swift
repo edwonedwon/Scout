@@ -301,7 +301,8 @@ struct ContentView: View {
 
     /// Highlight ranges for the active script, sourced from the reactive `@Query` so they update
     /// the instant a scene link (or its list) is removed. Highlights with no list are skipped.
-    private var activeScriptHighlights: [(NSRange, NSColor)] {
+    private var activeScriptHighlights: [(NSRange, ScriptHighlightColor)] {
+        #if os(macOS)
         guard let script = activeScript else { return [] }
         return allScriptHighlights
             // Stable order (the @Query is unsorted) so the Script view doesn't rebuild — and reset
@@ -315,6 +316,9 @@ struct ContentView: View {
                       let color = NSColor(hexString: list.colorHex) else { return nil }
                 return (NSRange(location: h.rangeStart, length: h.rangeLength), color)
             }
+        #else
+        return []
+        #endif
     }
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
     @State private var showExternalMoveSheet = false
