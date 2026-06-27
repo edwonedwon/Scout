@@ -9,7 +9,7 @@ import MapKit
 
 // MARK: - Mock data
 
-struct MockPin: Identifiable {
+struct MockPin: Identifiable, Equatable {
     let id = UUID()
     var name: String
     var notes: String
@@ -182,6 +182,8 @@ struct iOSInProjectView: View {
     @State private var visibleListIDs: Set<UUID>
     @State private var selectedTab = 0
     @State private var showCamera = false
+    /// Set by the Locations tab when the user taps a pin's mini-map; drives the Map tab camera.
+    @State private var mapFocusPin: MockPin? = nil
 
     init(project: MockProject, onSwitchProject: @escaping () -> Void) {
         self.project = project
@@ -191,11 +193,14 @@ struct iOSInProjectView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            iOSMapTab(project: project, visibleListIDs: $visibleListIDs, onBack: onSwitchProject)
+            iOSMapTab(project: project, visibleListIDs: $visibleListIDs, focusPin: $mapFocusPin, onBack: onSwitchProject)
                 .tabItem { Label("Map", systemImage: "map.fill") }
                 .tag(0)
 
-            iOSListsTab(project: project, visibleListIDs: $visibleListIDs, onBack: onSwitchProject)
+            iOSListsTab(project: project, visibleListIDs: $visibleListIDs, onBack: onSwitchProject, onOpenPinOnMap: { pin in
+                mapFocusPin = pin
+                selectedTab = 0
+            })
                 .tabItem { Label("Locations", systemImage: "list.bullet") }
                 .tag(1)
 
@@ -228,8 +233,10 @@ struct iOSInProjectView: View {
 struct iOSMapTab: View {
     let project: MockProject
     @Binding var visibleListIDs: Set<UUID>
+    @Binding var focusPin: MockPin?
     let onBack: () -> Void
     @State private var selectedPin: MockPin? = nil
+    @State private var cameraPosition: MapCameraPosition = .automatic
 
     private var visiblePins: [MockPin] {
         project.leafLists
@@ -237,19 +244,16 @@ struct iOSMapTab: View {
             .flatMap(\.pins)
     }
 
-    private var mapCenter: CLLocationCoordinate2D {
-        guard let first = project.allPins.first else {
-            return CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917)
-        }
-        return CLLocationCoordinate2D(latitude: first.lat, longitude: first.lng)
+    private var defaultRegion: MKCoordinateRegion {
+        let center = project.allPins.first.map {
+            CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lng)
+        } ?? CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917)
+        return MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12))
     }
 
     var body: some View {
         ZStack(alignment: .top) {
-            Map(initialPosition: .region(MKCoordinateRegion(
-                center: mapCenter,
-                span: MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
-            ))) {
+            Map(position: $cameraPosition) {
                 ForEach(visiblePins) { pin in
                     Annotation(pin.name, coordinate: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng)) {
                         PinDot(color: pin.listColor)
@@ -258,6 +262,20 @@ struct iOSMapTab: View {
                 }
             }
             .ignoresSafeArea()
+            .onAppear {
+                cameraPosition = .region(defaultRegion)
+            }
+            .onChange(of: focusPin) { _, pin in
+                guard let pin else { return }
+                withAnimation(.easeInOut(duration: 0.5)) {
+                    cameraPosition = .region(MKCoordinateRegion(
+                        center: CLLocationCoordinate2D(latitude: pin.lat, longitude: pin.lng),
+                        span: MKCoordinateSpan(latitudeDelta: 0.005, longitudeDelta: 0.005)
+                    ))
+                }
+                selectedPin = pin
+                focusPin = nil
+            }
 
             HStack(spacing: 8) {
                 Button(action: onBack) {
@@ -365,6 +383,7 @@ struct iOSListsTab: View {
     let project: MockProject
     @Binding var visibleListIDs: Set<UUID>
     let onBack: () -> Void
+    let onOpenPinOnMap: (MockPin) -> Void
 
     @State private var isGridMode = false
     @State private var expanded: Set<UUID> = []
@@ -375,7 +394,7 @@ struct iOSListsTab: View {
                 if isGridMode {
                     iOSListsGridView(project: project)
                 } else {
-                    iOSListsListView(project: project, visibleListIDs: $visibleListIDs, expanded: $expanded)
+                    iOSListsListView(project: project, visibleListIDs: $visibleListIDs, expanded: $expanded, onOpenPinOnMap: onOpenPinOnMap)
                 }
             }
             .navigationTitle("Locations")
@@ -410,6 +429,7 @@ private struct iOSListsListView: View {
     let project: MockProject
     @Binding var visibleListIDs: Set<UUID>
     @Binding var expanded: Set<UUID>
+    let onOpenPinOnMap: (MockPin) -> Void
     @State private var search = ""
 
     var body: some View {
@@ -425,7 +445,7 @@ private struct iOSListsListView: View {
             if !project.uncategorized.isEmpty {
                 Section("Uncategorized") {
                     ForEach(project.uncategorized) { pin in
-                        NavigationLink { iOSPinDetailView(pin: pin) } label: { PinRow(pin: pin) }
+                        NavigationLink { iOSPinDetailView(pin: pin, onOpenOnMap: onOpenPinOnMap) } label: { PinRow(pin: pin) }
                     }
                 }
             }
@@ -466,7 +486,7 @@ private struct iOSListsListView: View {
         let isVisible = visibleListIDs.contains(list.id)
         let effectivelyVisible = parentVisible && isVisible
         NavigationLink {
-            iOSListDetailView(list: list)
+            iOSListDetailView(list: list, onOpenPinOnMap: onOpenPinOnMap)
         } label: {
             HStack(spacing: 10) {
                 Circle().fill(list.color).frame(width: 12, height: 12)
@@ -553,11 +573,12 @@ private struct iOSListsGridView: View {
 
 struct iOSListDetailView: View {
     fileprivate let list: MockList
+    let onOpenPinOnMap: (MockPin) -> Void
     var body: some View {
         List {
             ForEach(list.pins) { pin in
                 NavigationLink {
-                    iOSPinDetailView(pin: pin)
+                    iOSPinDetailView(pin: pin, onOpenOnMap: onOpenPinOnMap)
                 } label: {
                     PinRow(pin: pin)
                 }
@@ -584,6 +605,7 @@ struct iOSListDetailView: View {
 
 struct iOSPinDetailView: View {
     fileprivate let pin: MockPin
+    let onOpenOnMap: (MockPin) -> Void
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -619,6 +641,18 @@ struct iOSPinDetailView: View {
                     .frame(height: 160)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .disabled(true)
+                    .overlay(alignment: .bottomTrailing) {
+                        Button {
+                            onOpenOnMap(pin)
+                        } label: {
+                            Label("Open in Map", systemImage: "arrow.up.forward.app")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                                .padding(8)
+                        }
+                    }
 
                     HStack(spacing: 12) {
                         Label(String(format: "%.4f, %.4f", pin.lat, pin.lng), systemImage: "location.fill")
@@ -1182,11 +1216,11 @@ private struct CameraLens: Identifiable, Equatable {
 }
 
 #Preview("Map Tab") {
-    iOSMapTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), onBack: { })
+    iOSMapTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), focusPin: .constant(nil), onBack: { })
 }
 
 #Preview("Locations Tab — List mode") {
-    iOSListsTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), onBack: { })
+    iOSListsTab(project: tokyoProject, visibleListIDs: .constant(tokyoProject.allLeafListIDs), onBack: { }, onOpenPinOnMap: { _ in })
 }
 
 #Preview("Script Tab") {
@@ -1195,13 +1229,13 @@ private struct CameraLens: Identifiable, Equatable {
 
 #Preview("List Detail") {
     NavigationStack {
-        iOSListDetailView(list: tokyoProject.lists[1])
+        iOSListDetailView(list: tokyoProject.lists[1], onOpenPinOnMap: { _ in })
     }
 }
 
 #Preview("Pin Detail") {
     NavigationStack {
-        iOSPinDetailView(pin: tokyoProject.lists[0].pins[0])
+        iOSPinDetailView(pin: tokyoProject.lists[0].pins[0], onOpenOnMap: { _ in })
     }
 }
 
