@@ -375,13 +375,16 @@ struct ContentView: View {
                 // top — so present it as a dimmed, window-centered overlay instead).
                 .overlay {
                     if let project = sharingProject {
-                        ZStack {
+                        ZStack(alignment: .topTrailing) {
                             Color.black.opacity(0.35)
                                 .ignoresSafeArea()
                                 .onTapGesture { sharingProject = nil }
+                            // Anchor near the top-right, roughly under the share button.
                             ProjectShareSheet(project: project, onDismiss: { sharingProject = nil })
                                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                                 .shadow(radius: 24)
+                                .padding(.top, 54)
+                                .padding(.trailing, 12)
                         }
                         .transition(.opacity)
                     }
