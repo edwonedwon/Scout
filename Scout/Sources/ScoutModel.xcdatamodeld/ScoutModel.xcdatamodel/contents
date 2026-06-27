@@ -55,6 +55,11 @@
         <relationship name="list" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="LocationListData" inverseName="pins" inverseEntity="LocationListData"/>
         <relationship name="owningProject" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectData" inverseName="importedPhotos" inverseEntity="ProjectData"/>
     </entity>
+    <entity name="PhotoBlobData" representedClassName="PhotoBlobData" syncable="YES">
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="data" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
+        <attribute name="filename" optional="YES" attributeType="String"/>
+    </entity>
     <entity name="ScriptData" representedClassName="ScriptData" syncable="YES">
         <attribute name="importedAt" attributeType="Date" defaultDateTimeInterval="0" usesScalarValueType="NO"/>
         <attribute name="name" attributeType="String" defaultValueString=""/>

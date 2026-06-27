@@ -1808,7 +1808,11 @@ struct ContentView: View {
                         .background(.regularMaterial, in: .rect(cornerRadius: 8))
                 }
             }
-            .padding()
+            // Drop below the top map toolbar so the progress capsule isn't covered by its
+            // trailing icons (matches DebugPanelOverlay's .padding(.top, 58) clearance).
+            .padding(.top, 58)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 16)
             .animation(.easeInOut(duration: 0.2), value: backupStatusMessage != nil)
         }
         .overlay(alignment: .topLeading) {

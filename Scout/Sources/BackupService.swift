@@ -129,13 +129,13 @@ enum BackupService {
         let everyList = topLevelLists.flatMap(descendants)
         let allPins = everyList.flatMap(\.pins) + project.importedPhotos
 
-        // --- Copy thumbnail files only (not full-res photoFiles) ---
-        // Full-res photoFiles are 2048px JPEGs that dominate export size.
-        // Thumbnails (300px) are sufficient for the app to run after restore;
-        // carousel falls back to thumbnails until the user relinks originals.
+        // --- Copy derivative files: thumbnails (300px) AND full-res (2048px) ---
+        // Both are included so a restore is complete (full-res viewing works without a relink).
+        // Original camera files (originalFilePath) are intentionally NOT exported — they're large
+        // and recoverable via relinkOriginals(folder:).
         var copiedFiles: Set<String> = []
         for pin in allPins {
-            for f in pin.thumbnailFiles where !copiedFiles.contains(f) {
+            for f in (pin.thumbnailFiles + pin.photoFiles) where !copiedFiles.contains(f) {
                 let src = PinPhotoStore.fileURL(f)
                 if fm.fileExists(atPath: src.path) {
                     try? fm.copyItem(at: src, to: photosDir.appendingPathComponent(f))
@@ -413,8 +413,8 @@ enum BackupService {
     // MARK: - Helpers
 
     private static func backupPin(_ pin: PinnedLocationData) -> BackupPin {
-        // photoFiles (2048px) are omitted from exports — thumbnailFiles only.
-        // Carousel falls back to thumbnails on restore; originals can be relinked.
+        // Both thumbnails (300px) and full-res (2048px) derivatives are exported so a restore is
+        // complete. Original camera files are not (recoverable via relinkOriginals).
         BackupPin(
             uuid: pin.uuid,
             name: pin.name,
@@ -426,7 +426,7 @@ enum BackupService {
             sortOrder: pin.sortOrder,
             panelOrder: pin.panelOrder,
             imageSourceRaw: pin.imageSourceRaw,
-            photoFiles: [],
+            photoFiles: pin.photoFiles,
             thumbnailFiles: pin.thumbnailFiles,
             originalFileBasename: pin.originalFilePath.map { URL(fileURLWithPath: $0).lastPathComponent },
             hasGPS: pin.hasGPS,

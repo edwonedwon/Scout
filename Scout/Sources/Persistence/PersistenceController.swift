@@ -85,6 +85,22 @@ final class PersistenceController {
         // most recent write win at the property level (location data, not prose — see plan).
         container.viewContext.automaticallyMergesChangesFromParent = true
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        // Photo blobs (CKAssets) sync independently of the disk cache. Reconcile once on launch
+        // (uploads any local derivatives not yet synced; materializes any synced blobs missing
+        // locally) and again on every remote change (so blobs arriving from another device land
+        // on disk where the file-based image views can render them). Skip for in-memory stores.
+        if !inMemory {
+            PhotoBlobSync.reconcile(container: container)
+            NotificationCenter.default.addObserver(
+                forName: .NSPersistentStoreRemoteChange,
+                object: container.persistentStoreCoordinator,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                PhotoBlobSync.reconcile(container: self.container)
+            }
+        }
     }
 
     var viewContext: NSManagedObjectContext { container.viewContext }

@@ -130,10 +130,19 @@ private struct BackupSection: View {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.zip]
         panel.message = "Select a Scout backup archive (.zip)"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let url: URL? = await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                panel.begin { response in
+                    continuation.resume(returning: response == .OK ? panel.url : nil)
+                }
+            }
+        }
+        guard let url else { return }
         do {
             let summary = try await BackupService.importBackup(from: url, context: modelContext)
             statusMessage = "Imported \(summary.projectsAdded) projects, \(summary.listsAdded) lists, \(summary.pinsAdded) pins, \(summary.photoFilesCopied) photos. Skipped \(summary.skippedDuplicates) duplicates."
+            // Upload the imported derivatives to iCloud so they sync to other devices.
+            PhotoBlobSync.reconcile(container: PersistenceController.shared.container)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -146,12 +155,21 @@ private struct BackupSection: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.message = "Select the folder containing your original photo files"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let url: URL? = await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                panel.begin { response in
+                    continuation.resume(returning: response == .OK ? panel.url : nil)
+                }
+            }
+        }
+        guard let url else { return }
         let result = await BackupService.relinkOriginals(folder: url, context: modelContext) { stage, _ in
             Task { @MainActor in statusMessage = stage }
         }
         statusMessage = "Relinked \(result.linked) of \(result.linked + result.notFound) photos "
             + "(\(result.photosGenerated) images rebuilt, \(result.notFound) not found) from \(result.scanned) files."
+        // Upload the freshly-generated full-res derivatives to iCloud so they sync to other devices.
+        PhotoBlobSync.reconcile(container: PersistenceController.shared.container)
     }
 }
 #endif
