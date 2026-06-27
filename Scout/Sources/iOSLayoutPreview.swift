@@ -1038,18 +1038,20 @@ private struct CameraSheetPreview: View {
                 // Bottom controls: shutter · flip (no gallery — use the Photos tab)
                 HStack {
                     Spacer()
+                    // camera shutter button
                     ZStack {
                         Circle().stroke(.white, lineWidth: 3).frame(width: 78, height: 78)
                         Circle().fill(.white).frame(width: 66, height: 66)
                     }
                     Spacer()
-                    Button { } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath.camera")
-                            .font(.title2.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 52, height: 52)
-                            .background(Circle().fill(.white.opacity(0.15)))
-                    }
+                    // flip camera between selfie/rear button
+//                    Button { } label: {
+//                        Image(systemName: "arrow.triangle.2.circlepath.camera")
+//                            .font(.title2.weight(.semibold))
+//                            .foregroundStyle(.white)
+//                            .frame(width: 52, height: 52)
+//                            .background(Circle().fill(.white.opacity(0.15)))
+//                    }
                 }
                 .padding(.horizontal, 50)
                 .padding(.bottom, 44)
