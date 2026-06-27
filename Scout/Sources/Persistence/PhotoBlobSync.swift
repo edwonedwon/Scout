@@ -16,6 +16,9 @@ final class PhotoBlobData: NSManagedObject {
     @NSManaged var filename: String?
     @NSManaged var data: Data?
     @NSManaged var createdAt: Date?
+    /// The pin that owns this derivative. Set so the blob is reachable from the project's
+    /// record graph and is therefore included when the project is shared via CKShare.
+    @NSManaged var pin: PinnedLocationData?
 }
 
 /// Bidirectional reconcile between the on-disk photo cache and the synced `PhotoBlobData` rows.
@@ -44,25 +47,32 @@ enum PhotoBlobSync {
                 if blobsByName[name] == nil { blobsByName[name] = b }
             }
 
-            // --- Gather every derivative filename referenced by a pin (thumb + full only) ---
+            // --- Map every derivative filename (thumb + full only) to its owning pin ---
             let pinReq = NSFetchRequest<PinnedLocationData>(entityName: "PinnedLocationData")
             let pins = (try? ctx.fetch(pinReq)) ?? []
-            var referenced = Set<String>()
+            var ownerByName: [String: PinnedLocationData] = [:]
             for pin in pins {
-                referenced.formUnion(pin.thumbnailFiles)
-                referenced.formUnion(pin.photoFiles)
+                for name in (pin.thumbnailFiles + pin.photoFiles) where ownerByName[name] == nil {
+                    ownerByName[name] = pin
+                }
             }
 
-            // --- Upload: file on disk, no blob yet → create blob ---
-            for name in referenced where blobsByName[name] == nil {
+            // --- Upload: file on disk, no blob yet → create blob linked to its pin ---
+            for (name, owner) in ownerByName where blobsByName[name] == nil {
                 let url = PinPhotoStore.fileURL(name)
                 guard let bytes = try? Data(contentsOf: url), !bytes.isEmpty else { continue }
                 let blob = PhotoBlobData(context: ctx)
                 blob.filename = name
                 blob.data = bytes
                 blob.createdAt = Date()
+                blob.pin = owner
                 blobsByName[name] = blob
                 uploaded += 1
+            }
+
+            // --- Backfill: existing blobs missing their pin link (pre-relationship rows) ---
+            for (name, blob) in blobsByName where blob.pin == nil {
+                if let owner = ownerByName[name] { blob.pin = owner }
             }
 
             // --- Materialize: blob present, file missing on disk → write file ---

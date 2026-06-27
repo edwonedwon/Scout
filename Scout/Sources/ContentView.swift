@@ -943,10 +943,16 @@ struct ContentView: View {
             Color(red: 22/255, green: 24/255, blue: 32/255)
                 .ignoresSafeArea()
             VStack(spacing: 16) {
+                #if os(macOS)
                 Image(nsImage: NSApplication.shared.applicationIconImage)
                     .resizable()
                     .frame(width: 128, height: 128)
                     .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                #else
+                Image(systemName: "mappin.and.ellipse")
+                    .font(.system(size: 96))
+                    .foregroundStyle(.secondary)
+                #endif
                 Text("Script Scout")
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -1003,39 +1009,26 @@ struct ContentView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             Divider()
-            // Add-person form.
+            // Share via the system CloudKit sharing UI (add people by Apple ID, set
+            // editor/viewer, copy invite link). Lists, pins, notes, scripts + photos travel.
             VStack(alignment: .leading, spacing: 8) {
-                Text("ADD PERSON").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                TextField("Apple ID or iCloud email", text: $addPersonEmail)
-                    .textFieldStyle(.roundedBorder)
-                Picker("Role", selection: $addPersonRole) {
-                    Text("Editor").tag(ShareRole.editor)
-                    Text("Viewer").tag(ShareRole.viewer)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                Text(addPersonRole == .editor
-                     ? "Editor — can view and make changes."
-                     : "Viewer — can view only, no changes.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                Button { addPerson() } label: {
-                    Label("Add Person", systemImage: "person.badge.plus").frame(maxWidth: .infinity)
+                Button { shareProject() } label: {
+                    Label("Share Project…", systemImage: "person.badge.plus").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(addPersonEmail.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(openProject == nil)
+                Text("Opens the iCloud sharing panel. Invitees need the app and must accept the invite; they can view or edit per the permission you choose.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
             .padding(12)
-            Text("iCloud sharing isn't connected yet — the person is invited once collaboration is enabled.")
-                .font(.caption2).foregroundStyle(.tertiary)
-                .padding(.horizontal, 12).padding(.bottom, 12)
         }
         .frame(width: 300)
     }
 
-    private func addPerson() {
-        // Placeholder until CloudKit sharing exists (docs/collaboration-plan.md). For now just
-        // clears the field; later this creates/updates the project's CKShare with the chosen role.
-        addPersonEmail = ""
+    private func shareProject() {
+        guard let project = openProject else { return }
+        showCollaborationPopover = false
+        Task { await ProjectSharing.presentShareUI(for: project) }
     }
 
     private var locationTrackingButton: some View {

@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreData
+import CloudKit
 import ScoutKit
 
 extension Notification.Name {
@@ -33,12 +34,33 @@ private struct RelinkProjectCommand: View {
 }
 #endif
 
+/// Accepts incoming CloudKit share invitations (when the user taps an invite link the OS
+/// hands the share metadata to the app delegate). Routes them into the shared store.
+#if os(macOS)
+final class ScoutAppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
+        PersistenceController.shared.acceptShare(metadata: metadata)
+    }
+}
+#else
+final class ScoutAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
+        PersistenceController.shared.acceptShare(metadata: metadata)
+    }
+}
+#endif
+
 @main
 struct ScoutApp: App {
     @StateObject private var apiKeyState = APIKeyState.shared
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(ScoutAppDelegate.self) private var appDelegate
+    #else
+    @UIApplicationDelegateAdaptor(ScoutAppDelegate.self) private var appDelegate
+    #endif
 
-    /// Core Data + CloudKit stack (docs/collaboration-plan.md, Path B). CloudKit sync is currently
-    /// OFF inside PersistenceController (TODO plan 1f) — this is a local Core Data store for now.
+    /// Core Data + CloudKit stack (docs/collaboration-plan.md, Path B). Private CloudKit sync +
+    /// a shared store for CKShare collaboration are enabled in PersistenceController.
     private let persistence = PersistenceController.shared
 
     var body: some Scene {

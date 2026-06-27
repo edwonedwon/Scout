@@ -63,12 +63,23 @@ final class PersistenceController {
         }
 
         // --- Shared database store (projects shared TO this user) ---
-        // Added in the sharing phase (collaboration-plan.md phase 3). It's intentionally NOT
-        // loaded yet: with two stores holding the same entities, every freshly-inserted object
-        // would need an explicit `assign(_:to:)` to disambiguate its store. Phase 1 (private
-        // CloudKit sync) is single-store, so inserts and `obtainPermanentIDs` stay clean. The
-        // accept-share flow that needs the shared store will re-enable it here.
-        container.persistentStoreDescriptions = [privateDesc]
+        // Required for CKShare collaboration: accepted shares land in the shared CloudKit
+        // database, mirrored into this local store. New objects the user creates still default
+        // to the FIRST store (private) — Core Data auto-assigns to the first applicable store —
+        // so normal inserts need no explicit `assign(_:to:)`. Skip entirely for in-memory.
+        if inMemory {
+            container.persistentStoreDescriptions = [privateDesc]
+        } else {
+            let sharedDesc = privateDesc.copy() as! NSPersistentStoreDescription
+            sharedDesc.url = baseURL.appendingPathComponent("shared.sqlite")
+            let sharedOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
+            sharedOpts.databaseScope = .shared
+            sharedDesc.cloudKitContainerOptions = sharedOpts
+            sharedDesc.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+            sharedDesc.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
+            // Private MUST come first so plain inserts auto-assign to it.
+            container.persistentStoreDescriptions = [privateDesc, sharedDesc]
+        }
 
         container.loadPersistentStores { [weak self] desc, error in
             if let error { fatalError("PersistenceController: failed to load store: \(error)") }
@@ -116,5 +127,27 @@ final class PersistenceController {
     func isInSharedStore(_ object: NSManagedObject) -> Bool {
         guard let sharedStore else { return false }
         return object.objectID.persistentStore == sharedStore
+    }
+
+    /// The CloudKit container backing sharing (needed to drive the system share UI).
+    var cloudKitContainer: CKContainer { CKContainer(identifier: Self.cloudContainerID) }
+
+    /// Returns the project's existing `CKShare`, or creates a new one. The returned share is
+    /// handed to the system sharing UI (`UICloudSharingController` / `NSSharingServicePicker`)
+    /// which manages participants and editor/viewer permissions.
+    func shareForProject(_ project: ProjectData) async throws -> CKShare {
+        if let existing = existingShare(for: project) { return existing }
+        let (_, share, _) = try await container.share([project], to: nil)
+        share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
+        return share
+    }
+
+    /// Accept a share the user tapped (from Messages/Mail). Called by the app delegate.
+    /// The accepted records are mirrored into the local SHARED store.
+    func acceptShare(metadata: CKShare.Metadata) {
+        guard let sharedStore else { print("acceptShare: shared store not loaded"); return }
+        container.acceptShareInvitations(from: [metadata], into: sharedStore) { _, error in
+            if let error { print("acceptShare error: \(error)") }
+        }
     }
 }
