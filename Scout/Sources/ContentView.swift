@@ -1,6 +1,6 @@
 import SwiftUI
 import MapKit
-import SwiftData
+import CoreData
 import ScoutKit
 
 /// A collaborator's access level on a shared project. Maps to CloudKit's CKShare permissions
@@ -202,19 +202,20 @@ struct ContentView: View {
         set { cyclingProviderRaw = newValue?.rawValue ?? "" }
     }
 
-    @Environment(\.modelContext) private var modelContext
+    @Environment(\.managedObjectContext) private var modelContext
     @Environment(\.undoManager) private var undoManager
-    @Query(sort: \LocationListData.createdAt) private var allLists: [LocationListData]
-    // General pins not attached to any list — always shown on the map.
+    @FetchRequest(sortDescriptors: [SortDescriptor(\LocationListData.createdAt)])
+    private var allLists: FetchedResults<LocationListData>
     // Pins not attached to any list or project — always shown on the map.
-    @Query(filter: #Predicate<PinnedLocationData> { $0.list == nil && $0.owningProject == nil }, sort: \PinnedLocationData.createdAt)
-    private var unfiledPins: [PinnedLocationData]
+    @FetchRequest(sortDescriptors: [SortDescriptor(\PinnedLocationData.createdAt)],
+                  predicate: NSPredicate(format: "list == nil AND owningProject == nil"))
+    private var unfiledPins: FetchedResults<PinnedLocationData>
     // All pins, for the one-time offline-photo backfill.
-    @Query private var allPins: [PinnedLocationData]
-    @Query private var allProjects: [ProjectData]
+    @FetchRequest(sortDescriptors: []) private var allPins: FetchedResults<PinnedLocationData>
+    @FetchRequest(sortDescriptors: []) private var allProjects: FetchedResults<ProjectData>
     // All script highlights — drives Script-view tinting reactively, so removing a scene link
     // (or its list) repaints the script immediately instead of leaving a "ghost" highlight.
-    @Query private var allScriptHighlights: [ScriptHighlight]
+    @FetchRequest(sortDescriptors: []) private var allScriptHighlights: FetchedResults<ScriptHighlight>
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -223,6 +224,7 @@ struct ContentView: View {
     @State private var selectedLocation: ScoutLocation?
     @State private var searchError: String?
     @State private var backupStatusMessage: String? = nil
+    @State private var backupProgress: Double? = nil
     @State private var isBackupBusy = false
     @State private var didInitialCenter = false
     @State private var chatMessages: [ChatMessage] = []
@@ -1298,8 +1300,7 @@ struct ContentView: View {
             return
         }
         list.pins.forEach { $0.sortOrder += 1 }
-        let pin = PinnedLocationData(from: location, sortOrder: 0)
-        modelContext.insert(pin)
+        let pin = PinnedLocationData(context: modelContext, from: location, sortOrder: 0)
         pin.list = list
         cachePhotos(for: pin, from: location)
     }
@@ -1316,13 +1317,11 @@ struct ContentView: View {
         }
         if let list {
             list.pins.forEach { $0.sortOrder += 1 }
-            let pin = PinnedLocationData(from: location, sortOrder: 0)
-            modelContext.insert(pin)
+            let pin = PinnedLocationData(context: modelContext, from: location, sortOrder: 0)
             pin.list = list
             cachePhotos(for: pin, from: location)
         } else {
-            let pin = PinnedLocationData(from: location)
-            modelContext.insert(pin)
+            let pin = PinnedLocationData(context: modelContext, from: location)
             cachePhotos(for: pin, from: location)
         }
     }
@@ -1398,12 +1397,11 @@ struct ContentView: View {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, let project = openProject else { return }
         let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
-        let list = LocationListData(name: trimmed, colorHex: colorHex)
+        let list = LocationListData(context: modelContext, name: trimmed, colorHex: colorHex)
         // New list at the top (matches the sidebar's "New List").
         for existing in project.lists { existing.panelOrder += 1 }
         project.importedPhotos.forEach { $0.panelOrder += 1 }
         list.panelOrder = 0
-        modelContext.insert(list)
         list.project = project
         assignScriptSelection(to: list)   // creates the highlight + saves
     }
@@ -1420,10 +1418,9 @@ struct ContentView: View {
         let afterStart = range.location + range.length
         let after = ns.substring(with: NSRange(location: afterStart, length: min(40, ns.length - afterStart)))
         let heading = FountainParser.sceneHeading(in: script.rawText, before: range.location)
-        let h = ScriptHighlight(rangeStart: range.location, rangeLength: range.length,
+        let h = ScriptHighlight(context: modelContext, rangeStart: range.location, rangeLength: range.length,
                                 excerpt: excerpt, contextBefore: before, contextAfter: after,
                                 sceneHeading: heading)
-        modelContext.insert(h)
         h.script = script
         h.list = list
         try? modelContext.save()
@@ -1540,7 +1537,7 @@ struct ContentView: View {
     /// compressed copies to remove and shows a confirmation. The original large files are
     /// always kept; confirmed removals go to the Trash (recoverable, 30-day rule).
     private func findDuplicates() {
-        let plan = PhotoImportService.findDuplicates(in: allPins)
+        let plan = PhotoImportService.findDuplicates(in: Array(allPins))
         if plan.remove.isEmpty {
             DebugLogger.shared.log("No duplicates found across \(allPins.filter { $0.deletedAt == nil }.count) photos.",
                                    level: .info, tag: "Dedup")
@@ -1665,13 +1662,21 @@ struct ContentView: View {
         panel.canChooseDirectories = true
         panel.message = "Select folder containing your original photo files"
         guard panel.runModal() == .OK, let url = panel.url else { isBackupBusy = false; return }
-        let result = await BackupService.relinkOriginals(folder: url, context: modelContext)
-        backupStatusMessage = "Relinked \(result.linked) files. \(result.notFound) not found."
+        backupProgress = 0
+        let result = await BackupService.relinkOriginals(folder: url, context: modelContext) { stage, frac in
+            Task { @MainActor in
+                backupStatusMessage = stage
+                backupProgress = frac
+            }
+        }
+        backupProgress = nil
+        backupStatusMessage = "Relinked \(result.linked) of \(result.linked + result.notFound) photos "
+            + "(\(result.photosGenerated) images rebuilt, \(result.notFound) not found) from \(result.scanned) files."
         isBackupBusy = false
-        // Original-file availability changed (not part of the per-pin signature) → drop caches.
+        // Original-file availability + photoFiles changed (not part of the per-pin signature) → drop caches.
         displayCache.invalidateAll()
         rebuildPinCaches()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { backupStatusMessage = nil }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { backupStatusMessage = nil }
     }
     #endif
 
@@ -1778,9 +1783,16 @@ struct ContentView: View {
         .overlay(alignment: .topTrailing) {
             VStack(alignment: .trailing, spacing: 6) {
                 if let msg = backupStatusMessage {
-                    HStack(spacing: 6) {
-                        if isBackupBusy { ProgressView().controlSize(.small) }
-                        Text(msg)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            if isBackupBusy { ProgressView().controlSize(.small) }
+                            Text(msg)
+                        }
+                        if isBackupBusy, let frac = backupProgress {
+                            ProgressView(value: frac)
+                                .progressViewStyle(.linear)
+                                .frame(width: 220)
+                        }
                     }
                     .padding(8)
                     .background(.regularMaterial, in: .rect(cornerRadius: 8))
@@ -2915,7 +2927,7 @@ struct BoundarySettingsPopover: View {
 #Preview("Main layout", traits: .fixedLayout(width: 1200, height: 800)) {
     ContentView()
         .environmentObject(APIKeyState.shared)
-        .modelContainer(PreviewData.container)
+        .environment(\.managedObjectContext, PreviewData.context)
         .onAppear {
             #if os(macOS)
             NSApp.windows.forEach { window in

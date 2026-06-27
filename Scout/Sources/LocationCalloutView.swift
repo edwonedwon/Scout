@@ -1,5 +1,5 @@
 import SwiftUI
-import SwiftData
+import CoreData
 import ScoutKit
 
 struct LocationCalloutView: View {

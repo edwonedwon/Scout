@@ -1,6 +1,61 @@
 # Plan: iCloud Project Sharing & Real-Time Collaboration
 
-Status: PLANNING (not started). Owner: Edwon. Last updated: 2026-06-26.
+Status: IN PROGRESS — executing Path B (Core Data migration). Owner: Edwon. Last updated: 2026-06-27.
+
+## Decision (LOCKED): Path B — Core Data + NSPersistentCloudKitContainer
+
+The spike question (Path A SwiftData-sharing vs Path B Core Data) is **resolved: Path B**.
+No further re-litigation. We migrate persistence from SwiftData to Core Data because
+`NSPersistentCloudKitContainer` is the only fully-supported host for Notes-style `CKShare`
+sharing (private + shared stores, participant roles, server-side write rejection).
+
+## Current state (actual, as of 2026-06-27)
+
+What's DONE:
+- Model is CloudKit-compatible: defaults on every non-optional attribute; project/list/pin
+  all have `deletedAt` (full trash with 30-day purge shipped).
+- Entitlements + `project.yml`: iCloud container `iCloud.com.cutetech.scout`, CloudKit
+  service, `aps-environment`, `UIBackgroundModes: remote-notification`. Bundle id
+  `com.cutetech.scout`, team set, `-allowProvisioningUpdates` in build script.
+- `Scout/Sources/Persistence/PersistenceController.swift` exists: two-store
+  (`private.sqlite` + `shared.sqlite`) `NSPersistentCloudKitContainer`, share helpers.
+  NOT yet wired in, and references a `ScoutModel` model that didn't exist until now.
+- `BackupService` hardened to preserve the full nested hierarchy — this is the
+  SwiftData→Core Data **data bridge** (export from old store, import into new).
+
+What's STILL SwiftData (the migration target):
+- `ScoutApp.swift` builds a SwiftData `ModelContainer(cloudKitDatabase: .none)`.
+- 5 `@Model` types in `Models/ProjectData.swift`.
+- 4 view files use `@Query` (20 call sites): ContentView, ProjectsPanel, DataInspectorView,
+  + PreviewData. Plus `modelContext`, `persistentModelID`, `#Predicate`, `FetchDescriptor`,
+  `@Bindable` throughout.
+
+## Execution checklist (Path B)
+
+- [x] **1a. Core Data model** — `Scout/Sources/ScoutModel.xcdatamodeld` with all 5 entities,
+      attributes, relationships + inverses, **all Nullify** (cascade done in code).
+      `[String]` arrays stored as JSON-encoded `String` attrs (`photoFilesJSON`,
+      `thumbnailFilesJSON`) — CloudKit-safe; they're local-cache pointers, not synced as-is.
+      Compiles to `ScoutModel.momd` (verified build). App still runs on SwiftData. ✅ 2026-06-27
+- [ ] **1b. NSManagedObject subclasses** — same class names + same API surface as the old
+      `@Model` types (computed `[T]` accessors over the to-many sets, computed `photoFiles`
+      over the JSON string) so view code compiles with minimal churn.
+- [ ] **1c. Wire PersistenceController into ScoutApp** — `.environment(\.managedObjectContext)`;
+      delete the SwiftData container.
+- [ ] **1d. Migrate consumers** — `@Query`→`@FetchRequest`, `modelContext`→`viewContext`,
+      `persistentModelID`→`objectID`, `#Predicate`→`NSPredicate`, `@Bindable`→`@ObservedObject`,
+      `FetchDescriptor`→`NSFetchRequest`. Files: ContentView, ProjectsPanel, DataInspectorView,
+      DebugPanel, BackupService, PreviewData.
+- [ ] **1e. Data bridge** — one-time import of the user's existing data into the new Core
+      Data store via the backup format (export old → import new), gated so it runs once.
+- [ ] **1f. Enable private CloudKit sync** — confirm a single user's data syncs across their
+      own devices. Re-verify the documented crash-prone areas (carousel save, selection
+      perf, map multi-select, SwiftData delete races) behave under Core Data.
+
+Then phases 2–6 below (photo assets, share+accept, roles, real-time, polish).
+
+NOTE: Original plan numbering kept below for reference; the checklist above supersedes the
+"Phasing" section's Phase 0/1 (spike + compat work, both effectively done/decided).
 
 ## Goal
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreData
 import ScoutKit
 
 struct SettingsView: View {
@@ -102,7 +103,7 @@ struct SettingsView: View {
 #if os(macOS)
 @MainActor
 private struct BackupSection: View {
-    @Environment(\.modelContext) private var modelContext
+    @Environment(\.managedObjectContext) private var modelContext
     @State private var isBusy = false
     @State private var statusMessage: String? = nil
     @State private var errorMessage: String? = nil
@@ -146,8 +147,11 @@ private struct BackupSection: View {
         panel.canChooseDirectories = true
         panel.message = "Select the folder containing your original photo files"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let result = await BackupService.relinkOriginals(folder: url, context: modelContext)
-        statusMessage = "Relinked \(result.linked) originals. \(result.notFound) not found in that folder."
+        let result = await BackupService.relinkOriginals(folder: url, context: modelContext) { stage, _ in
+            Task { @MainActor in statusMessage = stage }
+        }
+        statusMessage = "Relinked \(result.linked) of \(result.linked + result.notFound) photos "
+            + "(\(result.photosGenerated) images rebuilt, \(result.notFound) not found) from \(result.scanned) files."
     }
 }
 #endif

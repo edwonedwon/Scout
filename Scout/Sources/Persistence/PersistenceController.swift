@@ -40,19 +40,21 @@ final class PersistenceController {
                                    : baseURL.appendingPathComponent("private.sqlite")
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-        let privateOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
-        privateOpts.databaseScope = .private
-        privateDesc.cloudKitContainerOptions = privateOpts
+        // TODO(plan 1f): enable private CloudKit sync by restoring these two lines. Kept OFF for
+        // the local cut-over so store load can't fail on iCloud provisioning while we verify the
+        // SwiftData→Core Data migration + data bridge in isolation. (History tracking stays on so
+        // turning sync on later needs no store migration.)
+        // let privateOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
+        // privateOpts.databaseScope = .private
+        // privateDesc.cloudKitContainerOptions = privateOpts
 
         // --- Shared database store (projects shared TO this user) ---
-        let sharedDesc = privateDesc.copy() as! NSPersistentStoreDescription
-        sharedDesc.url = inMemory ? URL(fileURLWithPath: "/dev/null/shared")
-                                  : baseURL.appendingPathComponent("shared.sqlite")
-        let sharedOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
-        sharedOpts.databaseScope = .shared
-        sharedDesc.cloudKitContainerOptions = sharedOpts
-
-        container.persistentStoreDescriptions = [privateDesc, sharedDesc]
+        // Added in the sharing phase (collaboration-plan.md phase 3). It's intentionally NOT
+        // loaded yet: with two stores holding the same entities, every freshly-inserted object
+        // would need an explicit `assign(_:to:)` to disambiguate its store. Phase 1 (private
+        // CloudKit sync) is single-store, so inserts and `obtainPermanentIDs` stay clean. The
+        // accept-share flow that needs the shared store will re-enable it here.
+        container.persistentStoreDescriptions = [privateDesc]
 
         container.loadPersistentStores { [weak self] desc, error in
             if let error { fatalError("PersistenceController: failed to load store: \(error)") }

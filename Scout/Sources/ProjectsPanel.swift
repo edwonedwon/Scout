@@ -1,5 +1,5 @@
 import SwiftUI
-import SwiftData
+import CoreData
 import ScoutKit
 import CoreLocation
 import UniformTypeIdentifiers
@@ -101,14 +101,13 @@ func loadImageURLs(from providers: [NSItemProvider]) async -> [URL] {
 /// Adjust this to clear the traffic light buttons in the sidebar.
 private let sidebarTopPadding: CGFloat = 55
 
-/// Deletes EVERY project, list, and pin in the store via SwiftData batch deletes,
-/// logging counts before and after. Must be called only after any open-project detail
-/// view has been popped/unmounted (see the purgeTrigger handler), so no @Bindable view
-/// is bound to a model being deleted.
+/// Deletes EVERY project, list, and pin in the store, logging counts before and after.
+/// Must be called only after any open-project detail view has been popped/unmounted (see the
+/// purgeTrigger handler), so no @ObservedObject view is bound to a model being deleted.
 @MainActor
-func purgeAllProjects(_ context: ModelContext) {
-    let projects = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
-    let listsBefore = (try? context.fetch(FetchDescriptor<LocationListData>())) ?? []
+func purgeAllProjects(_ context: NSManagedObjectContext) {
+    let projects: [ProjectData] = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
+    let listsBefore: [LocationListData] = (try? context.fetch(FetchDescriptor<LocationListData>())) ?? []
 
     DebugLogger.shared.log("--- BEFORE PURGE ---", level: .warning, tag: "Purge")
     DebugLogger.shared.log("Projects (\(projects.count)):", level: .info, tag: "Purge")
@@ -126,23 +125,17 @@ func purgeAllProjects(_ context: ModelContext) {
         }
     }
 
-    // Delete in a SEPARATE ModelContext on the same container. Two reasons:
-    //  1) No crash — the main context's @Query observers (ContentView.projectPins, the
-    //     root project ForEach, the `allLists` query that feeds "Save to List") refresh
-    //     ASYNCHRONOUSLY when the background save propagates, instead of synchronously
-    //     mid-save where they'd re-render against an invalidated model and fault.
-    //  2) The menu actually clears — `context.delete(model:)` batch deletes don't reliably
-    //     refresh existing @Query results (and silently no-op on the self-referential
-    //     list relationship), which left stale lists in the "Save to List" menu. Deleting
-    //     real objects per-instance here propagates cleanly to every @Query.
-    let purge = ModelContext(context.container)
-    for pin in (try? purge.fetch(FetchDescriptor<PinnedLocationData>())) ?? [] { purge.delete(pin) }
-    for list in (try? purge.fetch(FetchDescriptor<LocationListData>())) ?? [] { purge.delete(list) }
-    for project in (try? purge.fetch(FetchDescriptor<ProjectData>())) ?? [] { purge.delete(project) }
-    try? purge.save()
+    // Per-object delete on the view context. Called only after the detail view is unmounted
+    // (purgeTrigger), so no @ObservedObject is bound to a victim. We delete pins and lists
+    // explicitly (relationships are Nullify, not cascade — cascade is done in code), and since
+    // EVERYTHING is being removed there are no dangling references to fault on.
+    for pin in (try? context.fetch(FetchDescriptor<PinnedLocationData>())) ?? [] { context.delete(pin) }
+    for list in (try? context.fetch(FetchDescriptor<LocationListData>())) ?? [] { context.delete(list) }
+    for project in (try? context.fetch(FetchDescriptor<ProjectData>())) ?? [] { context.delete(project) }
+    try? context.save()
 
-    let projectsAfter = (try? purge.fetch(FetchDescriptor<ProjectData>())) ?? []
-    let listsAfter = (try? purge.fetch(FetchDescriptor<LocationListData>())) ?? []
+    let projectsAfter = (try? context.fetch(FetchDescriptor<ProjectData>())) ?? []
+    let listsAfter = (try? context.fetch(FetchDescriptor<LocationListData>())) ?? []
     DebugLogger.shared.log("--- AFTER PURGE ---", level: .warning, tag: "Purge")
     DebugLogger.shared.log("Projects remaining: \(projectsAfter.count)", level: projectsAfter.isEmpty ? .success : .error, tag: "Purge")
     DebugLogger.shared.log("Lists remaining: \(listsAfter.count)", level: listsAfter.isEmpty ? .success : .error, tag: "Purge")
@@ -151,11 +144,13 @@ func purgeAllProjects(_ context: ModelContext) {
 // MARK: - Projects panel
 
 struct ProjectsPanel: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query(filter: #Predicate<ProjectData> { $0.deletedAt == nil },
-           sort: \ProjectData.createdAt) private var projects: [ProjectData]
-    @Query(filter: #Predicate<ProjectData> { $0.deletedAt != nil },
-           sort: \ProjectData.createdAt) private var trashedProjects: [ProjectData]
+    @Environment(\.managedObjectContext) private var modelContext
+    @FetchRequest(sortDescriptors: [SortDescriptor(\ProjectData.createdAt)],
+                  predicate: NSPredicate(format: "deletedAt == nil"))
+    private var projects: FetchedResults<ProjectData>
+    @FetchRequest(sortDescriptors: [SortDescriptor(\ProjectData.createdAt)],
+                  predicate: NSPredicate(format: "deletedAt != nil"))
+    private var trashedProjects: FetchedResults<ProjectData>
 
     /// THE shared selection store (sidebar + grid + map), owned by ContentView.
     var selection: SelectionStore
@@ -265,8 +260,7 @@ struct ProjectsPanel: View {
                 text: $newProjectName,
                 onDismiss: { showAddProject = false }
             ) { name in
-                let p = ProjectData(name: name)
-                modelContext.insert(p)
+                _ = ProjectData(context: modelContext, name: name)
                 showAddProject = false
             }
         }
@@ -284,9 +278,10 @@ struct ProjectsPanel: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(project.name)
                             .font(.headline)
-                        let total = project.lists.count + project.importedPhotos.count
-                        if total > 0 {
-                            Text("\(project.lists.count) lists · \(project.importedPhotos.count) photos")
+                        let listCount = project.liveLists.count
+                        let photoCount = project.livePhotos.count
+                        if listCount + photoCount > 0 {
+                            Text("\(listCount) lists · \(photoCount) photos")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -588,7 +583,7 @@ private struct SidebarRowDropDelegate: DropDelegate {
 // MARK: - Project detail (unified reorderable list)
 
 private struct ProjectDetailView: View {
-    @Bindable var project: ProjectData
+    @ObservedObject var project: ProjectData
     /// THE shared selection store (sidebar + grid + map). Held as a plain `var` (NOT
     /// @ObservedObject) so mutating it never re-runs THIS view's body / its ForEach — only the
     /// PinRow/ListRow leaves observe it and repaint. Observing it here would rebuild the whole
@@ -619,7 +614,7 @@ private struct ProjectDetailView: View {
     /// for specific location UUIDs, bypassing sidebar selection.
     @Binding var externalMoveUUIDs: [UUID]
 
-    @Environment(\.modelContext) private var modelContext
+    @Environment(\.managedObjectContext) private var modelContext
     @State private var showAddList = false
     @State private var newListName = ""
     @State private var expandedListIDs: Set<PersistentIdentifier> = []
@@ -744,7 +739,10 @@ private struct ProjectDetailView: View {
             // (eye-off) list just selects it and leaves the map untouched.
             if activeListIDs.contains(list.persistentModelID) {
                 onClearPin?()
-                onFitToList?(list.pins.filter { $0.hasGPS })
+                // Exclude soft-deleted pins — they're hidden from the sidebar but still
+                // attached to the list relationship; a trashed pin far from the cluster
+                // would otherwise blow out the fit region (a phantom "ghost pin").
+                onFitToList?(list.pins.filter { $0.hasGPS && $0.deletedAt == nil })
             }
         }
     }
@@ -1633,10 +1631,10 @@ private struct ProjectDetailView: View {
                 return nameMatches(p.name) ? item : nil
             case .list(let list):
                 if nameMatches(list.name) { return item }
-                if list.pins.contains(where: { nameMatches($0.name) }) { return item }
+                if list.livePins.contains(where: { nameMatches($0.name) }) { return item }
                 // Also match if any child list name or its pins match.
-                let childMatch = list.childLists.contains {
-                    nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) }
+                let childMatch = list.liveChildLists.contains {
+                    nameMatches($0.name) || $0.livePins.contains { nameMatches($0.name) }
                 }
                 return childMatch ? item : nil
             case .uncategorized:
@@ -2187,7 +2185,7 @@ private struct ProjectDetailView: View {
                 .filter { $0.deletedAt == nil }
                 .sorted {
                     $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
-                }.filter { !searching || nameMatches($0.name) || $0.pins.contains { nameMatches($0.name) } }
+                }.filter { !searching || nameMatches($0.name) || $0.livePins.contains { nameMatches($0.name) } }
             ForEach(childLists, id: \.persistentModelID) { child in
                 childListRow(child, folder: list)
             }
@@ -2524,12 +2522,11 @@ private struct ProjectDetailView: View {
                 onDismiss: { showAddList = false }
             ) { name in
                 let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
-                let list = LocationListData(name: name, colorHex: colorHex)
+                let list = LocationListData(context: modelContext, name: name, colorHex: colorHex)
                 // Shift every existing item down to make room at the top.
                 for existing in project.lists { existing.panelOrder += 1 }
                 project.importedPhotos.forEach { $0.panelOrder += 1 }
                 list.panelOrder = 0
-                modelContext.insert(list)
                 list.project = project
                 project.lists.append(list)
                 try? modelContext.save()
@@ -2657,9 +2654,8 @@ private struct ProjectDetailView: View {
         for url in panel.urls {
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let name = url.deletingPathExtension().lastPathComponent
-            let script = ScriptData(name: name, rawText: text, sortOrder: nextOrder)
+            let script = ScriptData(context: modelContext, name: name, rawText: text, sortOrder: nextOrder)
             nextOrder += 1
-            modelContext.insert(script)
             script.project = project
         }
         try? modelContext.save()
@@ -2703,26 +2699,29 @@ private struct ProjectDetailView: View {
     /// pins and wiring their relationship. Shared by the Import menu and Finder drag-drop.
     @MainActor
     private func importImageURLs(_ urls: [URL], into list: LocationListData?) async {
-        // Collect all existing pins across this project for duplicate detection.
+        // Collect all existing pins across this project for duplicate detection. Build the dedup
+        // index here (main thread) — it reads managed objects, which importPhotos must not touch.
         let existingPins = (project.lists.flatMap(\.pins)) + project.importedPhotos
+        let dedup = PhotoImportService.DedupIndex(existingPins: existingPins)
+        let baseSortOrder = list?.pins.count ?? 0
         importProgress = (0, urls.count)
-        let results = await PhotoImportService.importPhotos(from: urls, into: list,
-                                                            existingPins: existingPins) { current, total in
+        let results = await PhotoImportService.importPhotos(from: urls, dedup: dedup,
+                                                            baseSortOrder: baseSortOrder) { current, total in
             importProgress = (current, total)
         }
         importProgress = nil
         if let list {
             for result in results {
-                modelContext.insert(result.pin)
-                result.pin.list = list
+                let pin = result.makePin(in: modelContext)
+                pin.list = list
             }
         } else {
             var nextOrder = sidebarItems.count
             for result in results {
-                result.pin.panelOrder = nextOrder
+                let pin = result.makePin(in: modelContext)
+                pin.panelOrder = nextOrder
                 nextOrder += 1
-                modelContext.insert(result.pin)
-                project.importedPhotos.append(result.pin)
+                project.importedPhotos.append(pin)
             }
         }
         normalizeOrder()
@@ -2775,7 +2774,7 @@ private struct ListRow: View {
     var sceneTypeEditID: Binding<UUID?>? = nil
     /// Tapping the header's scene-count badge opens the script at that scene link.
     var onOpenSceneLink: ((ScriptHighlight) -> Void)? = nil
-    @Environment(\.modelContext) private var modelContext
+    @Environment(\.managedObjectContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
     private var isSelected: Bool { selection.contains(list.uuid) }
@@ -2963,8 +2962,8 @@ private struct ListRow: View {
             }
             if let onFitToList {
                 Button {
-                    let allPins = list.pins.filter { $0.hasGPS }
-                        + list.childLists.flatMap { $0.pins.filter { $0.hasGPS } }
+                    let allPins = list.pins.filter { $0.hasGPS && $0.deletedAt == nil }
+                        + list.childLists.flatMap { $0.pins.filter { $0.hasGPS && $0.deletedAt == nil } }
                     onFitToList(allPins)
                 } label: {
                     Label("Fit Map to List", systemImage: "mappin.and.ellipse")
@@ -3421,15 +3420,11 @@ private enum SidebarPreviewData {
         "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Tokyo_Tower_and_around_Skyscrapers.jpg/320px-Tokyo_Tower_and_around_Skyscrapers.jpg",
     ]
 
-    static let container: ModelContainer = {
-        let container = try! ModelContainer(
-            for: ProjectData.self, LocationListData.self, PinnedLocationData.self,
-            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
-        )
-        let ctx = container.mainContext
+    static let controller: PersistenceController = {
+        let controller = PersistenceController(inMemory: true)
+        let ctx = controller.viewContext
 
-        let project = ProjectData(name: "Tokyo Shoot")
-        ctx.insert(project)
+        let project = ProjectData(context: ctx, name: "Tokyo Shoot")
 
         // Builds a pin with a thumbnail URL and a GPS coordinate.
         func makePin(_ name: String, urlIndex: Int, lat: Double, lng: Double, order: Int) -> PinnedLocationData {
@@ -3438,9 +3433,7 @@ private enum SidebarPreviewData {
                 coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
                 images: [ScoutImage(url: URL(string: imageURLs[urlIndex % imageURLs.count]), source: .imported)]
             )
-            let pin = PinnedLocationData(from: loc, sortOrder: order)
-            ctx.insert(pin)
-            return pin
+            return PinnedLocationData(context: ctx, from: loc, sortOrder: order)
         }
 
         // Colour-coded lists (palette indices chosen for variety), each with a few photos.
@@ -3451,8 +3444,7 @@ private enum SidebarPreviewData {
             ("Tea Farms", 2),         // green
         ]
         for (i, spec) in listSpecs.enumerated() {
-            let list = LocationListData(name: spec.name, colorHex: LocationListData.palette[spec.palette])
-            ctx.insert(list)
+            let list = LocationListData(context: ctx, name: spec.name, colorHex: LocationListData.palette[spec.palette])
             list.project = project              // inverse populates project.lists
             list.panelOrder = i
             for j in 0..<3 {
@@ -3477,12 +3469,14 @@ private enum SidebarPreviewData {
         }
 
         try? ctx.save()
-        return container
+        return controller
     }()
 
+    static var context: NSManagedObjectContext { controller.viewContext }
+
     static var project: ProjectData {
-        (try? container.mainContext.fetch(FetchDescriptor<ProjectData>()))?.first
-            ?? ProjectData(name: "Empty")
+        (try? controller.viewContext.fetch(FetchDescriptor<ProjectData>()))?.first
+            ?? ProjectData(context: controller.viewContext, name: "Empty")
     }
 }
 
@@ -3514,13 +3508,13 @@ private struct SidebarDetailPreview: View {
 #Preview("Project detail — full") {
     SidebarDetailPreview(project: SidebarPreviewData.project)
         .frame(width: 280, height: 760)
-        .modelContainer(SidebarPreviewData.container)
+        .environment(\.managedObjectContext, SidebarPreviewData.context)
 }
 
 #Preview("Projects list") {
     ProjectsPanel(selection: SelectionStore(), activeListIDs: .constant([]), hiddenUncategorizedProjectIDs: .constant([]), externalMoveUUIDs: .constant([]))
         .frame(width: 280, height: 600)
-        .modelContainer(SidebarPreviewData.container)
+        .environment(\.managedObjectContext, SidebarPreviewData.context)
 }
 #endif
 

@@ -1,7 +1,7 @@
 import Foundation
 import CoreLocation
 import ImageIO
-import SwiftData
+import CoreData
 
 // MARK: - Timeline JSON model
 
@@ -68,7 +68,7 @@ enum TimelineGeoService {
     /// timeline entries' ISO 8601 offset and re-parse the EXIF date with that timezone
     /// so the timestamps match correctly — without this, e.g. a UTC system clock
     /// shifts all Japan photos 9 hours into the wrong activity windows.
-    static func backfill(timelineURL: URL, context: ModelContext,
+    static func backfill(timelineURL: URL, context: NSManagedObjectContext,
                          onProgress: (@MainActor (Int, Int, String) -> Void)? = nil) async -> BackfillResult {
         let scoped = timelineURL.startAccessingSecurityScopedResource()
         defer { if scoped { timelineURL.stopAccessingSecurityScopedResource() } }
@@ -83,11 +83,11 @@ enum TimelineGeoService {
         let (visits, fixes) = buildIndex(entries)
         let exifFmt = makeDateFormatter(timezone: detectedTZ)
 
-        let pins = (try? context.fetch(FetchDescriptor<PinnedLocationData>())) ?? []
+        let pins: [PinnedLocationData] = (try? context.fetch(FetchDescriptor<PinnedLocationData>())) ?? []
         // Candidates: photos with no GPS yet, OR photos whose GPS came from a *previous*
         // timeline backfill (so re-importing can correct them). Photos with GPS baked into
         // the original file are never touched.
-        let candidates = pins.filter { !$0.hasGPS || $0.gpsFromTimeline }
+        let candidates = pins.filter { (pin: PinnedLocationData) in !pin.hasGPS || pin.gpsFromTimeline }
 
         var result = BackfillResult(detectedTimezone: tzName)
         let total = candidates.count

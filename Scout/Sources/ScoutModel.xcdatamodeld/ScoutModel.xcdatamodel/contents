@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="22522" systemVersion="24F74" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="NO" userDefinedModelVersionIdentifier="">
+    <entity name="ProjectData" representedClassName="ProjectData" syncable="YES">
+        <attribute name="createdAt" attributeType="Date" defaultDateTimeInterval="0" usesScalarValueType="NO"/>
+        <attribute name="deletedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String" defaultValueString=""/>
+        <attribute name="notes" attributeType="String" defaultValueString=""/>
+        <attribute name="uncategorizedPanelOrder" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="uuidRaw" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="importedPhotos" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="PinnedLocationData" inverseName="owningProject" inverseEntity="PinnedLocationData"/>
+        <relationship name="lists" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="LocationListData" inverseName="project" inverseEntity="LocationListData"/>
+        <relationship name="scripts" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ScriptData" inverseName="project" inverseEntity="ScriptData"/>
+    </entity>
+    <entity name="LocationListData" representedClassName="LocationListData" syncable="YES">
+        <attribute name="colorHex" attributeType="String" defaultValueString="#FF6B35"/>
+        <attribute name="createdAt" attributeType="Date" defaultDateTimeInterval="0" usesScalarValueType="NO"/>
+        <attribute name="deletedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String" defaultValueString=""/>
+        <attribute name="panelOrder" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="sceneType" optional="YES" attributeType="String"/>
+        <attribute name="sortOrder" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="uuidRaw" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="childLists" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="LocationListData" inverseName="parentList" inverseEntity="LocationListData"/>
+        <relationship name="parentList" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="LocationListData" inverseName="childLists" inverseEntity="LocationListData"/>
+        <relationship name="pins" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="PinnedLocationData" inverseName="list" inverseEntity="PinnedLocationData"/>
+        <relationship name="project" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectData" inverseName="lists" inverseEntity="ProjectData"/>
+        <relationship name="sceneLinks" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ScriptHighlight" inverseName="list" inverseEntity="ScriptHighlight"/>
+    </entity>
+    <entity name="PinnedLocationData" representedClassName="PinnedLocationData" syncable="YES">
+        <attribute name="aspectRatio" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="createdAt" attributeType="Date" defaultDateTimeInterval="0" usesScalarValueType="NO"/>
+        <attribute name="dateTaken" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="deletedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="googleMapsURLString" optional="YES" attributeType="String"/>
+        <attribute name="googlePlaceId" optional="YES" attributeType="String"/>
+        <attribute name="gpsFromTimeline" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="hasGPS" attributeType="Boolean" defaultValueString="YES" usesScalarValueType="YES"/>
+        <attribute name="imageSourceRaw" optional="YES" attributeType="String"/>
+        <attribute name="imageURL" optional="YES" attributeType="String"/>
+        <attribute name="isFlagged" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="latitude" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="longitude" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="name" attributeType="String" defaultValueString=""/>
+        <attribute name="notes" attributeType="String" defaultValueString=""/>
+        <attribute name="originalFilePath" optional="YES" attributeType="String"/>
+        <attribute name="originalFilename" optional="YES" attributeType="String"/>
+        <attribute name="panelOrder" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="photoFilesJSON" attributeType="String" defaultValueString="[]"/>
+        <attribute name="rotationQuarterTurns" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="sortOrder" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="sourceURLString" optional="YES" attributeType="String"/>
+        <attribute name="statusRaw" attributeType="String" defaultValueString=""/>
+        <attribute name="thumbnailFilesJSON" attributeType="String" defaultValueString="[]"/>
+        <attribute name="uuidRaw" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="list" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="LocationListData" inverseName="pins" inverseEntity="LocationListData"/>
+        <relationship name="owningProject" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectData" inverseName="importedPhotos" inverseEntity="ProjectData"/>
+    </entity>
+    <entity name="ScriptData" representedClassName="ScriptData" syncable="YES">
+        <attribute name="importedAt" attributeType="Date" defaultDateTimeInterval="0" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String" defaultValueString=""/>
+        <attribute name="rawText" attributeType="String" defaultValueString=""/>
+        <attribute name="sortOrder" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="updatedAt" attributeType="Date" defaultDateTimeInterval="0" usesScalarValueType="NO"/>
+        <attribute name="uuidRaw" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="highlights" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ScriptHighlight" inverseName="script" inverseEntity="ScriptHighlight"/>
+        <relationship name="project" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ProjectData" inverseName="scripts" inverseEntity="ProjectData"/>
+    </entity>
+    <entity name="ScriptHighlight" representedClassName="ScriptHighlight" syncable="YES">
+        <attribute name="contextAfter" attributeType="String" defaultValueString=""/>
+        <attribute name="contextBefore" attributeType="String" defaultValueString=""/>
+        <attribute name="createdAt" attributeType="Date" defaultDateTimeInterval="0" usesScalarValueType="NO"/>
+        <attribute name="excerpt" attributeType="String" defaultValueString=""/>
+        <attribute name="rangeLength" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="rangeStart" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="sceneHeading" optional="YES" attributeType="String"/>
+        <attribute name="uuidRaw" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="list" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="LocationListData" inverseName="sceneLinks" inverseEntity="LocationListData"/>
+        <relationship name="script" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ScriptData" inverseName="highlights" inverseEntity="ScriptData"/>
+    </entity>
+</model>

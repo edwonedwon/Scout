@@ -139,7 +139,14 @@ enum PhotoLoader {
     private static func downsample(_ data: Data, maxPixel: Int) -> ScoutImageType? {
         let opts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
+            // EXIF orientation is deliberately NOT applied here (WithTransform:false) so this
+            // path produces the SAME raw/landscape base bitmap as the full-decode `decodeImage`
+            // path (which uses CGImageSourceCreateImageAtIndex and ignores orientation). All of
+            // a pin's stored `rotationQuarterTurns` are user deltas calibrated to that single
+            // base, so every tier — grid/sidebar/map thumbnails, the large carousel, and the
+            // full-res originals — renders the same orientation no matter which decode path or
+            // file (derivative -thumb/-full vs. an EXIF-bearing original .HIF) is loaded.
+            kCGImageSourceCreateThumbnailWithTransform: false,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel,
         ]

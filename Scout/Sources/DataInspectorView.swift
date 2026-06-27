@@ -1,5 +1,5 @@
 import SwiftUI
-import SwiftData
+import CoreData
 
 /// Debug tool: dumps EVERY record in the store and flags the ones that aren't reachable from a
 /// live project (i.e. exist in the data but never show in the UI — "orphans", e.g. lists/pins left
@@ -12,14 +12,14 @@ import SwiftData
 /// sets + display strings, then classify each record by ID membership only. We never dereference
 /// an individual record's own to-one relationship.
 struct DataInspectorView: View {
-    @Environment(\.modelContext) private var modelContext
+    @Environment(\.managedObjectContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
-    @Query private var projects: [ProjectData]
-    @Query private var lists: [LocationListData]
-    @Query private var pins: [PinnedLocationData]
-    @Query private var scripts: [ScriptData]
-    @Query private var highlights: [ScriptHighlight]
+    @FetchRequest(sortDescriptors: []) private var projects: FetchedResults<ProjectData>
+    @FetchRequest(sortDescriptors: []) private var lists: FetchedResults<LocationListData>
+    @FetchRequest(sortDescriptors: []) private var pins: FetchedResults<PinnedLocationData>
+    @FetchRequest(sortDescriptors: []) private var scripts: FetchedResults<ScriptData>
+    @FetchRequest(sortDescriptors: []) private var highlights: FetchedResults<ScriptHighlight>
 
     @State private var onlyOrphans = false
     @State private var showDeleteConfirm = false
@@ -82,7 +82,7 @@ struct DataInspectorView: View {
                 } header: { Text("Projects (\(projects.count))").font(.caption.bold()) }
 
                 Section {
-                    ForEach(onlyOrphans ? orphanLists : lists, id: \.persistentModelID) { l in
+                    ForEach(onlyOrphans ? orphanLists : Array(lists), id: \.persistentModelID) { l in
                         let orphan = !r.listIDs.contains(l.persistentModelID)
                         row(title: l.name.isEmpty ? "(unnamed list)" : l.name,
                             subtitle: orphan ? "⚠️ no live project (deleted)" : (r.listInfo[l.persistentModelID] ?? ""),
@@ -91,7 +91,7 @@ struct DataInspectorView: View {
                 } header: { Text("Lists — \(lists.count) total, \(orphanLists.count) orphaned").font(.caption.bold()) }
 
                 Section {
-                    ForEach(onlyOrphans ? orphanPins : pins, id: \.persistentModelID) { p in
+                    ForEach(onlyOrphans ? orphanPins : Array(pins), id: \.persistentModelID) { p in
                         let orphan = !r.pinIDs.contains(p.persistentModelID)
                         row(title: p.name.isEmpty ? "(unnamed pin)" : p.name,
                             subtitle: orphan ? "⚠️ orphaned" : (r.pinInfo[p.persistentModelID] ?? ""),
@@ -101,7 +101,7 @@ struct DataInspectorView: View {
 
                 if !scripts.isEmpty {
                     Section {
-                        ForEach(onlyOrphans ? orphanScripts : scripts, id: \.persistentModelID) { s in
+                        ForEach(onlyOrphans ? orphanScripts : Array(scripts), id: \.persistentModelID) { s in
                             let orphan = !r.scriptIDs.contains(s.persistentModelID)
                             row(title: s.name, subtitle: orphan ? "⚠️ orphaned" : "\(s.highlights.count) highlights", orphan: orphan)
                         }
@@ -155,31 +155,39 @@ struct DataInspectorView: View {
     }
 
     private func deleteOrphans(reachable r: Reachable) {
-        // Per-object delete makes SwiftData read each orphan's .project to fix up the inverse —
+        // Per-object delete makes Core Data read each orphan's .project to fix up the inverse —
         // which faults on the DELETED project and crashes. Instead, collect the orphans' OWN
-        // uuids (safe — their own attribute) and BATCH delete by uuid. delete(model:where:) runs
+        // uuids (safe — their own attribute) and BATCH delete by uuid. NSBatchDeleteRequest runs
         // as a store-level SQL delete: it never materializes the objects or their relationships,
-        // so the dangling project is never touched.
+        // so the dangling project is never touched. We merge the deleted ids back so the
+        // @FetchRequest results refresh.
         let listUUIDs = lists.filter { !r.listIDs.contains($0.persistentModelID) }.map(\.uuid)
         let pinUUIDs = pins.filter { !r.pinIDs.contains($0.persistentModelID) }.map(\.uuid)
         let scriptUUIDs = scripts.filter { !r.scriptIDs.contains($0.persistentModelID) }.map(\.uuid)
         let highlightUUIDs = highlights.filter { !r.highlightIDs.contains($0.persistentModelID) }.map(\.uuid)
         do {
-            if !pinUUIDs.isEmpty {
-                try modelContext.delete(model: PinnedLocationData.self, where: #Predicate { pinUUIDs.contains($0.uuid) })
-            }
-            if !listUUIDs.isEmpty {
-                try modelContext.delete(model: LocationListData.self, where: #Predicate { listUUIDs.contains($0.uuid) })
-            }
-            if !scriptUUIDs.isEmpty {
-                try modelContext.delete(model: ScriptData.self, where: #Predicate { scriptUUIDs.contains($0.uuid) })
-            }
-            if !highlightUUIDs.isEmpty {
-                try modelContext.delete(model: ScriptHighlight.self, where: #Predicate { highlightUUIDs.contains($0.uuid) })
-            }
+            try batchDeleteByUUID(PinnedLocationData.self, uuids: pinUUIDs)
+            try batchDeleteByUUID(LocationListData.self, uuids: listUUIDs)
+            try batchDeleteByUUID(ScriptData.self, uuids: scriptUUIDs)
+            try batchDeleteByUUID(ScriptHighlight.self, uuids: highlightUUIDs)
             try modelContext.save()
         } catch {
             print("Orphan cleanup failed: \(error)")
+        }
+    }
+
+    /// Store-level delete of `type` rows whose `uuidRaw` is in `uuids`, merging the result so
+    /// live @FetchRequests refresh. No-op for an empty id list.
+    private func batchDeleteByUUID<T: NSManagedObject>(_ type: T.Type, uuids: [UUID]) throws {
+        guard !uuids.isEmpty else { return }
+        let req = NSFetchRequest<NSFetchRequestResult>(entityName: String(describing: T.self))
+        req.predicate = NSPredicate(format: "uuidRaw IN %@", uuids)
+        let delete = NSBatchDeleteRequest(fetchRequest: req)
+        delete.resultType = .resultTypeObjectIDs
+        let result = try modelContext.execute(delete) as? NSBatchDeleteResult
+        if let ids = result?.result as? [NSManagedObjectID], !ids.isEmpty {
+            NSManagedObjectContext.mergeChanges(fromRemoteContextSave: [NSDeletedObjectsKey: ids],
+                                                into: [modelContext])
         }
     }
 }
