@@ -145,6 +145,8 @@ func purgeAllProjects(_ context: NSManagedObjectContext) {
 
 struct ProjectsPanel: View {
     @Environment(\.managedObjectContext) private var modelContext
+    @EnvironmentObject private var auth: AuthManager
+    @State private var showSignOutConfirm = false
     @FetchRequest(sortDescriptors: [SortDescriptor(\ProjectData.createdAt)],
                   predicate: NSPredicate(format: "deletedAt == nil"))
     private var projects: FetchedResults<ProjectData>
@@ -338,6 +340,22 @@ struct ProjectsPanel: View {
                     Image(systemName: "plus")
                 }
             }
+            // Sign out — only when cloud auth is actually on (hidden in local-only mode).
+            if !auth.authDisabled {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showSignOutConfirm = true } label: {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                    }
+                    .help(auth.userEmail.map { "Sign out (\($0))" } ?? "Sign out")
+                }
+            }
+        }
+        .confirmationDialog("Sign out\(auth.userEmail.map { " of \($0)" } ?? "")?",
+                            isPresented: $showSignOutConfirm, titleVisibility: .visible) {
+            Button("Sign Out", role: .destructive) { Task { await auth.signOut() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your synced data stays in the cloud and returns when you sign back in.")
         }
         .alert("Rename Project", isPresented: Binding(
             get: { renamingProject != nil },
