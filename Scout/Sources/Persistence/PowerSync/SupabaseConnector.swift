@@ -1,5 +1,6 @@
 import Foundation
 import PowerSync
+import ScoutKit
 import Supabase
 
 /// Bridges PowerSync's sync engine to the Supabase backend (migration plan P4):
@@ -20,22 +21,35 @@ struct SupabaseConnector: PowerSyncBackendConnectorProtocol {
     func uploadData(database: PowerSyncDatabaseProtocol) async throws {
         guard let batch = try await database.getCrudBatch() else { return }
 
+        await Self.log("uploadData: flushing \(batch.crud.count) queued change(s)…")
         for entry in batch.crud {
             let table = client.from(entry.table)
-            switch entry.op {
-            case .put, .patch:
-                // PowerSync gives the full row for PUT and the changed columns for PATCH; in both
-                // cases an upsert keyed on the primary key is correct and idempotent.
-                var row = Self.json(from: entry.opDataTyped)
-                row["id"] = .string(entry.id)
-                try await table.upsert(row, onConflict: "id").execute()
-            case .delete:
-                try await table.delete().eq("id", value: entry.id).execute()
+            do {
+                switch entry.op {
+                case .put, .patch:
+                    // PowerSync gives the full row for PUT and the changed columns for PATCH; in both
+                    // cases an upsert keyed on the primary key is correct and idempotent.
+                    var row = Self.json(from: entry.opDataTyped)
+                    row["id"] = .string(entry.id)
+                    try await table.upsert(row, onConflict: "id").execute()
+                case .delete:
+                    try await table.delete().eq("id", value: entry.id).execute()
+                }
+            } catch {
+                // Surface the *exact* row the backend rejected — PowerSync otherwise swallows this
+                // and retries the same batch forever, so nothing behind it in the queue uploads.
+                await Self.log("upload REJECTED \(entry.op) \(entry.table)#\(entry.id): \(error)", .error)
+                throw error
             }
         }
 
         // Only clear the queue once every change in the batch was accepted by the backend.
         try await batch.complete()
+        await Self.log("uploadData: batch accepted ✅", .success)
+    }
+
+    @MainActor private static func log(_ s: String, _ level: DebugEntry.Level = .info) {
+        DebugLogger.shared.log(s, level: level, tag: "Sync")
     }
 
     /// Convert PowerSync's typed JSON payload into Supabase's `AnyJSON`, preserving column types so
