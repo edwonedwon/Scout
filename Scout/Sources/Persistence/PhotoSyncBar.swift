@@ -42,8 +42,7 @@ struct PhotoSyncBar: View {
             .padding(.vertical, 10)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             .shadow(radius: 8, y: 2)
-            // Centered under the dynamic island (iOS) / top toolbar (macOS).
-            .padding(.top, 54)
+            // Position is decided by the caller (it's shown only in the map + photo grid).
             .transition(.move(edge: .top).combined(with: .opacity))
             .animation(.easeInOut(duration: 0.25), value: progress.isDownloading)
         }

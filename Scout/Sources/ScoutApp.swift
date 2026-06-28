@@ -94,9 +94,6 @@ struct ScoutApp: App {
             // No onboarding gate — open straight into the app. The Anthropic key (and any
             // other keys) can be set anytime in Settings; AI features prompt if it's missing.
             RootGate()
-            // Always-visible first-time photo download progress, centered at the top under the
-            // dynamic island / toolbar.
-            .overlay(alignment: .top) { PhotoSyncBar() }
             #if os(macOS)
             // Remember window size/position across launches and rebuilds.
             .background(WindowFrameAutosaver(name: "ScoutMainWindow"))

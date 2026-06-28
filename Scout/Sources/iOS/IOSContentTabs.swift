@@ -37,6 +37,8 @@ struct IOSPhotosTab: View {
                     IOSMasonryGridView(sections: sections)
                 }
             }
+            // Photo-download progress, pinned just under the nav bar, only while downloading.
+            .overlay(alignment: .top) { PhotoSyncBar().padding(.top, 6) }
             .navigationTitle("Photos")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

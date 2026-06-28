@@ -95,7 +95,7 @@ struct ScoutIOSRootView: View {
                         Button("New Project") { Task { await createProject() } }
                             .buttonStyle(.borderedProminent)
                     }
-                } else {
+                } else { 
                     List {
                         ForEach(model.summaries) { summary in
                             Button {
@@ -425,9 +425,14 @@ struct IOSSidebarDrawer: View {
             Text("LISTS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             Spacer()
             Button(action: toggleAllVisibility) {
-                Image(systemName: allListsVisible ? "eye.fill" : "eye.slash")
-                    .font(.subheadline)
-                    .foregroundStyle(allListsVisible ? Color.accentColor : .secondary)
+                HStack(spacing: 4) {
+                    Image(systemName: allListsVisible ? "eye.fill" : "eye.slash")
+                    Text(allListsVisible ? "Hide all" : "Show all")
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(allListsVisible ? Color.accentColor : .secondary)
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background(Color(.secondarySystemFill), in: Capsule())
             }
             .buttonStyle(.plain)
         }

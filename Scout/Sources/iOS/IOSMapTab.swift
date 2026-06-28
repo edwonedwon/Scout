@@ -111,36 +111,40 @@ struct IOSMapTab: View {
                 focusPin = nil
             }
 
-            HStack(spacing: 8) {
-                Button(action: onMenu) {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.body.weight(.semibold)).foregroundStyle(.primary)
-                        .frame(width: 36, height: 36).background(.regularMaterial, in: Circle())
-                }
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    Text("Search locations…").foregroundStyle(.secondary)
-                    Spacer()
-                    Image(systemName: "slider.horizontal.3").foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Button(action: onMenu) {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.body.weight(.semibold)).foregroundStyle(.primary)
+                            .frame(width: 36, height: 36).background(.regularMaterial, in: Circle())
+                    }
+                    HStack {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        Text("Search locations…").foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: "slider.horizontal.3").foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
 
-                Menu {
-                    Picker("Map Type", selection: $mapStyleChoice) {
-                        ForEach(MapStyleChoice.allCases) { choice in
-                            Label(choice.label, systemImage: choice.icon).tag(choice)
+                    Menu {
+                        Picker("Map Type", selection: $mapStyleChoice) {
+                            ForEach(MapStyleChoice.allCases) { choice in
+                                Label(choice.label, systemImage: choice.icon).tag(choice)
+                            }
                         }
+                        Picker("Show", selection: $showPhotos) {
+                            Label("Pins", systemImage: "mappin").tag(false)
+                            Label("Photos", systemImage: "photo").tag(true)
+                        }
+                    } label: {
+                        Image(systemName: "square.3.layers.3d")
+                            .font(.body.weight(.semibold)).foregroundStyle(.primary)
+                            .frame(width: 36, height: 36).background(.regularMaterial, in: Circle())
                     }
-                    Picker("Show", selection: $showPhotos) {
-                        Label("Pins", systemImage: "mappin").tag(false)
-                        Label("Photos", systemImage: "photo").tag(true)
-                    }
-                } label: {
-                    Image(systemName: "square.3.layers.3d")
-                        .font(.body.weight(.semibold)).foregroundStyle(.primary)
-                        .frame(width: 36, height: 36).background(.regularMaterial, in: Circle())
                 }
+                // Photo-download progress sits just under the search bar, only while downloading.
+                PhotoSyncBar()
             }
             .padding(.horizontal, 12).padding(.top, 8)
         }

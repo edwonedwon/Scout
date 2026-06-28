@@ -111,13 +111,17 @@ struct PhotoStorageService {
     func prefetchThumbnails(projectId: String, files: [String], maxConcurrent: Int = 5) async {
         guard client != nil else { return }
         // Dedupe while PRESERVING the caller's order (top-to-bottom grid order) and keep only the
-        // files not already cached — so the download priority matches what the user is looking at.
+        // files not already cached — so the download priority matches what the user is looking at
+        // AND the progress count is the real number of photos still to fetch (not the whole library).
         var seen = Set<String>()
         let missing = files.filter { seen.insert($0).inserted
             && !FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0).path) }
+        guard !missing.isEmpty else { await PhotoSyncProgress.shared.update(downloaded: 0, total: 0); return }
+        await PhotoSyncProgress.shared.update(downloaded: 0, total: missing.count)
+        var done = 0
         var i = 0
         while i < missing.count {
-            if Task.isCancelled { return }
+            if Task.isCancelled { await PhotoSyncProgress.shared.update(downloaded: 0, total: 0); return }
             let chunk = missing[i ..< min(i + maxConcurrent, missing.count)]
             await withTaskGroup(of: Void.self) { group in
                 for file in chunk {
@@ -128,8 +132,11 @@ struct PhotoStorageService {
                     }
                 }
             }
+            done += chunk.count
+            await PhotoSyncProgress.shared.update(downloaded: done, total: missing.count)
             i += maxConcurrent
         }
+        await PhotoSyncProgress.shared.update(downloaded: 0, total: 0)   // finished → hide the bar
     }
 
     /// Fetch every photo's thumbnail for a pin (the always-available tier). Originals are skipped
