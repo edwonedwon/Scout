@@ -14,6 +14,11 @@ final class ScoutStore {
 
     let db: any PowerSyncDatabaseProtocol
 
+    /// Guards against overlapping `connect()` calls (RootGate fires connect from both its .task and
+    /// its scenePhase handler at launch). Set synchronously on the main actor before the first
+    /// await, so a racing second caller bails out instead of issuing a concurrent db.connect().
+    @MainActor var isSyncConnecting = false
+
     private init() {
         #if DEBUG
         let filename = "scout-dev.sqlite"

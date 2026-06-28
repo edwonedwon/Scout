@@ -77,12 +77,16 @@ extension ScoutStore {
     /// foreground — iOS suspends the app and drops the streaming sync connection, which otherwise
     /// never resumes (so changes made elsewhere stop arriving). Skips the work when already
     /// connected, so it's cheap to call on every foreground.
+    @MainActor
     func connectIfPossible() async {
         guard SupabaseConfig.syncEnabled, let client = SupabaseService.client else { return }
-        // Skip when already connected OR a connect is already in flight — RootGate's .task and its
-        // scenePhase .onChange both fire this at launch, and two concurrent db.connect() calls
-        // disrupt the connection.
-        if db.currentStatus.connected || db.currentStatus.connecting { return }
+        // Skip when already connected OR a connect is already running/in-flight. The flag is checked
+        // and set synchronously here on the main actor before any await, so RootGate's two launch
+        // callers (.task + scenePhase) can't race into two concurrent db.connect() calls — which
+        // corrupts the connection pool and makes every watch query return nothing (empty UI).
+        if db.currentStatus.connected || isSyncConnecting { return }
+        isSyncConnecting = true
+        defer { isSyncConnecting = false }
         let who = (try? await client.auth.session)?.user.email ?? "NOT SIGNED IN"
         await MainActor.run { DebugLogger.shared.log("Sync connecting as \(who)…", tag: "Sync") }
         do {
