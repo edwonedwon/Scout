@@ -1450,19 +1450,41 @@ struct ContentView: View {
         let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
         let list = LocationListData(context: modelContext, name: trimmed, colorHex: colorHex)
         list.project = project
-        // Optionally nest inside a chosen folder/list.
-        list.parentList = parent
+
         if let parent {
-            // Nested: place at the BOTTOM of the parent's existing children.
-            let maxOrder = parent.childLists.filter { $0.deletedAt == nil }.map(\.panelOrder).max() ?? -1
-            list.panelOrder = maxOrder + 1
+            // Explicit folder chosen in the picker → bottom of that folder.
+            list.parentList = parent
+            list.panelOrder = (parent.liveChildLists.map(\.panelOrder).max() ?? -1) + 1
+        } else if let sel = selectedSidebarList {
+            if !sel.liveChildLists.isEmpty {
+                // A folder is selected → put the new list at the bottom of that folder.
+                list.parentList = sel
+                list.panelOrder = (sel.liveChildLists.map(\.panelOrder).max() ?? -1) + 1
+            } else {
+                // A list is selected → place the new list right AFTER it, among its siblings
+                // (top-level or inside the same folder). Shift later siblings down to make room.
+                list.parentList = sel.parentList
+                let siblings = sel.parentList?.liveChildLists
+                    ?? project.lists.filter { $0.parentList == nil && $0.deletedAt == nil }
+                for sibling in siblings where sibling.panelOrder > sel.panelOrder {
+                    sibling.panelOrder += 1
+                }
+                list.panelOrder = sel.panelOrder + 1
+            }
         } else {
-            // Top level: place at the top (matches the sidebar's "New List").
+            // No selection → top level at the top (matches the sidebar's "New List").
             for existing in project.lists where existing.parentList == nil { existing.panelOrder += 1 }
             project.importedPhotos.forEach { $0.panelOrder += 1 }
             list.panelOrder = 0
         }
         assignScriptSelection(to: list)   // creates the highlight + saves
+    }
+
+    /// The list/folder currently selected in the sidebar (anchor first), if any.
+    private var selectedSidebarList: LocationListData? {
+        let id = selection.anchor ?? selection.ids.first
+        guard let id else { return nil }
+        return allLists.first { $0.uuid == id && $0.deletedAt == nil }
     }
 
     /// Creates a ScriptHighlight linking the pending script range to the chosen list.
