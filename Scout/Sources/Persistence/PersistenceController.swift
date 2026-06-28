@@ -143,11 +143,12 @@ final class PersistenceController {
     }
 
     enum SharingError: LocalizedError {
-        case noPrivateStore, noURL
+        case noPrivateStore, noURL, timedOut(String)
         var errorDescription: String? {
             switch self {
             case .noPrivateStore: return "iCloud private store isn't loaded."
             case .noURL: return "CloudKit didn't return an invite link (is iCloud signed in and the schema deployed?)."
+            case .timedOut(let step): return "Timed out at: \(step). Likely the CloudKit schema isn't deployed to Production, or iCloud isn't reachable/signed in."
             }
         }
     }
@@ -158,12 +159,35 @@ final class PersistenceController {
     /// the link and sends it; the recipient opens it and the app's accept handler runs.
     func makeShareLink(for project: ProjectData, editor: Bool) async throws -> URL {
         guard let privateStore else { throw SharingError.noPrivateStore }
-        let share = try await shareForProject(project)
+        print("makeShareLink: creating/fetching share…")
+        let share = try await withTimeout(30, step: "creating the share") {
+            try await self.shareForProject(project)
+        }
+        print("makeShareLink: got share, setting permission + persisting…")
         share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
         share.publicPermission = editor ? .readWrite : .readOnly
-        let saved = try await container.persistUpdatedShare(share, in: privateStore)
+        let saved = try await withTimeout(30, step: "saving the share to iCloud") {
+            try await self.container.persistUpdatedShare(share, in: privateStore)
+        }
         guard let url = saved.url else { throw SharingError.noURL }
+        print("makeShareLink: success — \(url)")
         return url
+    }
+
+    /// Runs `work`, throwing `SharingError.timedOut(step)` if it doesn't finish within `seconds`
+    /// (so a stuck CloudKit call surfaces as a visible error instead of an infinite spinner).
+    private func withTimeout<T>(_ seconds: Double, step: String,
+                                _ work: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw SharingError.timedOut(step)
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 
     /// Accept a share the user tapped (from Messages/Mail). Called by the app delegate.
