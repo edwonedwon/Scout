@@ -2528,41 +2528,50 @@ private struct SidebarResizeHandle: View {
     /// Fired once on drag end with the final width — this is where it's persisted.
     let onCommit: (Double) -> Void
     @State private var dragStartWidth: Double? = nil
+    @State private var hovering = false
+
+    /// Width of the grab zone. The visible separator is 1px, centered inside this — the rest is an
+    /// easy-to-hit transparent margin on each side.
+    private let hitWidth: CGFloat = 12
 
     private func clamp(_ w: Double) -> Double { min(max(w, minWidth), maxWidth) }
 
     var body: some View {
-        Divider()
-            .frame(width: 1)
-            .overlay(
-                // Wider invisible hit area so the 1px line is easy to grab. It's an overlay,
-                // so widening it doesn't shift layout — it just makes the cursor/grab zone bigger.
-                Color.clear
-                    .frame(width: 16)
-                    .contentShape(Rectangle())
-                    #if os(macOS)
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-                    }
-                    #endif
-                    // Global coordinate space: the handle moves as the sidebar resizes, so a
-                    // .local translation would be measured against a frame that's shifting
-                    // under the cursor — that feedback loop makes the drag oscillate. Global
-                    // (screen) coordinates are stable regardless of the handle's own movement.
-                    .gesture(
-                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { value in
-                                let base = dragStartWidth ?? width
-                                if dragStartWidth == nil { dragStartWidth = width }
-                                onLiveChange(clamp(base + value.translation.width))
-                            }
-                            .onEnded { value in
-                                let base = dragStartWidth ?? width
-                                onCommit(clamp(base + value.translation.width))
-                                dragStartWidth = nil
-                            }
-                    )
-            )
+        // A real-width view (not a 1px Divider with a floating overlay): SwiftUI only delivers
+        // hover/drag events within a view's actual layout frame, so the handle must genuinely
+        // occupy the full grab width for the whole zone to be draggable. The thin separator line
+        // is drawn centered so it still looks like a 1px divider.
+        ZStack {
+            Color.clear.contentShape(Rectangle())
+            Divider().frame(width: 1)
+        }
+        .frame(width: hitWidth)
+        .frame(maxHeight: .infinity)
+        #if os(macOS)
+        // Balance push/pop with a flag so a missed exit event can't leave a stuck resize cursor.
+        .onHover { inside in
+            guard inside != hovering else { return }
+            hovering = inside
+            if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+        }
+        .onDisappear { if hovering { NSCursor.pop(); hovering = false } }
+        #endif
+        // Global coordinate space: the handle moves as the sidebar resizes, so a .local
+        // translation would be measured against a frame that's shifting under the cursor — that
+        // feedback loop makes the drag oscillate. Global (screen) coordinates are stable.
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    let base = dragStartWidth ?? width
+                    if dragStartWidth == nil { dragStartWidth = width }
+                    onLiveChange(clamp(base + value.translation.width))
+                }
+                .onEnded { value in
+                    let base = dragStartWidth ?? width
+                    onCommit(clamp(base + value.translation.width))
+                    dragStartWidth = nil
+                }
+        )
     }
 }
 
