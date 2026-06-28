@@ -14,9 +14,9 @@ import Foundation
 /// While these are blank, `isConfigured` is false: auth is treated as disabled and the app runs
 /// exactly as before (local-only), so the build is never broken by missing accounts.
 enum SupabaseConfig {
-    static let url = ""          // e.g. "https://abcdefgh.supabase.co"
-    static let anonKey = ""      // e.g. "eyJhbGciOi..."
-    static let powerSyncURL = "" // e.g. "https://xxxxx.powersync.journeyapps.com"
+    static let url = "https://cahtphxqqnlqfxobgkpd.supabase.co"
+    static let anonKey = "sb_publishable_BLLDJ8gFO3nsx7pwo6Auiw_Ffz6DpKq"
+    static let powerSyncURL = "https://6a40b2e835ca576ca0e04f71.powersync.journeyapps.com"
 
     static var isConfigured: Bool {
         !url.isEmpty && !anonKey.isEmpty

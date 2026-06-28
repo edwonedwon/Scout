@@ -1,0 +1,78 @@
+# PowerSync Sync Streams for Scout (dashboard → Sync Streams editor).
+# Paste this whole file into the editor, click Validate, then Deploy.
+# Mirrors db/supabase-schema.sql + its RLS: a user syncs every project they OWN
+# or are a MEMBER of, plus all child rows (lists, pins, scripts, highlights, members).
+# auth.user_id() = the signed-in Supabase user's id (JWT sub).
+
+config:
+  edition: 3
+
+streams:
+  # Projects the user owns OR is a member of. Everything else hangs off this set.
+  projects:
+    auto_subscribe: true
+    query: |
+      SELECT * FROM projects
+      WHERE owner_id = auth.user_id()
+         OR id IN (SELECT project_id FROM project_members WHERE user_id = auth.user_id())
+
+  # The membership roster for those projects (so the app can show collaborators/roles).
+  project_members:
+    auto_subscribe: true
+    query: |
+      SELECT * FROM project_members
+      WHERE project_id IN (
+        SELECT id FROM projects
+        WHERE owner_id = auth.user_id()
+           OR id IN (SELECT project_id FROM project_members WHERE user_id = auth.user_id())
+      )
+
+  location_lists:
+    auto_subscribe: true
+    query: |
+      SELECT * FROM location_lists
+      WHERE project_id IN (
+        SELECT id FROM projects
+        WHERE owner_id = auth.user_id()
+           OR id IN (SELECT project_id FROM project_members WHERE user_id = auth.user_id())
+      )
+
+  # Pins attach to a project directly (owning_project_id) and/or via a list.
+  pins:
+    auto_subscribe: true
+    query: |
+      SELECT * FROM pins
+      WHERE owning_project_id IN (
+              SELECT id FROM projects
+              WHERE owner_id = auth.user_id()
+                 OR id IN (SELECT project_id FROM project_members WHERE user_id = auth.user_id())
+            )
+         OR list_id IN (
+              SELECT id FROM location_lists WHERE project_id IN (
+                SELECT id FROM projects
+                WHERE owner_id = auth.user_id()
+                   OR id IN (SELECT project_id FROM project_members WHERE user_id = auth.user_id())
+              )
+            )
+
+  scripts:
+    auto_subscribe: true
+    query: |
+      SELECT * FROM scripts
+      WHERE project_id IN (
+        SELECT id FROM projects
+        WHERE owner_id = auth.user_id()
+           OR id IN (SELECT project_id FROM project_members WHERE user_id = auth.user_id())
+      )
+
+  script_highlights:
+    auto_subscribe: true
+    query: |
+      SELECT * FROM script_highlights
+      WHERE script_id IN (
+        SELECT id FROM scripts WHERE project_id IN (
+          SELECT id FROM projects
+          WHERE owner_id = auth.user_id()
+             OR id IN (SELECT project_id FROM project_members WHERE user_id = auth.user_id())
+        )
+      )
