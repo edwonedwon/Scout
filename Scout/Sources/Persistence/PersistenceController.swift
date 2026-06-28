@@ -168,9 +168,23 @@ final class PersistenceController {
             let share = try await withTimeout(30, step: "creating the share") {
                 try await self.shareForProject(project)
             }
-            dlog("Got share; setting \(editor ? "edit" : "view") permission + persisting…", tag: "Share")
             share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
             share.publicPermission = editor ? .readWrite : .readOnly
+
+            // `container.share(...)` already saved the share to the server, so its URL is usually
+            // available immediately. Prefer it and apply the permission change in the BACKGROUND —
+            // awaiting persistUpdatedShare here was hanging indefinitely on some accounts.
+            if let url = share.url {
+                dlog("Invite link ready: \(url)", level: .success, tag: "Share")
+                Task.detached { [container] in
+                    do { _ = try await container.persistUpdatedShare(share, in: privateStore) }
+                    catch { dlog("Permission update failed (link still works): \(error.localizedDescription)", level: .warning, tag: "Share") }
+                }
+                return url
+            }
+
+            // No URL yet — fall back to persisting (which assigns one), with a timeout so it can't hang.
+            dlog("No URL yet; persisting share to obtain one…", tag: "Share")
             let saved = try await withTimeout(30, step: "saving the share to iCloud") {
                 try await self.container.persistUpdatedShare(share, in: privateStore)
             }
