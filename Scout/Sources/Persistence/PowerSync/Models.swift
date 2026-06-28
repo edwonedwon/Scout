@@ -49,7 +49,7 @@ struct ProjectRecord: Identifiable, Hashable {
         ownerId = try c.getStringOptional(name: "owner_id")
         name = (try c.getStringOptional(name: "name")) ?? ""
         notes = (try c.getStringOptional(name: "notes")) ?? ""
-        uncategorizedPanelOrder = Int(try c.getInt64(name: "uncategorized_panel_order"))
+        uncategorizedPanelOrder = Int((try c.getInt64Optional(name: "uncategorized_panel_order")) ?? 0)
         createdAt = parseDate(try c.getStringOptional(name: "created_at")) ?? Date()
         deletedAt = parseDate(try c.getStringOptional(name: "deleted_at"))
     }
@@ -82,8 +82,8 @@ struct ListRecord: Identifiable, Hashable {
         name = (try c.getStringOptional(name: "name")) ?? ""
         colorHex = (try c.getStringOptional(name: "color_hex")) ?? "#FF6B35"
         sceneType = try c.getStringOptional(name: "scene_type")
-        panelOrder = Int(try c.getInt64(name: "panel_order"))
-        sortOrder = Int(try c.getInt64(name: "sort_order"))
+        panelOrder = Int((try c.getInt64Optional(name: "panel_order")) ?? 0)
+        sortOrder = Int((try c.getInt64Optional(name: "sort_order")) ?? 0)
         createdAt = parseDate(try c.getStringOptional(name: "created_at")) ?? Date()
         deletedAt = parseDate(try c.getStringOptional(name: "deleted_at"))
     }
@@ -145,10 +145,10 @@ struct PinRecord: Identifiable, Hashable {
         hasGPS = (try c.getBooleanOptional(name: "has_gps")) ?? true
         gpsFromTimeline = (try c.getBooleanOptional(name: "gps_from_timeline")) ?? false
         isFlagged = (try c.getBooleanOptional(name: "is_flagged")) ?? false
-        rotationQuarterTurns = Int(try c.getInt64(name: "rotation_quarter_turns"))
+        rotationQuarterTurns = Int((try c.getInt64Optional(name: "rotation_quarter_turns")) ?? 0)
         aspectRatio = (try c.getDoubleOptional(name: "aspect_ratio")) ?? 0
-        panelOrder = Int(try c.getInt64(name: "panel_order"))
-        sortOrder = Int(try c.getInt64(name: "sort_order"))
+        panelOrder = Int((try c.getInt64Optional(name: "panel_order")) ?? 0)
+        sortOrder = Int((try c.getInt64Optional(name: "sort_order")) ?? 0)
         statusRaw = (try c.getStringOptional(name: "status_raw")) ?? ""
         imageSourceRaw = try c.getStringOptional(name: "image_source_raw")
         imageURL = try c.getStringOptional(name: "image_url")
@@ -178,7 +178,7 @@ struct ScriptRecord: Identifiable, Hashable {
         projectId = try c.getStringOptional(name: "project_id")
         name = (try c.getStringOptional(name: "name")) ?? ""
         rawText = (try c.getStringOptional(name: "raw_text")) ?? ""
-        sortOrder = Int(try c.getInt64(name: "sort_order"))
+        sortOrder = Int((try c.getInt64Optional(name: "sort_order")) ?? 0)
         importedAt = parseDate(try c.getStringOptional(name: "imported_at")) ?? Date()
         updatedAt = parseDate(try c.getStringOptional(name: "updated_at")) ?? Date()
     }
@@ -200,8 +200,8 @@ struct HighlightRecord: Identifiable, Hashable {
         id = try c.getString(name: "id")
         scriptId = try c.getStringOptional(name: "script_id")
         listId = try c.getStringOptional(name: "list_id")
-        rangeStart = Int(try c.getInt64(name: "range_start"))
-        rangeLength = Int(try c.getInt64(name: "range_length"))
+        rangeStart = Int((try c.getInt64Optional(name: "range_start")) ?? 0)
+        rangeLength = Int((try c.getInt64Optional(name: "range_length")) ?? 0)
         excerpt = (try c.getStringOptional(name: "excerpt")) ?? ""
         contextBefore = (try c.getStringOptional(name: "context_before")) ?? ""
         contextAfter = (try c.getStringOptional(name: "context_after")) ?? ""

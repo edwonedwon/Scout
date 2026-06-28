@@ -54,27 +54,36 @@ final class MacStore: ObservableObject {
         func logWatchError(_ name: String, _ error: Error) {
             DebugLogger.shared.log("watch[\(name)] STOPPED: \(error)", level: .error, tag: "Store")
         }
+        var loggedFirst = Set<String>()
+        func logFirst(_ name: String, _ count: Int) {
+            if loggedFirst.insert(name).inserted {
+                DebugLogger.shared.log("watch[\(name)] delivered \(count) row(s)", tag: "Store")
+            }
+        }
         tasks.append(Task { [weak self] in
             do { for try await rows in ScoutStore.shared.watchAllProjectsRaw() {
-                DebugLogger.shared.log("watch[projects] delivered \(rows.count) row(s)", tag: "Store")
-                self?.applyProjects(rows)
+                logFirst("projects", rows.count); self?.applyProjects(rows)
             } } catch { logWatchError("projects", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllListsRaw() { self?.applyLists(rows) } }
-            catch { logWatchError("lists", error) }
+            do { for try await rows in ScoutStore.shared.watchAllListsRaw() {
+                logFirst("lists", rows.count); self?.applyLists(rows)
+            } } catch { logWatchError("lists", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllPinsRaw() { self?.applyPins(rows) } }
-            catch { logWatchError("pins", error) }
+            do { for try await rows in ScoutStore.shared.watchAllPinsRaw() {
+                logFirst("pins", rows.count); self?.applyPins(rows)
+            } } catch { logWatchError("pins", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllScriptsRaw() { self?.applyScripts(rows) } }
-            catch { logWatchError("scripts", error) }
+            do { for try await rows in ScoutStore.shared.watchAllScriptsRaw() {
+                logFirst("scripts", rows.count); self?.applyScripts(rows)
+            } } catch { logWatchError("scripts", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllHighlightsRaw() { self?.applyHighlights(rows) } }
-            catch { logWatchError("highlights", error) }
+            do { for try await rows in ScoutStore.shared.watchAllHighlightsRaw() {
+                logFirst("highlights", rows.count); self?.applyHighlights(rows)
+            } } catch { logWatchError("highlights", error) }
         })
     }
     deinit { tasks.forEach { $0.cancel() } }
