@@ -9,80 +9,8 @@
 import SwiftUI
 import ScoutKit
 
-// MARK: - Observable models over ScoutStore
-
-/// Watches every (live) project plus its list/pin counts for the browse screen.
-@MainActor
-final class ProjectsListModel: ObservableObject {
-    @Published var summaries: [ProjectSummary] = []
-    private var task: Task<Void, Never>?
-
-    init() {
-        task = Task { [weak self] in
-            do {
-                for try await rows in ScoutStore.shared.watchProjectSummaries() {
-                    self?.summaries = rows
-                }
-            } catch { /* stream cancelled on deinit */ }
-        }
-    }
-    deinit { task?.cancel() }
-
-    @discardableResult
-    func create(name: String) async -> String? {
-        try? await ScoutStore.shared.createProject(name: name)
-    }
-    func softDelete(_ id: String) async {
-        try? await ScoutStore.shared.softDeleteProject(id: id)
-    }
-}
-
-/// Watches all lists + all pins for one project, and derives the folder/list/pin tree the sidebar
-/// renders (replacing the Core Data relationship walks in ScoutIOSApp.swift).
-@MainActor
-final class ProjectTreeModel: ObservableObject {
-    let project: ProjectRecord
-    @Published var allLists: [ListRecord] = []
-    @Published var allPins: [PinRecord] = []
-    private var tasks: [Task<Void, Never>] = []
-
-    init(project: ProjectRecord) {
-        self.project = project
-        tasks.append(Task { [weak self] in
-            guard let self else { return }
-            do { for try await rows in ScoutStore.shared.watchAllLists(projectId: project.id) { self.allLists = rows } }
-            catch {}
-        })
-        tasks.append(Task { [weak self] in
-            guard let self else { return }
-            do { for try await rows in ScoutStore.shared.watchAllPins(projectId: project.id) { self.allPins = rows } }
-            catch {}
-        })
-    }
-    deinit { tasks.forEach { $0.cancel() } }
-
-    var topLevelLists: [ListRecord] {
-        allLists.filter { $0.parentListId == nil }.sorted { $0.panelOrder < $1.panelOrder }
-    }
-    func children(of listId: String) -> [ListRecord] {
-        allLists.filter { $0.parentListId == listId }.sorted { $0.panelOrder < $1.panelOrder }
-    }
-    func isFolder(_ listId: String) -> Bool { allLists.contains { $0.parentListId == listId } }
-    func pins(inList listId: String) -> [PinRecord] {
-        allPins.filter { $0.listId == listId }.sorted { $0.sortOrder < $1.sortOrder }
-    }
-    /// Pins this folder rolls up (its own + its children's), for the count badge.
-    func rollupPinCount(_ listId: String) -> Int {
-        pins(inList: listId).count + children(of: listId).reduce(0) { $0 + pins(inList: $1.id).count }
-    }
-    var loosePhotos: [PinRecord] {
-        allPins.filter { $0.listId == nil && $0.owningProjectId == project.id }
-            .sorted { $0.panelOrder < $1.panelOrder }
-    }
-    func colorHex(forList listId: String?) -> String {
-        listId.flatMap { id in allLists.first { $0.id == id }?.colorHex } ?? "#FF6B35"
-    }
-}
+// The observable models (ProjectsListModel / ProjectTreeModel) now live in the shared
+// StoreModels.swift so both platforms share one definition.
 
 // MARK: - Root: project list
 
