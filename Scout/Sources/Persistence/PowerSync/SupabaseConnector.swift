@@ -14,18 +14,13 @@ struct SupabaseConnector: PowerSyncBackendConnectorProtocol {
 
     func fetchCredentials() async throws -> PowerSyncCredentials? {
         // Returns nil when signed out → PowerSync stays disconnected (no anonymous sync).
-        guard let session = try? await client.auth.session else {
-            NSLog("SCOUTSYNC: fetchCredentials → NO SESSION (signed out / token failed) → staying disconnected")
-            return nil
-        }
-        NSLog("SCOUTSYNC: fetchCredentials → token for \(session.user.email ?? "?"), endpoint=\(SupabaseConfig.powerSyncURL)")
+        guard let session = try? await client.auth.session else { return nil }
         return PowerSyncCredentials(endpoint: SupabaseConfig.powerSyncURL, token: session.accessToken)
     }
 
     func uploadData(database: PowerSyncDatabaseProtocol) async throws {
         guard let batch = try await database.getCrudBatch() else { return }
 
-        NSLog("SCOUTSYNC: uploadData flushing \(batch.crud.count) op(s)")
         await Self.log("uploadData: flushing \(batch.crud.count) queued change(s)…")
         for entry in batch.crud {
             let table = client.from(entry.table)
@@ -49,7 +44,6 @@ struct SupabaseConnector: PowerSyncBackendConnectorProtocol {
             } catch {
                 // Surface the *exact* row the backend rejected — PowerSync otherwise swallows this
                 // and retries the same batch forever, so nothing behind it in the queue uploads.
-                NSLog("SCOUTSYNC: upload REJECTED \(entry.op) \(entry.table)#\(entry.id): \(error)")
                 await Self.log("upload REJECTED \(entry.op) \(entry.table)#\(entry.id): \(error)", .error)
                 throw error
             }
@@ -89,16 +83,16 @@ extension ScoutStore {
     /// Attach the backend and start syncing. Call after the user signs in (and the PowerSync
     /// instance URL is configured). Safe to call repeatedly — a no-op when sync isn't set up.
     func connectIfPossible() async {
-        guard SupabaseConfig.syncEnabled, let client = SupabaseService.client else {
-            NSLog("SCOUTSYNC: connectIfPossible SKIPPED (syncEnabled=\(SupabaseConfig.syncEnabled), client=\(SupabaseService.client != nil))")
-            return
-        }
-        NSLog("SCOUTSYNC: connecting…")
+        guard SupabaseConfig.syncEnabled, let client = SupabaseService.client else { return }
         do {
             try await db.connect(connector: SupabaseConnector(client: client), options: nil)
-            NSLog("SCOUTSYNC: db.connect() returned OK")
+            await Self.log("connected")
         } catch {
-            NSLog("SCOUTSYNC: db.connect() FAILED: \(error)")
+            await Self.log("connect failed: \(error)", .error)
         }
+    }
+
+    @MainActor private static func log(_ s: String, _ level: DebugEntry.Level = .info) {
+        DebugLogger.shared.log(s, level: level, tag: "Sync")
     }
 }

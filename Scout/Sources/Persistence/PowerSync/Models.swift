@@ -55,14 +55,6 @@ struct ProjectRecord: Identifiable, Hashable {
     }
 }
 
-/// A project with its live list/pin counts, for the browse screen.
-struct ProjectSummary: Identifiable, Hashable {
-    var project: ProjectRecord
-    var listCount: Int
-    var pinCount: Int
-    var id: String { project.id }
-}
-
 struct ListRecord: Identifiable, Hashable {
     var id: String
     var projectId: String?

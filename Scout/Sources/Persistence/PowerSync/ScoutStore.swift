@@ -26,59 +26,8 @@ final class ScoutStore {
     static func newID() -> String { UUID().uuidString }
     private func now() -> String { ISO8601DateFormatter.string(Date()) }
 
-    // MARK: - Reactive reads (live queries)
-
-    func watchProjects() -> AsyncThrowingStream<[ProjectRecord], Error> {
-        try! db.watch(
-            sql: "SELECT * FROM projects WHERE deleted_at IS NULL ORDER BY created_at DESC",
-            parameters: []
-        ) { try ProjectRecord(cursor: $0) }
-    }
-
-    /// Projects plus live list/pin counts, for the browse screen (mirrors the Core Data
-    /// `topLevelLists.count` / `pinCount` the iOS root list used to read off relationships).
-    func watchProjectSummaries() -> AsyncThrowingStream<[ProjectSummary], Error> {
-        try! db.watch(
-            sql: """
-            SELECT p.*,
-              (SELECT COUNT(*) FROM location_lists l
-                 WHERE l.project_id = p.id AND l.parent_list_id IS NULL AND l.deleted_at IS NULL) AS list_count,
-              (SELECT COUNT(*) FROM pins pn
-                 WHERE (pn.owning_project_id = p.id
-                        OR pn.list_id IN (SELECT id FROM location_lists l2 WHERE l2.project_id = p.id))
-                   AND pn.deleted_at IS NULL) AS pin_count
-            FROM projects p
-            WHERE p.deleted_at IS NULL
-            ORDER BY p.created_at DESC
-            """,
-            parameters: []
-        ) { cursor in
-            ProjectSummary(
-                project: try ProjectRecord(cursor: cursor),
-                listCount: Int(try cursor.getInt64(name: "list_count")),
-                pinCount: Int(try cursor.getInt64(name: "pin_count"))
-            )
-        }
-    }
-
-    /// Every (live) pin in a project — those owned directly plus those in any of its lists. Lets a
-    /// caller build the whole project tree from one lists stream + one pins stream.
-    func watchAllPins(projectId: String) -> AsyncThrowingStream<[PinRecord], Error> {
-        try! db.watch(
-            sql: """
-            SELECT * FROM pins
-            WHERE deleted_at IS NULL
-              AND (owning_project_id = ?
-                   OR list_id IN (SELECT id FROM location_lists WHERE project_id = ?))
-            ORDER BY sort_order
-            """,
-            parameters: [projectId, projectId]
-        ) { try PinRecord(cursor: $0) }
-    }
-
-    // MARK: Global streams (whole DB, including trashed) — the Mac UI binds these via MacStore.
-    // Unlike the per-project watches above, these include soft-deleted rows so the Trash UI can
-    // show them; callers filter by `deletedAt` for live views.
+    // MARK: - Reactive reads (whole-DB live streams, bound by MacStore)
+    // These include soft-deleted rows so the Trash UI can show them; callers filter by `deletedAt`.
 
     // A 250ms watch throttle (vs the 30ms default) coalesces the rapid-fire emissions PowerSync
     // produces while syncing a burst of changes — turning ~100 full MacStore reconciles into a
@@ -99,66 +48,6 @@ final class ScoutStore {
     }
     func watchAllHighlightsRaw() -> AsyncThrowingStream<[HighlightRecord], Error> {
         try! db.watch(options: WatchOptions(sql: "SELECT * FROM script_highlights ORDER BY range_start", parameters: [], throttle: Self.watchThrottle) { try HighlightRecord(cursor: $0) })
-    }
-
-    /// Top-level lists in a project (no parent). Folders/children come via `watchChildLists`.
-    func watchLists(projectId: String) -> AsyncThrowingStream<[ListRecord], Error> {
-        try! db.watch(
-            sql: """
-            SELECT * FROM location_lists
-            WHERE project_id = ? AND parent_list_id IS NULL AND deleted_at IS NULL
-            ORDER BY panel_order, created_at
-            """,
-            parameters: [projectId]
-        ) { try ListRecord(cursor: $0) }
-    }
-
-    /// Every list in a project (top-level + nested), so callers can build the tree in one pass.
-    func watchAllLists(projectId: String) -> AsyncThrowingStream<[ListRecord], Error> {
-        try! db.watch(
-            sql: "SELECT * FROM location_lists WHERE project_id = ? AND deleted_at IS NULL ORDER BY panel_order, created_at",
-            parameters: [projectId]
-        ) { try ListRecord(cursor: $0) }
-    }
-
-    func watchChildLists(parentListId: String) -> AsyncThrowingStream<[ListRecord], Error> {
-        try! db.watch(
-            sql: "SELECT * FROM location_lists WHERE parent_list_id = ? AND deleted_at IS NULL ORDER BY panel_order, created_at",
-            parameters: [parentListId]
-        ) { try ListRecord(cursor: $0) }
-    }
-
-    func watchPins(listId: String) -> AsyncThrowingStream<[PinRecord], Error> {
-        try! db.watch(
-            sql: "SELECT * FROM pins WHERE list_id = ? AND deleted_at IS NULL ORDER BY sort_order",
-            parameters: [listId]
-        ) { try PinRecord(cursor: $0) }
-    }
-
-    /// Loose photos imported straight into a project (no list).
-    func watchProjectPhotos(projectId: String) -> AsyncThrowingStream<[PinRecord], Error> {
-        try! db.watch(
-            sql: """
-            SELECT * FROM pins
-            WHERE owning_project_id = ? AND list_id IS NULL AND deleted_at IS NULL
-            ORDER BY panel_order, sort_order
-            """,
-            parameters: [projectId]
-        ) { try PinRecord(cursor: $0) }
-    }
-
-    func watchScripts(projectId: String) -> AsyncThrowingStream<[ScriptRecord], Error> {
-        try! db.watch(
-            sql: "SELECT * FROM scripts WHERE project_id = ? ORDER BY sort_order",
-            parameters: [projectId]
-        ) { try ScriptRecord(cursor: $0) }
-    }
-
-    func watchHighlights(scriptId: String) -> AsyncThrowingStream<[HighlightRecord], Error> {
-        try! db.watch(
-            sql: "SELECT * FROM script_highlights WHERE script_id = ? ORDER BY range_start",
-            parameters: [scriptId]
-        ) { try HighlightRecord(cursor: $0) }
     }
 
     // MARK: - One-shot reads
