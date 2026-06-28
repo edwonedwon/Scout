@@ -574,7 +574,7 @@ final class ZoomableMapView: MKMapView {
         super.updateTrackingAreas()
         if let t = magTrackingArea { removeTrackingArea(t) }
         let t = NSTrackingArea(rect: .zero,
-                               options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                               options: [.mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
                                owner: self, userInfo: nil)
         addTrackingArea(t)
         magTrackingArea = t
@@ -587,9 +587,18 @@ final class ZoomableMapView: MKMapView {
     private var pendingHoverPoint: CGPoint?
     private var hoverScheduled = false
 
+    // MKMapView's internal feature/label views push an I-beam over the map surface; force the
+    // arrow back so the map reads as a clickable surface, not selectable text. (Drawing mode keeps
+    // its own crosshair.) Handled both via the tracking area's cursorUpdate and on every move.
+    override func cursorUpdate(with event: NSEvent) {
+        if isDrawingMode { return }
+        NSCursor.arrow.set()
+    }
+
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         guard !isDrawingMode else { return }
+        NSCursor.arrow.set()
         let pt = convert(event.locationInWindow, from: nil)
         let now = CACurrentMediaTime()
         if now >= hoverThrottleUntil {
