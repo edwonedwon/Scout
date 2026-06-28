@@ -59,27 +59,12 @@ final class ScoutStore {
         ) { try ProjectRecord(cursor: $0) }
     }
 
-    func pins(in listId: String) async throws -> [PinRecord] {
-        try await db.getAll(
-            sql: "SELECT * FROM pins WHERE list_id = ? AND deleted_at IS NULL ORDER BY sort_order",
-            parameters: [listId]
-        ) { try PinRecord(cursor: $0) }
-    }
-
     /// Every live pin across all projects (used by relink, which matches the whole library at once).
     func allActivePins() async throws -> [PinRecord] {
         try await db.getAll(
             sql: "SELECT * FROM pins WHERE deleted_at IS NULL",
             parameters: []
         ) { try PinRecord(cursor: $0) }
-    }
-
-    func projectCount() async throws -> Int {
-        let rows = try await db.getAll(
-            sql: "SELECT COUNT(*) AS c FROM projects",
-            parameters: []
-        ) { Int(try $0.getInt64(name: "c")) }
-        return rows.first ?? 0
     }
 
     // MARK: - Project writes
@@ -351,11 +336,6 @@ final class ScoutStore {
             parameters: [id, scriptId, listId, rangeStart, rangeLength, excerpt, contextBefore, contextAfter, sceneHeading, now()]
         )
         return id
-    }
-
-    /// Assign (or clear) the list a script section maps to.
-    func setHighlightList(id: String, listId: String?) async throws {
-        try await db.execute(sql: "UPDATE script_highlights SET list_id = ? WHERE id = ?", parameters: [listId, id])
     }
 
     func deleteHighlight(id: String) async throws {
