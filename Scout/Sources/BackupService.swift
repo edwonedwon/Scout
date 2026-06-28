@@ -180,6 +180,94 @@ enum BackupService {
         return destZip
     }
 
+    // MARK: - Export (store-backed VMs)
+
+    /// Same as `export(project:)` above but reading the PowerSync-backed `ProjectVM` graph.
+    @MainActor
+    static func export(project: ProjectVM) async throws -> URL {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("ScoutBackup-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let photosDir = tmp.appendingPathComponent("photos", isDirectory: true)
+        try fm.createDirectory(at: photosDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+
+        func descendants(_ list: ListVM) -> [ListVM] { [list] + list.childLists.flatMap(descendants) }
+        let topLevelLists = project.lists.filter { $0.parentList == nil }
+        let everyList = topLevelLists.flatMap(descendants)
+        let allPins = everyList.flatMap(\.pins) + project.importedPhotos
+
+        var copiedFiles: Set<String> = []
+        for pin in allPins {
+            for f in (pin.thumbnailFiles + pin.photoFiles) where !copiedFiles.contains(f) {
+                let src = PinPhotoStore.fileURL(f)
+                if fm.fileExists(atPath: src.path) {
+                    try? fm.copyItem(at: src, to: photosDir.appendingPathComponent(f))
+                }
+                copiedFiles.insert(f)
+            }
+        }
+
+        var manifest = BackupManifest(exportedAt: Date())
+        var bp = BackupProject(uuid: project.uuid, name: project.name, notes: project.notes,
+                               createdAt: project.createdAt, lists: [], importedPhotos: [])
+        for list in topLevelLists.sorted(by: { $0.panelOrder < $1.panelOrder }) { bp.lists.append(backupList(list)) }
+        for pin in project.importedPhotos.sorted(by: { $0.panelOrder < $1.panelOrder }) { bp.importedPhotos.append(backupPin(pin)) }
+        bp.scripts = project.scripts.sorted(by: { $0.sortOrder < $1.sortOrder }).map(backupScript)
+        manifest.projects.append(bp)
+
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(manifest).write(to: tmp.appendingPathComponent("backup.json"))
+
+        let safeName = project.name.replacingOccurrences(of: "/", with: "-")
+        let destZip = fm.temporaryDirectory.appendingPathComponent("Scout-\(safeName)-\(dateStamp()).zip")
+        try? fm.removeItem(at: destZip)
+        try zip(sourceDir: tmp, to: destZip)
+        return destZip
+    }
+
+    @MainActor private static func backupPin(_ pin: PinVM) -> BackupPin {
+        BackupPin(
+            uuid: pin.uuid, name: pin.name, notes: pin.notes,
+            latitude: pin.latitude, longitude: pin.longitude, statusRaw: pin.statusRaw,
+            createdAt: pin.createdAt, sortOrder: pin.sortOrder, panelOrder: pin.panelOrder,
+            imageSourceRaw: pin.imageSourceRaw, photoFiles: pin.photoFiles, thumbnailFiles: pin.thumbnailFiles,
+            originalFileBasename: pin.originalFilePath.map { URL(fileURLWithPath: $0).lastPathComponent },
+            hasGPS: pin.hasGPS, gpsFromTimeline: pin.gpsFromTimeline, dateTaken: pin.dateTaken,
+            googlePlaceId: pin.googlePlaceId, sourceURLString: pin.sourceURLString,
+            googleMapsURLString: pin.googleMapsURLString, imageURL: pin.imageURL,
+            deletedAt: pin.deletedAt, isFlagged: pin.isFlagged,
+            rotationQuarterTurns: pin.rotationQuarterTurns, aspectRatio: pin.aspectRatio,
+            originalFilename: pin.originalFilename
+        )
+    }
+
+    @MainActor private static func backupList(_ list: ListVM) -> BackupList {
+        BackupList(
+            uuid: list.uuid, name: list.name, colorHex: list.colorHex, createdAt: list.createdAt,
+            sortOrder: list.sortOrder, panelOrder: list.panelOrder,
+            pins: list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }).map(backupPin),
+            sceneType: list.sceneType, deletedAt: list.deletedAt,
+            childLists: list.childLists.sorted(by: { $0.panelOrder < $1.panelOrder }).map(backupList)
+        )
+    }
+
+    @MainActor private static func backupScript(_ script: ScriptVM) -> BackupScript {
+        BackupScript(
+            uuid: script.uuid, name: script.name, rawText: script.rawText,
+            importedAt: script.importedAt, updatedAt: script.updatedAt, sortOrder: script.sortOrder,
+            highlights: script.highlights.map { h in
+                BackupScriptHighlight(
+                    uuid: h.uuid, rangeStart: h.rangeStart, rangeLength: h.rangeLength,
+                    excerpt: h.excerpt, contextBefore: h.contextBefore, contextAfter: h.contextAfter,
+                    sceneHeading: h.sceneHeading, createdAt: h.createdAt, listUUID: h.list?.uuid
+                )
+            }
+        )
+    }
+
     // MARK: - Import
 
     struct ImportSummary {

@@ -25,7 +25,7 @@ struct PhotoGridView: View {
     /// changes…). Included in `inputSignature` so the grid model rebuilds even when a change
     /// (e.g. unflagging a photo) doesn't alter any section's count or first/last id.
     var dataVersion: Int = 0
-    /// UUID of the location (== PinnedLocationData.uuid) to scroll to and highlight.
+    /// UUID of the location (== PinVM.uuid) to scroll to and highlight.
     var highlightedLocationID: UUID? = nil
     /// When set, the grid scrolls this location to the top. Used to jump to the photos
     /// nearest the map's current location when switching from map to grid.

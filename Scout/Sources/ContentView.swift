@@ -14,7 +14,7 @@ enum ShareRole: Hashable {
 /// the sidebar rows, the photo-grid cells, and the map pins. Selecting in any one view writes
 /// here; the others observe the same store and update automatically.
 ///
-/// Keyed by UUID (each `PinnedLocationData`/`LocationListData` has a stable `uuid`, and
+/// Keyed by UUID (each `PinVM`/`ListVM` has a stable `uuid`, and
 /// `ScoutLocation.id` is that same uuid) — the common identifier across all three views.
 /// The set normally holds selected PHOTO uuids; the sidebar may also include folder/list
 /// uuids (folders aren't pins, so the grid and map simply ignore ids they don't render).
@@ -113,23 +113,23 @@ func pinContextMenuItems(_ origin: PinMenuOrigin, _ actions: PinMenuActions) -> 
 /// Held by the view via plain @State: mutating its internal dictionaries does NOT re-render
 /// the view (the @State value — the reference — is unchanged).
 final class PinDisplayCache {
-    private var locs: [PersistentIdentifier: (sig: Int, loc: ScoutLocation)] = [:]
-    private var proximity: [PersistentIdentifier: (sig: Int, result: [PinnedLocationData])] = [:]
+    private var locs: [String: (sig: Int, loc: ScoutLocation)] = [:]
+    private var proximity: [String: (sig: Int, result: [PinVM])] = [:]
 
-    func location(for pin: PinnedLocationData) -> ScoutLocation {
+    @MainActor func location(for pin: PinVM) -> ScoutLocation {
         let sig = Self.pinSignature(pin)
-        if let c = locs[pin.persistentModelID], c.sig == sig { return c.loc }
+        if let c = locs[pin.id], c.sig == sig { return c.loc }
         let loc = pin.asScoutLocation()
-        locs[pin.persistentModelID] = (sig, loc)
+        locs[pin.id] = (sig, loc)
         return loc
     }
 
     /// Returns the proximity-ordered pins for `key`, recomputing via `compute` only when the
     /// input set/order signature changes. `pins` must already be filtered + sorted by caller.
-    func proximityOrdered(_ key: PersistentIdentifier, pins: [PinnedLocationData],
-                          compute: ([PinnedLocationData]) -> [PinnedLocationData]) -> [PinnedLocationData] {
+    @MainActor func proximityOrdered(_ key: String, pins: [PinVM],
+                          compute: ([PinVM]) -> [PinVM]) -> [PinVM] {
         var hasher = Hasher()
-        for p in pins { hasher.combine(p.persistentModelID); hasher.combine(p.sortOrder) }
+        for p in pins { hasher.combine(p.id); hasher.combine(p.sortOrder) }
         let sig = hasher.finalize()
         if let c = proximity[key], c.sig == sig { return c.result }
         let result = compute(pins)
@@ -141,13 +141,13 @@ final class PinDisplayCache {
     /// affects `fullResImages` but isn't part of the per-pin signature.
     func invalidateAll() { locs.removeAll(); proximity.removeAll() }
 
-    private static func pinSignature(_ pin: PinnedLocationData) -> Int {
+    @MainActor private static func pinSignature(_ pin: PinVM) -> Int {
         var h = Hasher()
         h.combine(pin.rotationQuarterTurns)
         h.combine(pin.name)
         h.combine(pin.latitude); h.combine(pin.longitude); h.combine(pin.hasGPS)
         h.combine(pin.photoFiles); h.combine(pin.thumbnailFiles)
-        h.combine(pin.originalFilePath)
+        h.combine(pin.originalFilename)
         h.combine(pin.statusRaw)
         h.combine(pin.isFlagged)
         return h.finalize()
@@ -204,18 +204,18 @@ struct ContentView: View {
 
     @Environment(\.managedObjectContext) private var modelContext
     @Environment(\.undoManager) private var undoManager
-    @FetchRequest(sortDescriptors: [SortDescriptor(\LocationListData.createdAt)])
-    private var allLists: FetchedResults<LocationListData>
+    /// The store-backed VM graph (PowerSync) — replaces the Core Data @FetchRequests. The
+    /// same-named computed properties below keep the rest of the view body unchanged.
+    @ObservedObject private var mac = MacStore.shared
+    private var allLists: [ListVM] { mac.lists }
     // Pins not attached to any list or project — always shown on the map.
-    @FetchRequest(sortDescriptors: [SortDescriptor(\PinnedLocationData.createdAt)],
-                  predicate: NSPredicate(format: "list == nil AND owningProject == nil"))
-    private var unfiledPins: FetchedResults<PinnedLocationData>
+    private var unfiledPins: [PinVM] { mac.pins.filter { $0.listId == nil && $0.owningProjectId == nil } }
     // All pins, for the one-time offline-photo backfill.
-    @FetchRequest(sortDescriptors: []) private var allPins: FetchedResults<PinnedLocationData>
-    @FetchRequest(sortDescriptors: []) private var allProjects: FetchedResults<ProjectData>
+    private var allPins: [PinVM] { mac.pins }
+    private var allProjects: [ProjectVM] { mac.projects }
     // All script highlights — drives Script-view tinting reactively, so removing a scene link
     // (or its list) repaints the script immediately instead of leaving a "ghost" highlight.
-    @FetchRequest(sortDescriptors: []) private var allScriptHighlights: FetchedResults<ScriptHighlight>
+    private var allScriptHighlights: [HighlightVM] { mac.highlights }
 
     @State private var searchText = ""
     @State private var isSearching = false
@@ -239,10 +239,10 @@ struct ContentView: View {
     @State private var liveSidebarWidth: Double? = nil
     @AppStorage("debug.sidebarMinWidth") private var sidebarMinWidth: Double = 200
     @AppStorage("debug.sidebarMaxWidth") private var sidebarMaxWidth: Double = 480
-    @State private var activeListIDs: Set<PersistentIdentifier> = []
+    @State private var activeListIDs: Set<String> = []
     // Projects whose uncategorized (loose) photos are hidden from map + grid.
     // Empty = all visible (default). Toggled by the sidebar "Uncategorized" eye.
-    @State private var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier> = []
+    @State private var hiddenUncategorizedProjectIDs: Set<String> = []
     @AppStorage("nav.activeListUUIDs") private var activeListUUIDs: String = ""
     @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
     // Flipped by the debug "Clear Old Lists" button to drive the purge inside ProjectsPanel.
@@ -283,7 +283,7 @@ struct ContentView: View {
     /// Collaboration (project sharing) popover — UI shell; real iCloud sharing is wired later
     /// per docs/collaboration-plan.md.
     @State private var showCollaborationPopover = false
-    @State private var sharingProject: ProjectData? = nil
+    @State private var sharingProject: ProjectVM? = nil
     /// Global "show flagged only" filter — shared with the sidebar via AppStorage; applies to
     /// the map and photo grid through rebuildPinCaches.
     @AppStorage("filter.flaggedOnly") private var flaggedOnly = false
@@ -293,11 +293,11 @@ struct ContentView: View {
     /// zoomed in since the page is small to read at 1.0.
     @AppStorage("scriptZoom") private var scriptZoom: Double = 1.3
 
-    private var openProject: ProjectData? {
+    private var openProject: ProjectVM? {
         allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })
     }
 
-    private var activeScript: ScriptData? {
+    private var activeScript: ScriptVM? {
         let scripts = openProject?.scripts ?? []
         if let id = activeScriptUUID, let s = scripts.first(where: { $0.uuid == id }) { return s }
         return scripts.sorted { $0.sortOrder < $1.sortOrder }.first
@@ -327,7 +327,7 @@ struct ContentView: View {
     /// Shows MoveToListSheet from ContentView when sidebar is hidden.
     @State private var showExternalMoveSheet = false
     /// Duplicate pins found by the debug "Find Duplicates" scan, awaiting confirmation to trash.
-    @State private var pendingDuplicateRemoval: [PinnedLocationData] = []
+    @State private var pendingDuplicateRemoval: [PinVM] = []
     @State private var pendingDuplicateClusters = 0
     @State private var showDuplicateConfirm = false
     /// Signature-keyed cache that makes visibility toggles instant at thousands of pins.
@@ -341,7 +341,7 @@ struct ContentView: View {
     }
 
     /// Lists scoped to the currently open project, or all lists if no project is open.
-    private var openProjectLists: [LocationListData] {
+    private var openProjectLists: [ListVM] {
         guard !openProjectUUID.isEmpty,
               let project = allProjects.first(where: { $0.uuid.uuidString == openProjectUUID })
         else { return [] }
@@ -395,7 +395,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var rootLayoutWithObservers: some View {
-        rootLayoutWithModeObservers
+        rootLayoutWithCacheObservers
             .confirmationDialog("Find & Delete Duplicates",
                                 isPresented: $showDuplicateConfirm,
                                 titleVisibility: .visible) {
@@ -409,10 +409,16 @@ struct ContentView: View {
             } message: {
                 Text("Found \(pendingDuplicateRemoval.count) duplicate photo\(pendingDuplicateRemoval.count == 1 ? "" : "s") across \(pendingDuplicateClusters) group\(pendingDuplicateClusters == 1 ? "" : "s"). The original (large) files are kept; the compressed copies move to the Trash (recoverable for 30 days).")
             }
-            .onChange(of: allPins.count)         { rebuildPinCaches() }
-            .onChange(of: unfiledPins.count)     { rebuildPinCaches() }
-            .onChange(of: allLists.count)        { rebuildPinCaches() }
-            .onChange(of: allProjects.count)     { rebuildPinCaches() }
+    }
+
+    @ViewBuilder private var rootLayoutWithCacheObservers: some View {
+        let pinCount = allPins.count, unfiledCount = unfiledPins.count
+        let listCount = allLists.count, projectCount = allProjects.count
+        rootLayoutWithModeObservers
+            .onChange(of: pinCount)              { rebuildPinCaches() }
+            .onChange(of: unfiledCount)          { rebuildPinCaches() }
+            .onChange(of: listCount)             { rebuildPinCaches() }
+            .onChange(of: projectCount)          { rebuildPinCaches() }
             .onChange(of: pinListAssignmentHash) { rebuildPinCaches() }
             .onChange(of: flaggedOnly)           { rebuildPinCaches() }
             #if os(macOS)
@@ -469,7 +475,7 @@ struct ContentView: View {
             .onAppear { setupOnAppear() }
             .onChange(of: locationManager.currentLocation?.latitude) { _, _ in centerOnUserIfNeeded() }
             .onChange(of: activeListIDs) { _, ids in
-                let uuids = allLists.filter { ids.contains($0.persistentModelID) }.map(\.uuid.uuidString)
+                let uuids = allLists.filter { ids.contains($0.id) }.map(\.uuid.uuidString)
                 activeListUUIDs = uuids.joined(separator: ",")
                 rebuildPinCaches()
             }
@@ -599,7 +605,7 @@ struct ContentView: View {
         if !activeListUUIDs.isEmpty {
             let uuids = Set(activeListUUIDs.split(separator: ",").map(String.init))
             activeListIDs = Set(allLists.filter { uuids.contains($0.uuid.uuidString) }
-                                        .map(\.persistentModelID))
+                                        .map(\.id))
         }
         photoViewer.onViewOnMap = { [self] loc in
             withAnimation(.spring(duration: 0.3)) { viewMode = .map }
@@ -776,7 +782,7 @@ struct ContentView: View {
                 onClearSearchResults: clearSearchResults,
                 onSelectLocation: { id in highlightedPinID = id },
                 onDoubleSelectLocation: { id in
-                    if let pin = allPins.first(where: { $0.uuid == id }) {
+                    if let pin = pin(byUUID: id) {
                         openInCarousel(pin)
                     }
                 },
@@ -786,7 +792,7 @@ struct ContentView: View {
                 onRevealOnMap: { id in revealOnMap(id) },
                 onDelete: { uuids in trashPins(uuids) },
                 onRotate: { uuids in rotatePins(uuids) },
-                originalFilePath: { id in allPins.first(where: { $0.uuid == id })?.originalFilePath }
+                originalFilePath: { id in pin(byUUID: id)?.originalFilePath }
             )
                 .ignoresSafeArea()
                 .opacity(viewMode == .photos ? 1 : 0)
@@ -886,22 +892,8 @@ struct ContentView: View {
                 MoveToListSheet(
                     project: project,
                     onMove: { list in
-                        let pins = externalMoveUUIDs.compactMap { uuid in
-                            allPins.first(where: { $0.uuid == uuid })
-                        }
-                        for pin in pins {
-                            if let oldList = pin.list {
-                                oldList.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
-                                pin.list = nil
-                            }
-                            pin.owningProject?.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-                            pin.owningProject = nil
-                            // Set the inverse only — SwiftData adds to list.pins automatically.
-                            // Inserting manually too would duplicate the pin in list.pins.
-                            pin.list = list
-                        }
-                        for (i, p) in list.pins.sorted(by: { $0.sortOrder < $1.sortOrder }).enumerated() { p.sortOrder = i }
-                        try? modelContext.save()
+                        let pins = externalMoveUUIDs.compactMap { pin(byUUID: $0) }
+                        for p in pins { movePin(p, to: list) }
                         externalMoveUUIDs = []
                         selection.ids = []
                         showExternalMoveSheet = false
@@ -1092,19 +1084,19 @@ struct ContentView: View {
     /// rebuilds too.
     private var pinListAssignmentHash: Int {
         var h = allPins.reduce(0) { acc, pin in
-            let listHash = pin.list?.persistentModelID.hashValue ?? 0
+            let listHash = pin.list?.id.hashValue ?? 0
             let trashed = pin.deletedAt == nil ? 0 : 1
             return acc ^ listHash ^ pin.sortOrder ^ pin.panelOrder ^ trashed
         }
         for list in allLists {
-            h ^= (list.parentList?.persistentModelID.hashValue ?? 0)
+            h ^= (list.parentList?.id.hashValue ?? 0)
         }
         return h
     }
 
     /// Rotates the given pins 90° counter-clockwise (one quarter-turn) and refreshes caches.
     private func rotatePins(_ uuids: [UUID]) {
-        let pins = uuids.compactMap { id in allPins.first(where: { $0.uuid == id }) }
+        let pins = uuids.compactMap { id in pin(byUUID: id) }
         guard !pins.isEmpty else { return }
         for pin in pins {
             pin.rotationQuarterTurns = ((pin.rotationQuarterTurns - 1) % 4 + 4) % 4
@@ -1131,12 +1123,12 @@ struct ContentView: View {
     /// A list is *effectively* visible only if its own eye is on AND every ancestor folder's
     /// eye is on. A folder thus acts as a master switch: turning it off hides everything
     /// inside it on the map/grid without changing the children's own eye states.
-    private func isEffectivelyActive(_ list: LocationListData) -> Bool {
-        var node: LocationListData? = list
+    private func isEffectivelyActive(_ list: ListVM) -> Bool {
+        var node: ListVM? = list
         while let n = node {
             // A trashed list (or any trashed ancestor) is never shown on the map/grid.
             if n.deletedAt != nil { return false }
-            if !activeListIDs.contains(n.persistentModelID) { return false }
+            if !activeListIDs.contains(n.id) { return false }
             node = n.parentList
         }
         return true
@@ -1150,7 +1142,7 @@ struct ContentView: View {
         }
         for project in allProjects {
             // Skip uncategorized pins for projects whose "Uncategorized" eye is off.
-            guard !hiddenUncategorizedProjectIDs.contains(project.persistentModelID) else { continue }
+            guard !hiddenUncategorizedProjectIDs.contains(project.id) else { continue }
             for pin in project.importedPhotos where pin.hasGPS && pin.deletedAt == nil && (!flaggedOnly || pin.isFlagged) {
                 mapPins.append((displayCache.location(for: pin), Self.generalPinColor))
             }
@@ -1170,7 +1162,7 @@ struct ContentView: View {
                 .filter { isEffectivelyActive($0) }
             for list in sortedLists {
                 let ordered = displayCache.proximityOrdered(
-                    list.persistentModelID,
+                    list.id,
                     pins: list.pins.filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) }.sorted { $0.sortOrder < $1.sortOrder }
                 ) { proximityOrdered($0) }
                 let locs = flaggedFirst(ordered
@@ -1186,12 +1178,12 @@ struct ContentView: View {
             }
             // Directly-imported photos (no list).
             // Skipped entirely when this project's "Uncategorized" eye is off.
-            let importedPins = hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
+            let importedPins = hiddenUncategorizedProjectIDs.contains(project.id)
                 ? []
                 : project.importedPhotos
                 .filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) }
                 .sorted { $0.sortOrder < $1.sortOrder }
-            let imported = flaggedFirst(displayCache.proximityOrdered(project.persistentModelID, pins: importedPins) { proximityOrdered($0) }
+            let imported = flaggedFirst(displayCache.proximityOrdered(project.id, pins: importedPins) { proximityOrdered($0) }
                 .map { displayCache.location(for: $0) }
                 .filter { !$0.images.isEmpty })
             if !imported.isEmpty {
@@ -1201,7 +1193,7 @@ struct ContentView: View {
         // Active standalone lists not belonging to any project.
         for list in active.filter({ $0.project == nil }).sorted(by: { $0.createdAt < $1.createdAt }) {
             let ordered = displayCache.proximityOrdered(
-                list.persistentModelID,
+                list.id,
                 pins: list.pins.filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) }.sorted { $0.sortOrder < $1.sortOrder }
             ) { proximityOrdered($0) }
             let locs = flaggedFirst(ordered
@@ -1225,8 +1217,8 @@ struct ContentView: View {
 
     /// Flattens a project's lists into sidebar display order: each top-level list/folder by
     /// panelOrder, with a folder immediately followed by its child lists (also by panelOrder).
-    private func orderedListsForGrid(_ project: ProjectData) -> [LocationListData] {
-        var result: [LocationListData] = []
+    private func orderedListsForGrid(_ project: ProjectVM) -> [ListVM] {
+        var result: [ListVM] = []
         let topLevel = project.lists
             .filter { $0.parentList == nil }
             .sorted { $0.panelOrder < $1.panelOrder }
@@ -1258,7 +1250,7 @@ struct ContentView: View {
     /// Orders pins within a grid section so geographically close photos sit next to each
     /// other: a greedy nearest-neighbour walk starting from the north-west-most pin.
     /// GPS-less pins can't be placed spatially, so they keep their original order and go last.
-    private func proximityOrdered(_ pins: [PinnedLocationData]) -> [PinnedLocationData] {
+    private func proximityOrdered(_ pins: [PinVM]) -> [PinVM] {
         let gps = pins.filter { $0.hasGPS }
         let noGPS = pins.filter { !$0.hasGPS }
         guard gps.count > 2 else { return gps + noGPS }
@@ -1274,7 +1266,7 @@ struct ContentView: View {
             let last = ordered[ordered.count - 1]
             // Longitude degrees shrink with latitude — scale so distances aren't skewed.
             let cosLat = cos(last.latitude * .pi / 180)
-            func sqDist(_ p: PinnedLocationData) -> Double {
+            func sqDist(_ p: PinVM) -> Double {
                 let dLat = p.latitude - last.latitude
                 let dLng = (p.longitude - last.longitude) * cosLat
                 return dLat * dLat + dLng * dLng
@@ -1288,7 +1280,7 @@ struct ContentView: View {
     /// Tapping a saved pin in the sidebar selects it on the map and shows its popover —
     /// exactly as if it were clicked on the map. Activates its list first so it's visible
     /// (unfiled pins are always shown), then centers on it.
-    private func selectPin(_ pin: PinnedLocationData) {
+    private func selectPin(_ pin: PinVM) {
         if viewMode == .photos {
             if photoViewer.isVisible { photoViewer.dismiss() }
             let id = pin.uuid
@@ -1303,7 +1295,7 @@ struct ContentView: View {
             selectedLocation = nil
             return
         }
-        if let listID = pin.list?.persistentModelID {
+        if let listID = pin.list?.id {
             activeListIDs.insert(listID)
         }
         selectedLocation = location
@@ -1311,14 +1303,14 @@ struct ContentView: View {
 
     /// Double-clicking a sidebar pin: switch to the map if needed, then center AND zoom
     /// into the pin (unlike single-click selectPin, which preserves the current zoom).
-    private func zoomToPin(_ pin: PinnedLocationData) {
+    private func zoomToPin(_ pin: PinVM) {
         guard pin.hasGPS else { return }
         let location = pin.asScoutLocation()
         let wasMap = (viewMode == .map)
         if !wasMap {
             withAnimation(.spring(duration: 0.3)) { viewMode = .map }
         }
-        if let listID = pin.list?.persistentModelID {
+        if let listID = pin.list?.id {
             activeListIDs.insert(listID)
         }
         selectedLocation = location
@@ -1330,7 +1322,7 @@ struct ContentView: View {
 
     /// Opens a pin in the carousel with all pinned locations as the navigation universe,
     /// in sidebar order (matching cachedGridSections). Used for double-clicking no-GPS pins.
-    private func openInCarousel(_ pin: PinnedLocationData) {
+    private func openInCarousel(_ pin: PinVM) {
         let location = pin.asScoutLocation()
         // Build ordered universe from the grid sections (sidebar order).
         var seen = Set<UUID>()
@@ -1344,20 +1336,46 @@ struct ContentView: View {
         )
     }
 
-    private func saveToList(_ location: ScoutLocation, _ list: LocationListData) {
+    /// Typed pin-by-uuid lookup — keeps big SwiftUI initializers from tripping the type-checker
+    /// (inline `allPins.first(where:)` closures push inference over its time budget).
+    private func pin(byUUID id: UUID) -> PinVM? { allPins.first { $0.uuid == id } }
+
+    /// Build + insert a store pin from a search/map ScoutLocation. Returns the new pin id.
+    @discardableResult
+    private func insertStorePin(from loc: ScoutLocation, listId: String?, owningProjectId: String?, sortOrder: Int) -> String {
+        let id = ScoutStore.newID()
+        let rec = PinRecord(
+            id: id, listId: listId, owningProjectId: owningProjectId,
+            name: loc.name, notes: loc.description,
+            latitude: loc.coordinate.latitude, longitude: loc.coordinate.longitude,
+            hasGPS: true, gpsFromTimeline: false, isFlagged: loc.isFlagged,
+            rotationQuarterTurns: 0, aspectRatio: 0, panelOrder: 0, sortOrder: sortOrder,
+            statusRaw: loc.status.rawValue,
+            imageSourceRaw: loc.images.first?.source.rawValue,
+            imageURL: loc.images.first?.url?.absoluteString,
+            googlePlaceId: loc.googlePlaceId,
+            googleMapsURL: loc.googleMapsURL?.absoluteString,
+            sourceURL: loc.sourceURL?.absoluteString,
+            originalFilename: nil, photoFiles: [], thumbnailFiles: [],
+            dateTaken: nil, createdAt: Date(), deletedAt: nil
+        )
+        Task { try? await ScoutStore.shared.insertPin(rec) }
+        return id
+    }
+
+    private func saveToList(_ location: ScoutLocation, _ list: ListVM) {
         // If this location is already a saved pin (id == pin.uuid), move it instead of copying.
         if let existing = allPins.first(where: { $0.uuid == location.id }) {
             movePin(existing, to: list)
             return
         }
         list.pins.forEach { $0.sortOrder += 1 }
-        let pin = PinnedLocationData(context: modelContext, from: location, sortOrder: 0)
-        pin.list = list
-        cachePhotos(for: pin, from: location)
+        let id = insertStorePin(from: location, listId: list.id, owningProjectId: nil, sortOrder: 0)
+        cachePhotos(pinId: id, from: location)
     }
 
     /// Save from the carousel: to a chosen list, or as a general unfiled pin (list == nil).
-    private func savePinned(_ location: ScoutLocation, to list: LocationListData?) {
+    private func savePinned(_ location: ScoutLocation, to list: ListVM?) {
         // If this location is already a saved pin, move/reassign rather than duplicate.
         if let existing = allPins.first(where: { $0.uuid == location.id }) {
             if let list {
@@ -1368,12 +1386,11 @@ struct ContentView: View {
         }
         if let list {
             list.pins.forEach { $0.sortOrder += 1 }
-            let pin = PinnedLocationData(context: modelContext, from: location, sortOrder: 0)
-            pin.list = list
-            cachePhotos(for: pin, from: location)
+            let id = insertStorePin(from: location, listId: list.id, owningProjectId: nil, sortOrder: 0)
+            cachePhotos(pinId: id, from: location)
         } else {
-            let pin = PinnedLocationData(context: modelContext, from: location)
-            cachePhotos(for: pin, from: location)
+            let id = insertStorePin(from: location, listId: nil, owningProjectId: nil, sortOrder: 0)
+            cachePhotos(pinId: id, from: location)
         }
     }
 
@@ -1386,24 +1403,17 @@ struct ContentView: View {
     /// pin uuid — so two rows sharing a uuid select together and can collide on the map. (Photo
     /// files are named by a separate id, so reassigning a pin's uuid never orphans its photos.)
     private func repairDuplicateUUIDs() {
-        var changed = false
-        var seenLists = Set<UUID>()
-        for list in allLists where !seenLists.insert(list.uuid).inserted { list.uuid = UUID(); changed = true }
-        var seenPins = Set<UUID>()
-        for pin in allPins where !seenPins.insert(pin.uuid).inserted { pin.uuid = UUID(); changed = true }
-        var seenProjects = Set<UUID>()
-        for project in allProjects where !seenProjects.insert(project.uuid).inserted { project.uuid = UUID(); changed = true }
-        var seenScripts = Set<UUID>()
-        for script in allProjects.flatMap(\.scripts) where !seenScripts.insert(script.uuid).inserted { script.uuid = UUID(); changed = true }
-        // Purge orphaned scene links (no list) left behind by the old .nullify delete rule — they
-        // served no purpose and could paint a "ghost" highlight in the script.
-        for h in allScriptHighlights where h.list == nil { modelContext.delete(h); changed = true }
-        if changed { try? modelContext.save() }
+        // Store rows use unique UUID text primary keys, so duplicate-uuid repair is unnecessary
+        // (offline inserts can't collide). We still purge any orphaned scene links (no list) that
+        // could paint a "ghost" highlight in the script.
+        for h in allScriptHighlights where h.list == nil {
+            Task { try? await ScoutStore.shared.deleteHighlight(id: h.id) }
+        }
     }
 
     /// Photo-grid section title for a list: the list name, prefixed by its folder ancestor
     /// chain ("Folder / List"), and never the project name — matching how it reads in the sidebar.
-    private func gridSectionTitle(for list: LocationListData) -> String {
+    private func gridSectionTitle(for list: ListVM) -> String {
         var parts = [list.name]
         var node = list.parentList
         while let n = node { parts.insert(n.name, at: 0); node = n.parentList }
@@ -1443,71 +1453,82 @@ struct ContentView: View {
     }
 
     /// Creates a new list in the open project and assigns the pending script range to it.
-    private func createListAndAssignScene(named name: String, parent: LocationListData? = nil) {
-        defer { showScriptNewListSheet = false }
+    private func createListAndAssignScene(named name: String, parent: ListVM? = nil) {
+        defer { showScriptNewListSheet = false; pendingScriptRange = nil; showScriptListPicker = false }
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, let project = openProject else { return }
-        let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
-        let list = LocationListData(context: modelContext, name: trimmed, colorHex: colorHex)
-        list.project = project
+        let colorHex = ListVM.palette[project.lists.count % ListVM.palette.count]
 
+        // Determine parent + panelOrder (mirrors the sidebar's insert rules); sibling shifts
+        // persist through the VM write-through setters.
+        var parentId: String? = nil
+        var panelOrder = 0
         if let parent {
-            // Explicit folder chosen in the picker → bottom of that folder.
-            list.parentList = parent
-            list.panelOrder = (parent.liveChildLists.map(\.panelOrder).max() ?? -1) + 1
+            parentId = parent.id
+            panelOrder = (parent.liveChildLists.map(\.panelOrder).max() ?? -1) + 1
         } else if let sel = selectedSidebarList {
             if !sel.liveChildLists.isEmpty {
-                // A folder is selected → put the new list at the bottom of that folder.
-                list.parentList = sel
-                list.panelOrder = (sel.liveChildLists.map(\.panelOrder).max() ?? -1) + 1
+                parentId = sel.id
+                panelOrder = (sel.liveChildLists.map(\.panelOrder).max() ?? -1) + 1
             } else {
-                // A list is selected → place the new list right AFTER it, among its siblings
-                // (top-level or inside the same folder). Shift later siblings down to make room.
-                list.parentList = sel.parentList
+                parentId = sel.parentList?.id
                 let siblings = sel.parentList?.liveChildLists
                     ?? project.lists.filter { $0.parentList == nil && $0.deletedAt == nil }
-                for sibling in siblings where sibling.panelOrder > sel.panelOrder {
-                    sibling.panelOrder += 1
-                }
-                list.panelOrder = sel.panelOrder + 1
+                for sibling in siblings where sibling.panelOrder > sel.panelOrder { sibling.panelOrder += 1 }
+                panelOrder = sel.panelOrder + 1
             }
         } else {
-            // No selection → top level at the top (matches the sidebar's "New List").
             for existing in project.lists where existing.parentList == nil { existing.panelOrder += 1 }
             project.importedPhotos.forEach { $0.panelOrder += 1 }
-            list.panelOrder = 0
+            panelOrder = 0
         }
-        assignScriptSelection(to: list)   // creates the highlight + saves
+
+        let inputs = currentSceneLinkInputs()
+        let projectId = project.id, pId = parentId, pOrder = panelOrder
+        Task {
+            if let listId = try? await ScoutStore.shared.createList(
+                projectId: projectId, name: trimmed, colorHex: colorHex,
+                parentListId: pId, panelOrder: pOrder), let inputs {
+                insertSceneLink(inputs, listId: listId)
+            }
+        }
     }
 
     /// The list/folder currently selected in the sidebar (anchor first), if any.
-    private var selectedSidebarList: LocationListData? {
+    private var selectedSidebarList: ListVM? {
         let id = selection.anchor ?? selection.ids.first
         guard let id else { return nil }
         return allLists.first { $0.uuid == id && $0.deletedAt == nil }
     }
 
-    /// Creates a ScriptHighlight linking the pending script range to the chosen list.
-    private func assignScriptSelection(to list: LocationListData) {
-        defer { pendingScriptRange = nil; showScriptListPicker = false }
-        guard let range = pendingScriptRange, let script = activeScript else { return }
+    /// The script-highlight fields for the pending selection (computed once, inserted with a listId).
+    private struct SceneLinkInputs { let scriptId: String; let start: Int; let len: Int; let excerpt: String; let before: String; let after: String; let heading: String? }
+    private func currentSceneLinkInputs() -> SceneLinkInputs? {
+        guard let range = pendingScriptRange, let script = activeScript else { return nil }
         let ns = script.rawText as NSString
-        guard range.length > 0, range.location + range.length <= ns.length else { return }
+        guard range.length > 0, range.location + range.length <= ns.length else { return nil }
         let excerpt = ns.substring(with: range)
         let beforeLen = min(40, range.location)
         let before = ns.substring(with: NSRange(location: range.location - beforeLen, length: beforeLen))
         let afterStart = range.location + range.length
         let after = ns.substring(with: NSRange(location: afterStart, length: min(40, ns.length - afterStart)))
         let heading = FountainParser.sceneHeading(in: script.rawText, before: range.location)
-        let h = ScriptHighlight(context: modelContext, rangeStart: range.location, rangeLength: range.length,
-                                excerpt: excerpt, contextBefore: before, contextAfter: after,
-                                sceneHeading: heading)
-        h.script = script
-        h.list = list
-        try? modelContext.save()
+        return SceneLinkInputs(scriptId: script.id, start: range.location, len: range.length,
+                               excerpt: excerpt, before: before, after: after, heading: heading)
+    }
+    private func insertSceneLink(_ inp: SceneLinkInputs, listId: String) {
+        Task { try? await ScoutStore.shared.createHighlight(
+            scriptId: inp.scriptId, listId: listId, rangeStart: inp.start, rangeLength: inp.len,
+            excerpt: inp.excerpt, contextBefore: inp.before, contextAfter: inp.after, sceneHeading: inp.heading) }
     }
 
-    /// Deletes any ScriptHighlight(s) of the active script that overlap `range` (right-click
+    /// Creates a scene-link highlight linking the pending script range to the chosen list.
+    private func assignScriptSelection(to list: ListVM) {
+        defer { pendingScriptRange = nil; showScriptListPicker = false }
+        if let inp = currentSceneLinkInputs() { insertSceneLink(inp, listId: list.id) }
+    }
+
+    /// Deletes any HighlightVM(s) of the active script that overlap `range` (right-click
     /// "Remove Highlight"). Works regardless of whether the link's list still exists — the surest
     /// way to clear a stray highlight.
     private func removeScriptHighlight(overlapping range: NSRange) {
@@ -1518,8 +1539,7 @@ struct ContentView: View {
             return NSIntersectionRange(hr, range).length > 0
         }
         guard !victims.isEmpty else { return }
-        for h in victims { modelContext.delete(h) }
-        try? modelContext.save()
+        for h in victims { Task { try? await ScoutStore.shared.deleteHighlight(id: h.id) } }
     }
 
     /// Opens a script highlight: switch to Script mode, show its script, scroll to & select it.
@@ -1538,7 +1558,7 @@ struct ContentView: View {
         DispatchQueue.main.async { revealListUUID = list.uuid }
     }
 
-    private func openScriptHighlight(_ highlight: ScriptHighlight) {
+    private func openScriptHighlight(_ highlight: HighlightVM) {
         guard let script = highlight.script else { return }
         activeScriptUUID = script.uuid
         withAnimation(.spring(duration: 0.3)) { viewMode = .script }
@@ -1599,7 +1619,7 @@ struct ContentView: View {
     }
 
     private func deletePinFromCarousel(_ loc: ScoutLocation) {
-        guard let pin = allPins.first(where: { $0.uuid == loc.id }) else { return }
+        guard let pin = pin(byUUID: loc.id) else { return }
         pin.deletedAt = Date()
         try? modelContext.save()
         rebuildPinCaches()
@@ -1642,43 +1662,24 @@ struct ContentView: View {
     }
 
     /// Moves an existing pin out of wherever it lives and into `list`.
-    private func movePin(_ pin: PinnedLocationData, to list: LocationListData) {
-        // Detach from current list.
-        if let oldList = pin.list {
-            oldList.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
-            pin.list = nil
-        }
-        // Detach from project top-level (importedPhotos).
-        if let project = pin.owningProject {
-            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-            pin.owningProject = nil
-        }
+    private func movePin(_ pin: PinVM, to list: ListVM) {
+        // Bump existing pins down so the moved pin lands at the top.
         list.pins.forEach { $0.sortOrder += 1 }
-        pin.sortOrder = 0
-        // Set the inverse only — SwiftData adds the pin to list.pins automatically.
-        // A manual append here too would duplicate it in list.pins.
-        pin.list = list
-        // owningProject must stay nil for list pins — it's the inverse of importedPhotos,
-        // so setting it would add the pin back to the project top-level as a duplicate.
-        try? modelContext.save()
+        // Reassign in one store write: into the list, clear any project-top-level ownership.
+        Task { try? await ScoutStore.shared.movePin(id: pin.id, toList: list.id, owningProjectId: nil, sortOrder: 0) }
     }
 
     /// Download a saved pin's photos to disk and capture its source links, so it displays
     /// offsline (never refetches) and shows its Google Maps / source link in the popover.
-    private func cachePhotos(for pin: PinnedLocationData, from location: ScoutLocation) {
-        let placeId = pin.googlePlaceId
-        let uuid = pin.uuid
+    private func cachePhotos(pinId: String, from location: ScoutLocation) {
+        let uuid = UUID(uuidString: pinId) ?? UUID()
+        let placeId = location.googlePlaceId
         Task { @MainActor in
             let result = await PinPhotoStore.download(for: location, placeId: placeId, pinUUID: uuid)
-            var changed = false
-            if !result.files.isEmpty { pin.photoFiles = result.files; changed = true }
-            if pin.googleMapsURLString == nil, let url = result.googleMapsURL {
-                pin.googleMapsURLString = url.absoluteString; changed = true
+            if !result.files.isEmpty {
+                try? await ScoutStore.shared.setPinPhotoFiles(id: pinId, photoFiles: result.files, thumbnailFiles: [])
             }
-            if pin.sourceURLString == nil, let url = result.sourceURL {
-                pin.sourceURLString = url.absoluteString; changed = true
-            }
-            if changed { try? modelContext.save() }
+            // googleMapsURL / sourceURL are captured at insert time from the location.
         }
     }
 
@@ -1781,7 +1782,7 @@ struct ContentView: View {
     /// from their original source (stored URLs, Google place ID, or a name+area search).
     private func backfillPhotos() {
         for pin in allPins where pin.photoFiles.isEmpty {
-            cachePhotos(for: pin, from: pin.asScoutLocation())
+            cachePhotos(pinId: pin.id, from: pin.asScoutLocation())
         }
     }
 
@@ -1790,15 +1791,15 @@ struct ContentView: View {
     /// File headers are read off the main actor; the model is updated back on main.
     private func backfillAspectRatios() {
         // (persistentModelID, thumbnail file URL) for every pin still missing an aspect.
-        let targets: [(PersistentIdentifier, URL)] = allPins.compactMap { pin in
+        let targets: [(String, URL)] = allPins.compactMap { pin in
             guard pin.aspectRatio == 0, pin.deletedAt == nil else { return nil }
             guard let file = pin.thumbnailFiles.first ?? pin.photoFiles.first else { return nil }
-            return (pin.persistentModelID, PinPhotoStore.fileURL(file))
+            return (pin.id, PinPhotoStore.fileURL(file))
         }
         guard !targets.isEmpty else { return }
         Task {
-            let results: [PersistentIdentifier: Double] = await Task.detached(priority: .utility) {
-                var r: [PersistentIdentifier: Double] = [:]
+            let results: [String: Double] = await Task.detached(priority: .utility) {
+                var r: [String: Double] = [:]
                 for (id, url) in targets {
                     if let a = PhotoImportService.aspectRatio(ofImageAt: url) { r[id] = a }
                 }
@@ -1806,7 +1807,7 @@ struct ContentView: View {
             }.value
             guard !results.isEmpty else { return }
             for pin in allPins {
-                if let a = results[pin.persistentModelID], pin.aspectRatio == 0 { pin.aspectRatio = a }
+                if let a = results[pin.id], pin.aspectRatio == 0 { pin.aspectRatio = a }
             }
             try? modelContext.save()
             // ScoutLocations cached before backfill lack the aspect → drop and rebuild.
@@ -1823,9 +1824,8 @@ struct ContentView: View {
         showProjectsPanel = false
         activeListIDs = []
         openProjectUUID = ""
-        let all = (try? modelContext.fetch(FetchDescriptor(ProjectData.self))) ?? []
-        for project in all { modelContext.delete(project) }
-        try? modelContext.save()
+        let ids = allProjects.map(\.id)
+        Task { for id in ids { try? await ScoutStore.shared.purgeProject(id: id) } }
     }
 
     private var scoutMap: some View {
@@ -1851,7 +1851,7 @@ struct ContentView: View {
             onPinDoubleClicked: { loc in
                 // Saved pin → reuse the full grid-ordered carousel; otherwise (search
                 // result) open the carousel with just this location's photos.
-                if let pin = allPins.first(where: { $0.uuid == loc.id }) {
+                if let pin = pin(byUUID: loc.id) {
                     openInCarousel(pin)
                 } else if !loc.images.isEmpty {
                     let imgs = loc.fullResImages.isEmpty ? loc.images : loc.fullResImages
@@ -1869,7 +1869,7 @@ struct ContentView: View {
             onRevealInGrid: { loc in revealInGrid(loc.id) },
             onToggleFlagLocation: { loc in toggleFlag([loc.id]) },
             onDeleteLocation: { loc in trashPins([loc.id]) },
-            onOriginalFilePath: { loc in allPins.first(where: { $0.uuid == loc.id })?.originalFilePath },
+            onOriginalFilePath: { loc in pin(byUUID: loc.id)?.originalFilePath },
             isSelectedPinned: allPins.contains(where: { $0.uuid == selectedLocation?.id }),
             boundaryPolygons: cachedBoundaryPolygons,
             boundaryOpacity: boundaryOpacity,

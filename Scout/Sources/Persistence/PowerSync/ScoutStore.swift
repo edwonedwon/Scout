@@ -229,6 +229,21 @@ final class ScoutStore {
         }
     }
 
+    /// Permanently delete a list and everything under it (descendant lists + all their pins).
+    /// Postgres FK cascade does this on sync; locally we delete the subtree so the device matches.
+    func purgeList(id: String) async throws {
+        try await db.writeTransaction { tx in
+            let cte = "WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT l.id FROM location_lists l JOIN sub ON l.parent_list_id = sub.id) "
+            try tx.execute(sql: cte + "DELETE FROM pins WHERE list_id IN (SELECT id FROM sub)", parameters: [id])
+            try tx.execute(sql: cte + "DELETE FROM location_lists WHERE id IN (SELECT id FROM sub)", parameters: [id])
+        }
+    }
+
+    /// Permanently delete a single pin row.
+    func purgePin(id: String) async throws {
+        try await db.execute(sql: "DELETE FROM pins WHERE id = ?", parameters: [id])
+    }
+
     // MARK: - List writes
 
     @discardableResult
@@ -260,6 +275,10 @@ final class ScoutStore {
 
     func setListPanelOrder(id: String, order: Int) async throws {
         try await db.execute(sql: "UPDATE location_lists SET panel_order = ? WHERE id = ?", parameters: [order, id])
+    }
+
+    func setListSortOrder(id: String, order: Int) async throws {
+        try await db.execute(sql: "UPDATE location_lists SET sort_order = ? WHERE id = ?", parameters: [order, id])
     }
 
     /// Re-parent a list (drag into/out of a folder). Pass nil to move it back to top level.
@@ -307,6 +326,19 @@ final class ScoutStore {
 
     func setPinSortOrder(id: String, order: Int) async throws {
         try await db.execute(sql: "UPDATE pins SET sort_order = ? WHERE id = ?", parameters: [order, id])
+    }
+
+    func setPinPanelOrder(id: String, order: Int) async throws {
+        try await db.execute(sql: "UPDATE pins SET panel_order = ? WHERE id = ?", parameters: [order, id])
+    }
+
+    func setPinAspectRatio(id: String, ratio: Double) async throws {
+        try await db.execute(sql: "UPDATE pins SET aspect_ratio = ? WHERE id = ?", parameters: [ratio, id])
+    }
+
+    func setPinCoordinate(id: String, latitude: Double, longitude: Double, hasGPS: Bool) async throws {
+        try await db.execute(sql: "UPDATE pins SET latitude = ?, longitude = ?, has_gps = ? WHERE id = ?",
+                             parameters: [latitude, longitude, hasGPS ? 1 : 0, id])
     }
 
     /// Move a pin into a list (or, with listId nil + a projectId, into the project's loose photos).

@@ -336,7 +336,9 @@ struct IOSSidebarDrawer: View {
         }
         .tint(.accentColor)
         .sheet(isPresented: $showShare) {
-            ProjectShareSheet(project: project, onDismiss: { showShare = false })
+            // Account-based sharing (project_members + RLS). The iOS tree is still Core Data, so
+            // pass the project's ids directly rather than the VM-typed ProjectShareSheet.
+            ShareProjectView(projectId: project.uuid.uuidString, projectName: project.name)
         }
     }
 

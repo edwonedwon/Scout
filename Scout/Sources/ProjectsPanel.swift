@@ -106,39 +106,21 @@ private let sidebarTopPadding: CGFloat = 55
 /// purgeTrigger handler), so no @ObservedObject view is bound to a model being deleted.
 @MainActor
 func purgeAllProjects(_ context: NSManagedObjectContext) {
-    let projects: [ProjectData] = (try? context.fetch(FetchDescriptor(ProjectData.self))) ?? []
-    let listsBefore: [LocationListData] = (try? context.fetch(FetchDescriptor(LocationListData.self))) ?? []
-
+    let mac = MacStore.shared
     DebugLogger.shared.log("--- BEFORE PURGE ---", level: .warning, tag: "Purge")
-    DebugLogger.shared.log("Projects (\(projects.count)):", level: .info, tag: "Purge")
-    for p in projects {
+    DebugLogger.shared.log("Projects (\(mac.projects.count)):", level: .info, tag: "Purge")
+    for p in mac.projects {
         DebugLogger.shared.log("  📁 \"\(p.name)\" — \(p.lists.count) lists, \(p.importedPhotos.count) photos", level: .info, tag: "Purge")
         for list in p.lists {
             DebugLogger.shared.log("    📋 \"\(list.name)\" — \(list.pins.count) pins", level: .info, tag: "Purge")
         }
     }
-    let orphans = listsBefore.filter { $0.project == nil }
-    if !orphans.isEmpty {
-        DebugLogger.shared.log("Orphaned lists (\(orphans.count)):", level: .info, tag: "Purge")
-        for list in orphans {
-            DebugLogger.shared.log("  📋 \"\(list.name)\" (no project)", level: .info, tag: "Purge")
-        }
+    // FK cascade removes lists/pins/scripts; purge each project through the store.
+    let ids = mac.projects.map(\.id)
+    Task {
+        for id in ids { try? await ScoutStore.shared.purgeProject(id: id) }
+        DebugLogger.shared.log("--- PURGE COMPLETE (\(ids.count) projects) ---", level: .success, tag: "Purge")
     }
-
-    // Per-object delete on the view context. Called only after the detail view is unmounted
-    // (purgeTrigger), so no @ObservedObject is bound to a victim. We delete pins and lists
-    // explicitly (relationships are Nullify, not cascade — cascade is done in code), and since
-    // EVERYTHING is being removed there are no dangling references to fault on.
-    for pin in (try? context.fetch(FetchDescriptor(PinnedLocationData.self))) ?? [] { context.delete(pin) }
-    for list in (try? context.fetch(FetchDescriptor(LocationListData.self))) ?? [] { context.delete(list) }
-    for project in (try? context.fetch(FetchDescriptor(ProjectData.self))) ?? [] { context.delete(project) }
-    try? context.save()
-
-    let projectsAfter = (try? context.fetch(FetchDescriptor(ProjectData.self))) ?? []
-    let listsAfter = (try? context.fetch(FetchDescriptor(LocationListData.self))) ?? []
-    DebugLogger.shared.log("--- AFTER PURGE ---", level: .warning, tag: "Purge")
-    DebugLogger.shared.log("Projects remaining: \(projectsAfter.count)", level: projectsAfter.isEmpty ? .success : .error, tag: "Purge")
-    DebugLogger.shared.log("Lists remaining: \(listsAfter.count)", level: listsAfter.isEmpty ? .success : .error, tag: "Purge")
 }
 
 // MARK: - Projects panel
@@ -147,31 +129,30 @@ struct ProjectsPanel: View {
     @Environment(\.managedObjectContext) private var modelContext
     @EnvironmentObject private var auth: AuthManager
     @State private var showSignOutConfirm = false
-    @FetchRequest(sortDescriptors: [SortDescriptor(\ProjectData.createdAt)],
-                  predicate: NSPredicate(format: "deletedAt == nil"))
-    private var projects: FetchedResults<ProjectData>
-    @FetchRequest(sortDescriptors: [SortDescriptor(\ProjectData.createdAt)],
-                  predicate: NSPredicate(format: "deletedAt != nil"))
-    private var trashedProjects: FetchedResults<ProjectData>
+    /// Store-backed VM graph (PowerSync) — replaces the Core Data @FetchRequests. Same-named
+    /// computed properties keep the rest of the panel body unchanged.
+    @ObservedObject private var mac = MacStore.shared
+    private var projects: [ProjectVM] { mac.projects.filter { $0.deletedAt == nil }.sorted { $0.createdAt < $1.createdAt } }
+    private var trashedProjects: [ProjectVM] { mac.projects.filter { $0.deletedAt != nil }.sorted { $0.createdAt < $1.createdAt } }
 
     /// THE shared selection store (sidebar + grid + map), owned by ContentView.
     var selection: SelectionStore
-    @Binding var activeListIDs: Set<PersistentIdentifier>
+    @Binding var activeListIDs: Set<String>
     /// Projects whose uncategorized (loose) photos are hidden from map + grid.
-    @Binding var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier>
+    @Binding var hiddenUncategorizedProjectIDs: Set<String>
     /// Toggled by the debug "Clear Old Lists" button. Flipping it runs the full purge
     /// here (where navPath lives) so nav-pop + delete happen in one atomic transaction.
     var purgeTrigger: Bool = false
-    var onFitToList: (([PinnedLocationData]) -> Void)? = nil
-    var onSelectPin: ((PinnedLocationData) -> Void)? = nil
-    var onZoomToPin: ((PinnedLocationData) -> Void)? = nil
+    var onFitToList: (([PinVM]) -> Void)? = nil
+    var onSelectPin: ((PinVM) -> Void)? = nil
+    var onZoomToPin: ((PinVM) -> Void)? = nil
     var onClearPin: (() -> Void)? = nil
-    var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
-    var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
+    var onRevealPins: (([PinVM]) -> Void)? = nil
+    var onOpenCarousel: ((PinVM) -> Void)? = nil
     /// Opens a script in the Script view (third island mode).
-    var onOpenScript: ((ScriptData) -> Void)? = nil
+    var onOpenScript: ((ScriptVM) -> Void)? = nil
     /// Opens a script scene (highlight) in the Script view, scrolled to its range.
-    var onOpenScriptHighlight: ((ScriptHighlight) -> Void)? = nil
+    var onOpenScriptHighlight: ((HighlightVM) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView): show the pin in the grid / on the map.
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -184,25 +165,25 @@ struct ProjectsPanel: View {
     /// Set by ContentView (M key or grid context menu) to open the move sheet for these UUIDs.
     @Binding var externalMoveUUIDs: [UUID]
 
-    /// Persisted open project (stored as UUID string, resolved to ProjectData on load).
+    /// Persisted open project (stored as UUID string, resolved to ProjectVM on load).
     @AppStorage("nav.openProjectUUID") private var openProjectUUID: String = ""
     /// Persisted expanded list UUIDs, comma-separated.
     @AppStorage("nav.expandedListUUIDs") private var expandedListUUIDs: String = ""
 
-    @State private var navPath: [ProjectData] = []
+    @State private var navPath: [ProjectVM] = []
     @State private var showAddProject = false
     @State private var newProjectName = ""
-    @State private var renamingProject: ProjectData? = nil
+    @State private var renamingProject: ProjectVM? = nil
     @State private var renameText = ""
     @State private var expandedProjectTrash = false
     @State private var showEmptyProjectTrashConfirm = false
     /// Project highlighted by a single click. Single click only selects; double click opens.
-    @State private var selectedProjectID: NSManagedObjectID? = nil
+    @State private var selectedProjectID: String? = nil
 
     var body: some View {
         NavigationStack(path: $navPath) {
             projectList
-                .navigationDestination(for: ProjectData.self) { project in
+                .navigationDestination(for: ProjectVM.self) { project in
                     ProjectDetailView(
                         project: project,
                         selection: selection,
@@ -264,7 +245,7 @@ struct ProjectsPanel: View {
                 text: $newProjectName,
                 onDismiss: { showAddProject = false }
             ) { name in
-                _ = ProjectData(context: modelContext, name: name)
+                Task { try? await ScoutStore.shared.createProject(name: name) }
                 showAddProject = false
             }
         }
@@ -274,59 +255,54 @@ struct ProjectsPanel: View {
         Set(expandedListUUIDs.split(separator: ",").map(String.init))
     }
 
+    @ViewBuilder
+    private func projectRow(_ project: ProjectVM) -> some View {
+        let isSelected = selectedProjectID == project.id
+        let listCount = project.liveLists.count
+        let photoCount = project.livePhotos.count
+        VStack(alignment: .leading, spacing: 2) {
+            Text(project.name).font(.headline)
+            if listCount + photoCount > 0 {
+                Text("\(listCount) lists · \(photoCount) photos")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+        )
+        .onTapGesture { selectedProjectID = project.id }
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            selectedProjectID = project.id
+            navPath = [project]
+        })
+        .listRowBackground(Color.clear)
+        .contextMenu {
+            Button {
+                renameText = project.name
+                renamingProject = project
+            } label: { Label("Rename", systemImage: "pencil") }
+            Divider()
+            Button(role: .destructive) {
+                if navPath.first?.id == project.id {
+                    navPath = []
+                    openProjectUUID = ""
+                    expandedListUUIDs = ""
+                }
+                project.deletedAt = Date()   // write-through soft-delete (Trash)
+            } label: { Label("Move to Trash", systemImage: "trash") }
+        }
+    }
+
     private var projectList: some View {
         List {
             Color.clear.frame(height: sidebarTopPadding).listRowBackground(Color.clear)
             ForEach(projects) { project in
-                let isSelected = selectedProjectID == project.persistentModelID
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(project.name)
-                        .font(.headline)
-                    let listCount = project.liveLists.count
-                    let photoCount = project.livePhotos.count
-                    if listCount + photoCount > 0 {
-                        Text("\(listCount) lists · \(photoCount) photos")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.vertical, 4)
-                .padding(.horizontal, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-                )
-                // Single click selects only; double click opens. (A plain NavigationLink
-                // navigates on single click — not what we want for projects.)
-                .onTapGesture { selectedProjectID = project.persistentModelID }
-                .simultaneousGesture(TapGesture(count: 2).onEnded {
-                    selectedProjectID = project.persistentModelID
-                    navPath = [project]
-                })
-                .listRowBackground(Color.clear)
-                .contextMenu {
-                    Button {
-                        renameText = project.name
-                        renamingProject = project
-                    } label: {
-                        Label("Rename", systemImage: "pencil")
-                    }
-                    Divider()
-                    Button(role: .destructive) {
-                        // Soft-delete: move to Trash (auto-purged after 30 days).
-                        if navPath.first?.persistentModelID == project.persistentModelID {
-                            navPath = []
-                            openProjectUUID = ""
-                            expandedListUUIDs = ""
-                        }
-                        project.deletedAt = Date()
-                        try? modelContext.save()
-                    } label: {
-                        Label("Move to Trash", systemImage: "trash")
-                    }
-                }
+                projectRow(project)
             }
             // Trash section — trashed projects, collapsible, with Empty Trash + 30-day auto-purge.
             if !trashedProjects.isEmpty {
@@ -416,7 +392,7 @@ struct ProjectsPanel: View {
         }
     }
 
-    private func trashedProjectRow(_ project: ProjectData) -> some View {
+    private func trashedProjectRow(_ project: ProjectVM) -> some View {
         HStack(spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(project.name.isEmpty ? "(untitled)" : project.name)
@@ -449,8 +425,8 @@ struct ProjectsPanel: View {
     }
 
     /// Permanently deletes a trashed project and all its contents. Must pop nav first if open.
-    private func purgeProject(_ project: ProjectData) {
-        if navPath.first?.persistentModelID == project.persistentModelID {
+    private func purgeProject(_ project: ProjectVM) {
+        if navPath.first?.id == project.id {
             var tx = Transaction(); tx.disablesAnimations = true
             withTransaction(tx) { navPath = [] }
             openProjectUUID = ""
@@ -464,35 +440,11 @@ struct ProjectsPanel: View {
         }
     }
 
-    private func hardDeleteProject(_ project: ProjectData) {
-        // Cascade is NOT reliably honored with the CloudKit store, so we delete the whole graph
-        // by hand. CRITICAL: we must DELETE every child, not just detach it — an earlier version
-        // detached pins inside lists (`pin.list = nil`) but only deleted loose importedPhotos,
-        // leaking every in-list pin as an orphan (1,660 of them surfaced in the Data Inspector).
-        // Snapshot each relationship into an Array first: deleting / nil-ing the inverse mutates
-        // the live relationship set, which is unsafe to mutate mid-iteration.
-        // `project.lists` is the flat set of ALL lists (parent + child), so one pass covers them.
-        for list in Array(project.lists) {
-            for pin in Array(list.pins) {
-                pin.list = nil
-                modelContext.delete(pin)
-            }
-            list.project = nil
-            list.parentList = nil
-            modelContext.delete(list)
-        }
-        for pin in Array(project.importedPhotos) {
-            pin.owningProject = nil
-            modelContext.delete(pin)
-        }
-        for script in Array(project.scripts) {
-            for h in Array(script.highlights) { modelContext.delete(h) }
-            modelContext.delete(script)
-        }
-        modelContext.delete(project)
-        try? modelContext.save()
-        // Sweep any records the manual cascade (or a CloudKit merge) might have stranded.
-        OrphanSweeper.sweep(context: modelContext)
+    private func hardDeleteProject(_ project: ProjectVM) {
+        // Postgres FK cascade reaches lists/pins/scripts/highlights; purgeProject also deletes the
+        // whole subtree locally so the device matches immediately.
+        let id = project.id
+        Task { try? await ScoutStore.shared.purgeProject(id: id) }
     }
 
     /// Permanently deletes all trashed projects and their contents.
@@ -526,18 +478,19 @@ struct ProjectsPanel: View {
 /// thousands of off-screen rows is an O(1) set assignment with no visual work.
 // MARK: - Sidebar item (unified photo + list)
 
+@MainActor
 private enum SidebarItem: Identifiable {
-    case photo(PinnedLocationData)
-    case list(LocationListData)
+    case photo(PinVM)
+    case list(ListVM)
     /// The virtual "Uncategorized" row — a reorderable, collapsible top-level pseudo-list
     /// that holds every loose photo (no list). Identified by its owning project.
-    case uncategorized(ProjectData)
+    case uncategorized(ProjectVM)
 
-    var id: PersistentIdentifier {
+    var id: String {
         switch self {
-        case .photo(let p): return p.persistentModelID
-        case .list(let l): return l.persistentModelID
-        case .uncategorized(let proj): return proj.persistentModelID
+        case .photo(let p): return p.id
+        case .list(let l): return l.id
+        case .uncategorized(let proj): return proj.id
         }
     }
 
@@ -582,13 +535,13 @@ private enum DropMode { case before, into, after }
 /// that accept nesting (lists) carve out a center "into" band; all rows have before/after
 /// edge bands for reordering. Reports the live zone for preview and performs the drop.
 private struct SidebarRowDropDelegate: DropDelegate {
-    let targetID: PersistentIdentifier
+    let targetID: String
     let allowNest: Bool
     let height: () -> CGFloat
-    let onTargetChange: (PersistentIdentifier?, DropMode) -> Void
+    let onTargetChange: (String?, DropMode) -> Void
     /// Clear the highlight only if this row still owns it — avoids a race where the old row's
     /// dropExited fires after the new row's dropEntered and wipes the fresh target.
-    let onExit: (PersistentIdentifier) -> Void
+    let onExit: (String) -> Void
     let onPerform: (DropMode, [NSItemProvider]) -> Bool
 
     func dropEntered(info: DropInfo) { onTargetChange(targetID, mode(info)) }
@@ -632,23 +585,23 @@ private struct SidebarRowDropDelegate: DropDelegate {
 // MARK: - Project detail (unified reorderable list)
 
 private struct ProjectDetailView: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     /// THE shared selection store (sidebar + grid + map). Held as a plain `var` (NOT
     /// @ObservedObject) so mutating it never re-runs THIS view's body / its ForEach — only the
     /// PinRow/ListRow leaves observe it and repaint. Observing it here would rebuild the whole
     /// list on every click (the documented sidebar-selection perf footgun).
     var selection: SelectionStore
     var initialExpandedUUIDs: Set<String> = []
-    @Binding var activeListIDs: Set<PersistentIdentifier>
-    @Binding var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier>
-    var onFitToList: (([PinnedLocationData]) -> Void)?
-    var onSelectPin: ((PinnedLocationData) -> Void)?
-    var onZoomToPin: ((PinnedLocationData) -> Void)?
+    @Binding var activeListIDs: Set<String>
+    @Binding var hiddenUncategorizedProjectIDs: Set<String>
+    var onFitToList: (([PinVM]) -> Void)?
+    var onSelectPin: ((PinVM) -> Void)?
+    var onZoomToPin: ((PinVM) -> Void)?
     var onClearPin: (() -> Void)?
-    var onRevealPins: (([PinnedLocationData]) -> Void)? = nil
-    var onOpenCarousel: ((PinnedLocationData) -> Void)? = nil
-    var onOpenScript: ((ScriptData) -> Void)? = nil
-    var onOpenScriptHighlight: ((ScriptHighlight) -> Void)? = nil
+    var onRevealPins: (([PinVM]) -> Void)? = nil
+    var onOpenCarousel: ((PinVM) -> Void)? = nil
+    var onOpenScript: ((ScriptVM) -> Void)? = nil
+    var onOpenScriptHighlight: ((HighlightVM) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView).
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -668,12 +621,12 @@ private struct ProjectDetailView: View {
     @State private var newListName = ""
     /// Global "show flagged only" filter — shared with the grid/map via AppStorage.
     @AppStorage("filter.flaggedOnly") private var flaggedOnly = false
-    @State private var expandedListIDs: Set<PersistentIdentifier> = []
+    @State private var expandedListIDs: Set<String> = []
     // Whether the Uncategorized pseudo-list is expanded to show its loose photos.
     @State private var uncategorizedExpanded = false
     // Whether the "Scripts" pseudo-list is expanded to show imported scripts.
     @State private var scriptsExpanded = false
-    @State private var renamingList: LocationListData? = nil
+    @State private var renamingList: ListVM? = nil
     @State private var renameListText = ""
     @State private var isBackfilling = false
     @State private var showMovePopup = false
@@ -697,13 +650,13 @@ private struct ProjectDetailView: View {
     @State private var listProxyBox = ProxyBox()
     // Undo stack of trashed-photo batches (each batch = the persistent ids trashed together).
     // ⌘Z pops the last batch and restores those photos.
-    @State private var trashUndoStack: [[PersistentIdentifier]] = []
+    @State private var trashUndoStack: [[String]] = []
     @State private var expandedTrash = false
-    @State private var expandedTrashListIDs: Set<PersistentIdentifier> = []
+    @State private var expandedTrashListIDs: Set<String> = []
     // Lists awaiting a delete confirmation, plus any photos selected alongside them. A list is
     // never deleted without this confirm step; on confirm it (and its photos) go to the Trash.
-    @State private var listsPendingDelete: [LocationListData] = []
-    @State private var pinsPendingDelete: [PinnedLocationData] = []
+    @State private var listsPendingDelete: [ListVM] = []
+    @State private var pinsPendingDelete: [PinVM] = []
     @State private var showDeleteListConfirm = false
 
     /// True whenever a sidebar text field is active (rename, new-list name, or the move popup's
@@ -713,7 +666,7 @@ private struct ProjectDetailView: View {
     }
     // Top-level row currently under a reorder drag — a blue insertion line is drawn at its
     // top edge to preview where the dragged item will land (it inserts before this row).
-    @State private var dropTargetID: PersistentIdentifier? = nil
+    @State private var dropTargetID: String? = nil
     // Whether the current drag will reorder (line before/after the row) or nest into a list
     // (the whole row highlights). Decided from the cursor's vertical position within the row.
     @State private var dropMode: DropMode = .before
@@ -724,7 +677,7 @@ private struct ProjectDetailView: View {
     // drag has actually ended.
     @State private var dropClearWork: DispatchWorkItem? = nil
     // Measured heights per row so the drop delegate can map cursor-Y to a drop zone.
-    @State private var rowHeights: [PersistentIdentifier: CGFloat] = [:]
+    @State private var rowHeights: [String: CGFloat] = [:]
     // macOS mouse-event monitor that clears a stuck drop indicator. SwiftUI's DropDelegate
     // sometimes fails to deliver dropExited when a drag is cancelled, leaving the blue
     // insertion line on screen; releasing the mouse (or the next click) clears it here.
@@ -738,26 +691,26 @@ private struct ProjectDetailView: View {
 
     /// One flat, ordered entry per visible row. Carries both the `uuid` (the selection key,
     /// shared with the grid and map) and the `scrollID` (the row's ScrollViewReader identity,
-    /// which is its PersistentIdentifier). Used for shift-range selection and arrow-key nav.
-    private struct FlatRow { let uuid: UUID; let scrollID: PersistentIdentifier }
+    /// which is its String). Used for shift-range selection and arrow-key nav.
+    private struct FlatRow { let uuid: UUID; let scrollID: String }
     private var flatVisibleRows: [FlatRow] {
         var result: [FlatRow] = []
         for item in cachedSidebarItems {
             switch item {
             case .photo(let pin):
-                result.append(FlatRow(uuid: pin.uuid, scrollID: pin.persistentModelID))
+                result.append(FlatRow(uuid: pin.uuid, scrollID: pin.id))
             case .list(let list):
-                result.append(FlatRow(uuid: list.uuid, scrollID: list.persistentModelID))
-                if expandedListIDs.contains(list.persistentModelID) {
+                result.append(FlatRow(uuid: list.uuid, scrollID: list.id))
+                if expandedListIDs.contains(list.id) {
                     for p in flaggedFirst(list.pins.filter { $0.deletedAt == nil }) {
-                        result.append(FlatRow(uuid: p.uuid, scrollID: p.persistentModelID))
+                        result.append(FlatRow(uuid: p.uuid, scrollID: p.id))
                     }
                 }
             case .uncategorized(let proj):
-                result.append(FlatRow(uuid: proj.uuid, scrollID: proj.persistentModelID))
+                result.append(FlatRow(uuid: proj.uuid, scrollID: proj.id))
                 if uncategorizedExpanded {
                     for p in loosePhotos {
-                        result.append(FlatRow(uuid: p.uuid, scrollID: p.persistentModelID))
+                        result.append(FlatRow(uuid: p.uuid, scrollID: p.id))
                     }
                 }
             }
@@ -798,7 +751,7 @@ private struct ProjectDetailView: View {
         } else if let list = findList(uuid: id) {
             // Only navigate the map for a list that's actually visible on it. Clicking a hidden
             // (eye-off) list just selects it and leaves the map untouched.
-            if activeListIDs.contains(list.persistentModelID) {
+            if activeListIDs.contains(list.id) {
                 onClearPin?()
                 // Exclude soft-deleted pins — they're hidden from the sidebar but still
                 // attached to the list relationship; a trashed pin far from the cluster
@@ -818,9 +771,9 @@ private struct ProjectDetailView: View {
             }
         } else if let list = findList(uuid: id) {
             // Double-click toggles the list's visibility (eye on/off).
-            if activeListIDs.contains(list.persistentModelID) {
+            if activeListIDs.contains(list.id) {
                 // Toggling OFF — just hide this one.
-                activeListIDs.remove(list.persistentModelID)
+                activeListIDs.remove(list.id)
             } else {
                 // Toggling ON — "solo" this list. Hide every OTHER top-level list/folder,
                 // keeping only this list's own top-level ancestor. Other folders are flipped
@@ -828,28 +781,28 @@ private struct ProjectDetailView: View {
                 var topAncestor = list
                 while let parent = topAncestor.parentList { topAncestor = parent }
                 for top in project.lists where top.parentList == nil {
-                    if top.persistentModelID == topAncestor.persistentModelID {
-                        activeListIDs.insert(top.persistentModelID)
+                    if top.id == topAncestor.id {
+                        activeListIDs.insert(top.id)
                     } else {
-                        activeListIDs.remove(top.persistentModelID)
+                        activeListIDs.remove(top.id)
                     }
                 }
                 // If this list lives inside a folder, also hide its sibling lists so only
                 // this one shows within the folder; its folder is made visible below.
                 if let folder = list.parentList {
-                    for sibling in folder.childLists where sibling.persistentModelID != list.persistentModelID {
-                        activeListIDs.remove(sibling.persistentModelID)
+                    for sibling in folder.childLists where sibling.id != list.id {
+                        activeListIDs.remove(sibling.id)
                     }
                 }
                 // Ensure the clicked list and its whole ancestor chain (folder) are active so
                 // the folder visibility gate lets it show through.
-                var node: LocationListData? = list
+                var node: ListVM? = list
                 while let n = node {
-                    activeListIDs.insert(n.persistentModelID)
+                    activeListIDs.insert(n.id)
                     node = n.parentList
                 }
                 // Uncategorized is a top-level list too — hide it when soloing a real list.
-                hiddenUncategorizedProjectIDs.insert(project.persistentModelID)
+                hiddenUncategorizedProjectIDs.insert(project.id)
             }
         }
     }
@@ -858,23 +811,23 @@ private struct ProjectDetailView: View {
     /// top-level list) when turning on — exactly how double-clicking a normal list behaves.
     private func handleUncategorizedDoubleTap() {
         if uncategorizedVisible {
-            hiddenUncategorizedProjectIDs.insert(project.persistentModelID)
+            hiddenUncategorizedProjectIDs.insert(project.id)
         } else {
             for top in project.lists where top.parentList == nil {
-                activeListIDs.remove(top.persistentModelID)
+                activeListIDs.remove(top.id)
             }
-            hiddenUncategorizedProjectIDs.remove(project.persistentModelID)
+            hiddenUncategorizedProjectIDs.remove(project.id)
         }
     }
 
     /// Whether this project's uncategorized (loose) photos are shown on map + grid.
     private var uncategorizedVisible: Bool {
-        !hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
+        !hiddenUncategorizedProjectIDs.contains(project.id)
     }
 
     /// True when every list and the uncategorized photos are currently visible.
     private var allListsVisible: Bool {
-        project.lists.allSatisfy { activeListIDs.contains($0.persistentModelID) } && uncategorizedVisible
+        project.lists.allSatisfy { activeListIDs.contains($0.id) } && uncategorizedVisible
     }
 
     /// Master visibility row at the top of the sidebar: one eye that shows/hides everything,
@@ -900,12 +853,12 @@ private struct ProjectDetailView: View {
     /// Toggles every list AND the uncategorized photos in this project on/off at once.
     /// Used by Option-clicking any eye.
     private func setProjectVisibility(_ visible: Bool) {
-        let pid = project.persistentModelID
+        let pid = project.id
         if visible {
-            project.lists.forEach { activeListIDs.insert($0.persistentModelID) }
+            project.lists.forEach { activeListIDs.insert($0.id) }
             hiddenUncategorizedProjectIDs.remove(pid)
         } else {
-            project.lists.forEach { activeListIDs.remove($0.persistentModelID) }
+            project.lists.forEach { activeListIDs.remove($0.id) }
             hiddenUncategorizedProjectIDs.insert(pid)
         }
     }
@@ -922,14 +875,14 @@ private struct ProjectDetailView: View {
         // If the target is a collapsed list and we're moving into it, expand it first
         // and step to its first pin (or last pin when moving up).
         let targetUUID = flat[next].uuid
-        if let list = cachedSidebarItems.compactMap({ item -> LocationListData? in
+        if let list = cachedSidebarItems.compactMap({ item -> ListVM? in
                 if case .list(let l) = item { return l } else { return nil }
             }).first(where: { $0.uuid == targetUUID }),
-           !expandedListIDs.contains(list.persistentModelID) {
+           !expandedListIDs.contains(list.id) {
             let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil })
             if !pins.isEmpty {
                 var tx = Transaction(animation: .none); tx.disablesAnimations = true
-                withTransaction(tx) { _ = expandedListIDs.insert(list.persistentModelID) }
+                withTransaction(tx) { _ = expandedListIDs.insert(list.id) }
                 // Re-compute flat after expansion to find the pin's index.
                 let newFlat = flatVisibleRows
                 let targetPin = delta > 0 ? pins.first! : pins.last!
@@ -951,7 +904,7 @@ private struct ProjectDetailView: View {
         }
 
         // .none anchor: only scrolls enough to make the row visible; doesn't re-center.
-        // Scroll by the row's ScrollViewReader identity (PersistentIdentifier), not the uuid.
+        // Scroll by the row's ScrollViewReader identity (String), not the uuid.
         listProxyBox.proxy?.scrollTo(target.scrollID, anchor: .none)
     }
 
@@ -978,7 +931,7 @@ private struct ProjectDetailView: View {
     }
 
     /// This project's live (non-trashed) loose photos — the contents of Uncategorized.
-    private var loosePhotos: [PinnedLocationData] {
+    private var loosePhotos: [PinVM] {
         project.importedPhotos
             .filter { $0.deletedAt == nil }
             .sorted { $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt }
@@ -989,20 +942,13 @@ private struct ProjectDetailView: View {
 
     // MARK: - Folder nesting
 
-    private func nestList(_ list: LocationListData, into folder: LocationListData) {
-        list.parentList?.childLists.removeAll { $0.persistentModelID == list.persistentModelID }
-        list.parentList = folder
-        if !folder.childLists.contains(where: { $0.persistentModelID == list.persistentModelID }) {
-            folder.childLists.append(list)
-        }
-        try? modelContext.save()
+    private func nestList(_ list: ListVM, into folder: ListVM) {
+        Task { try? await ScoutStore.shared.setListParent(id: list.id, parentListId: folder.id) }
         rebuildSidebarItems()
     }
 
-    private func unnestList(_ list: LocationListData) {
-        list.parentList?.childLists.removeAll { $0.persistentModelID == list.persistentModelID }
-        list.parentList = nil
-        try? modelContext.save()
+    private func unnestList(_ list: ListVM) {
+        Task { try? await ScoutStore.shared.setListParent(id: list.id, parentListId: nil) }
         rebuildSidebarItems()
     }
 
@@ -1010,8 +956,8 @@ private struct ProjectDetailView: View {
     ///  • photo(s)/pin dropped INTO the child list (mode `.into`) → move them into it, and
     ///  • a sibling child list reordered before/after (mode `.before`/`.after`).
     /// External files/images are imported into the child list when dropped onto it.
-    private func performChildRowDrop(_ providers: [NSItemProvider], folder: LocationListData,
-                                      target child: LocationListData, mode: DropMode) -> Bool {
+    private func performChildRowDrop(_ providers: [NSItemProvider], folder: ListVM,
+                                      target child: ListVM, mode: DropMode) -> Bool {
         // External files/images → import directly into this nested list.
         if mode == .into, tryImportDrop(providers, into: child) { return true }
 
@@ -1045,15 +991,15 @@ private struct ProjectDetailView: View {
 
     /// Reorders a child list within its folder — same pattern as `reorder(_:before:after:)`
     /// but scoped to the folder's `childLists` array.
-    private func reorderChild(_ dragged: LocationListData, in folder: LocationListData,
-                               before target: LocationListData, after: Bool) {
+    private func reorderChild(_ dragged: ListVM, in folder: ListVM,
+                               before target: ListVM, after: Bool) {
         var children = folder.childLists.sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
         }
-        guard let from = children.firstIndex(where: { $0.persistentModelID == dragged.persistentModelID }),
-              dragged.persistentModelID != target.persistentModelID else { return }
+        guard let from = children.firstIndex(where: { $0.id == dragged.id }),
+              dragged.id != target.id else { return }
         let moving = children.remove(at: from)
-        guard let to = children.firstIndex(where: { $0.persistentModelID == target.persistentModelID }) else { return }
+        guard let to = children.firstIndex(where: { $0.id == target.id }) else { return }
         children.insert(moving, at: after ? to + 1 : to)
         for (i, child) in children.enumerated() { child.panelOrder = i }
         try? modelContext.save()
@@ -1081,7 +1027,7 @@ private struct ProjectDetailView: View {
     }
 
     /// Finds a pin anywhere in the project — top-level or inside any list.
-    private func findPin(uuid: String) -> PinnedLocationData? {
+    private func findPin(uuid: String) -> PinVM? {
         if let p = project.importedPhotos.first(where: { $0.uuid.uuidString == uuid }) { return p }
         for list in project.lists {
             if let p = list.pins.first(where: { $0.uuid.uuidString == uuid }) { return p }
@@ -1090,7 +1036,7 @@ private struct ProjectDetailView: View {
     }
 
     /// UUID overload — pins are selected by their stable `uuid` (the shared selection key).
-    private func findPin(uuid: UUID) -> PinnedLocationData? {
+    private func findPin(uuid: UUID) -> PinVM? {
         if let p = project.importedPhotos.first(where: { $0.uuid == uuid }) { return p }
         for list in project.lists {
             if let p = list.pins.first(where: { $0.uuid == uuid }) { return p }
@@ -1100,19 +1046,19 @@ private struct ProjectDetailView: View {
 
     /// Lists currently selected in the sidebar (the shared selection holds list uuids too),
     /// excluding trashed lists. Drives the "e" scene-type shortcut.
-    private var selectedLists: [LocationListData] {
+    private var selectedLists: [ListVM] {
         selection.ids.compactMap { findList(uuid: $0) }.filter { $0.deletedAt == nil }
     }
 
     /// Finds a list/folder anywhere in the project by its `uuid`.
-    private func findList(uuid: UUID) -> LocationListData? {
+    private func findList(uuid: UUID) -> ListVM? {
         project.lists.first(where: { $0.uuid == uuid })
     }
 
     /// "Reveal in List": expand the pin's whole list/folder ancestor chain (so its row exists),
     /// select/highlight it, and scroll the sidebar to it.
     /// Scrolls the sidebar list to a row, retrying since freshly-expanded rows are lazy.
-    private func scrollSidebar(to target: PersistentIdentifier, using proxy: ScrollViewProxy) {
+    private func scrollSidebar(to target: String, using proxy: ScrollViewProxy) {
         for delay in [0.1, 0.35, 0.6] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 withAnimation { proxy.scrollTo(target, anchor: .center) }
@@ -1123,7 +1069,7 @@ private struct ProjectDetailView: View {
     /// Expands ONLY the revealed pin's list/folder chain (collapsing every other list), selects
     /// it, and returns its scroll id (the caller scrolls to it via the ScrollViewReader proxy).
     @discardableResult
-    private func revealPin(_ uuid: UUID) -> PersistentIdentifier? {
+    private func revealPin(_ uuid: UUID) -> String? {
         guard let pin = findPin(uuid: uuid) else { return nil }
         // A sidebar search filter can hide the pin's row entirely — clear it so the row exists.
         if !searchText.isEmpty { searchText = "" }
@@ -1131,9 +1077,9 @@ private struct ProjectDetailView: View {
         withTransaction(tx) {
             if let list = pin.list {
                 // Collapse everything else; expand ONLY this pin's list + ancestor folders.
-                var chain = Set<PersistentIdentifier>()
-                var node: LocationListData? = list
-                while let n = node { chain.insert(n.persistentModelID); node = n.parentList }
+                var chain = Set<String>()
+                var node: ListVM? = list
+                while let n = node { chain.insert(n.id); node = n.parentList }
                 expandedListIDs = chain
                 uncategorizedExpanded = false
             } else {
@@ -1145,31 +1091,31 @@ private struct ProjectDetailView: View {
         // Highlight it in every view.
         selection.ids = [pin.uuid]
         selection.anchor = pin.uuid
-        return pin.persistentModelID
+        return pin.id
     }
 
     /// Expands a list's ancestor folder chain (so its row exists), selects it, and returns its
     /// scroll id — for revealing a list when its script highlight is clicked.
     @discardableResult
-    private func revealList(_ uuid: UUID) -> PersistentIdentifier? {
+    private func revealList(_ uuid: UUID) -> String? {
         guard let list = findList(uuid: uuid) else { return nil }
         if !searchText.isEmpty { searchText = "" }
         var tx = Transaction(animation: .none); tx.disablesAnimations = true
         withTransaction(tx) {
-            var chain = Set<PersistentIdentifier>()
-            var node: LocationListData? = list.parentList
-            while let n = node { chain.insert(n.persistentModelID); node = n.parentList }
+            var chain = Set<String>()
+            var node: ListVM? = list.parentList
+            while let n = node { chain.insert(n.id); node = n.parentList }
             expandedListIDs = chain
             uncategorizedExpanded = false
         }
         selection.ids = [list.uuid]
         selection.anchor = list.uuid
-        return list.persistentModelID
+        return list.id
     }
 
     /// Flagged ("favorite filming location") pins first — keeping each group's sortOrder — so
     /// flagging a pin floats it to the top of its list, like pinning a chat.
-    private func flaggedFirst(_ pins: [PinnedLocationData]) -> [PinnedLocationData] {
+    private func flaggedFirst(_ pins: [PinVM]) -> [PinVM] {
         pins.sorted { a, b in
             a.isFlagged == b.isFlagged ? a.sortOrder < b.sortOrder : a.isFlagged
         }
@@ -1177,7 +1123,7 @@ private struct ProjectDetailView: View {
 
     /// Toggles the flagged state of `primary` (plus any other selected pins). If any are
     /// unflagged, flags them all; otherwise unflags them all.
-    private func toggleFlag(_ primary: PinnedLocationData) {
+    private func toggleFlag(_ primary: PinVM) {
         var pins = [primary]
         if selection.contains(primary.uuid) {
             for id in selection.ids where id != primary.uuid {
@@ -1208,22 +1154,17 @@ private struct ProjectDetailView: View {
     /// Drop onto a pin row INSIDE a list: reorder there (before/after the row) or import files.
     /// `beforeNeighbor` is the pin immediately above `target` (nil if `target` is first), used to
     /// place the dropped photo correctly for a `.before` drop.
-    private func reorderPinDrop(_ providers: [NSItemProvider], list: LocationListData,
-                                target: PinnedLocationData, beforeNeighbor: PinnedLocationData?,
+    private func reorderPinDrop(_ providers: [NSItemProvider], list: ListVM,
+                                target: PinVM, beforeNeighbor: PinVM?,
                                 mode: DropMode) -> Bool {
         if tryImportDrop(providers, into: list) { return true }
-        let after: PinnedLocationData? = (mode == .after) ? target : beforeNeighbor
+        let after: PinVM? = (mode == .after) ? target : beforeNeighbor
         return loadDropPin(providers, intoList: list, afterPin: after)
     }
 
     /// Removes a pin from wherever it currently lives (list or top-level).
-    private func detach(_ pin: PinnedLocationData) {
-        if let list = pin.list {
-            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
-            pin.list = nil
-        }
-        project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-        pin.owningProject = nil
+    private func detach(_ pin: PinVM) {
+        Task { try? await ScoutStore.shared.movePin(id: pin.id, toList: nil, owningProjectId: nil) }
     }
 
     // MARK: - Drop loading
@@ -1298,20 +1239,18 @@ private struct ProjectDetailView: View {
                 guard primaryPin.list != nil else { return } // already top-level, nothing to do
 
                 // If the dragged pin is part of a multi-selection, move all selected pins.
-                var pinsToMove: [PinnedLocationData] = [primaryPin]
+                var pinsToMove: [PinVM] = [primaryPin]
                 if selection.contains(primaryPin.uuid) {
                     for id in selection.ids where id != primaryPin.uuid {
                         if let p = findPin(uuid: id), p.list != nil { pinsToMove.append(p) }
                     }
                 }
+                let pid = project.id
                 for pin in pinsToMove {
-                    detach(pin)
-                    pin.owningProject = project
-                    pin.panelOrder = atTop ? -1 : sidebarItems.count + 1
-                    project.importedPhotos.append(pin)
+                    pin.panelOrder = atTop ? -1 : sidebarItems.count + 1   // write-through
+                    Task { try? await ScoutStore.shared.movePin(id: pin.id, toList: nil, owningProjectId: pid) }
                 }
                 normalizeOrder()
-                try? modelContext.save()
             }
         }
         return true
@@ -1322,44 +1261,47 @@ private struct ProjectDetailView: View {
     /// photo. Routing those through `movePinsToList` instead re-expanded each pin via the
     /// SIDEBAR selection (a different selection from the grid's), pulling in unrelated pins —
     /// that was the "shift-select 3, list count jumps by 5–6" drag bug.
-    private func movePins(_ pins: [PinnedLocationData], intoList list: LocationListData, afterPin: PinnedLocationData? = nil) {
+    private func movePins(_ pins: [PinVM], intoList list: ListVM, afterPin: PinVM? = nil) {
         // Only pins not already in the target list. De-dupe by identity so a payload that
         // accidentally repeats an id can't move (or count) the same pin twice.
-        var seen = Set<PersistentIdentifier>()
+        var seen = Set<String>()
         // De-dupe only. Do NOT skip pins already in `list`: a drop onto a row in the SAME list
         // is a reorder, and the sortOrder logic below repositions them correctly (detach +
         // re-add). Skipping same-list pins made reordering within a list a silent no-op.
-        let moving = pins.filter { seen.insert($0.persistentModelID).inserted }
+        let moving = pins.filter { seen.insert($0.id).inserted }
         guard !moving.isEmpty else { return }
-        for pin in moving {
-            detach(pin)
-            // Setting the inverse relationship is enough — SwiftData adds the pin to
-            // list.pins automatically. Do NOT also insert into list.pins, or the pin ends
-            // up in the array twice (caused a "Duplicate values for key" crash on the map).
-            pin.list = list
-        }
         // Compute the final order purely via sortOrder. Existing members (excluding the just-
         // moved ones) keep their order; the moved pins go after `afterPin`, else to the front.
-        let movingIDs = Set(moving.map(\.persistentModelID))
+        let movingIDs = Set(moving.map(\.id))
         var ordered = list.pins
-            .filter { !movingIDs.contains($0.persistentModelID) }
+            .filter { !movingIDs.contains($0.id) }
             .sorted { $0.sortOrder < $1.sortOrder }
         if let after = afterPin, moving.count == 1,
-           let idx = ordered.firstIndex(where: { $0.persistentModelID == after.persistentModelID }) {
+           let idx = ordered.firstIndex(where: { $0.id == after.id }) {
             ordered.insert(contentsOf: moving, at: idx + 1)
         } else {
             ordered.insert(contentsOf: moving, at: 0)
         }
-        for (i, p) in ordered.enumerated() { p.sortOrder = i }
+        // One store write per pin: moved pins are reassigned into the list at their final index;
+        // existing members just get their new sortOrder. The watch update refreshes the graph.
+        let listId = list.id
+        Task {
+            for (i, p) in ordered.enumerated() {
+                if movingIDs.contains(p.id) {
+                    try? await ScoutStore.shared.movePin(id: p.id, toList: listId, owningProjectId: nil, sortOrder: i)
+                } else {
+                    try? await ScoutStore.shared.setPinSortOrder(id: p.id, order: i)
+                }
+            }
+        }
         normalizeOrder()
-        try? modelContext.save()
     }
 
     /// Sidebar single-pin/row drag: moves `primaryPin` PLUS any other pins selected in the
     /// SIDEBAR into `list`. Only for sidebar drags ("pin:"/"photo:" rows), where one dragged
     /// row should carry the whole sidebar selection. Grid drags must use `movePins` instead.
-    private func movePinsToList(_ primaryPin: PinnedLocationData, intoList list: LocationListData, afterPin: PinnedLocationData? = nil) {
-        var pins: [PinnedLocationData] = [primaryPin]
+    private func movePinsToList(_ primaryPin: PinVM, intoList list: ListVM, afterPin: PinVM? = nil) {
+        var pins: [PinVM] = [primaryPin]
         if selection.contains(primaryPin.uuid) {
             for id in selection.ids where id != primaryPin.uuid {
                 if let pin = findPin(uuid: id) { pins.append(pin) }
@@ -1369,8 +1311,8 @@ private struct ProjectDetailView: View {
     }
 
     /// Moves a pin (and any other selected pins) out of its list into Uncategorized (loose).
-    private func moveSelectedPinsToUncategorized(primary: PinnedLocationData) {
-        var pins: [PinnedLocationData] = [primary]
+    private func moveSelectedPinsToUncategorized(primary: PinVM) {
+        var pins: [PinVM] = [primary]
         if selection.contains(primary.uuid) {
             for id in selection.ids where id != primary.uuid {
                 if let p = findPin(uuid: id) { pins.append(p) }
@@ -1380,27 +1322,25 @@ private struct ProjectDetailView: View {
     }
 
     /// Detaches a single pin from wherever it lives and makes it a loose (Uncategorized) photo.
-    private func movePinToUncategorized(_ pin: PinnedLocationData) {
+    private func movePinToUncategorized(_ pin: PinVM) {
         guard pin.list != nil else { return }   // already loose
-        detach(pin)
-        pin.owningProject = project
-        pin.panelOrder = (loosePhotos.map(\.panelOrder).max() ?? -1) + 1
-        project.importedPhotos.append(pin)
+        let pid = project.id
+        pin.panelOrder = (loosePhotos.map(\.panelOrder).max() ?? -1) + 1   // write-through
+        Task { try? await ScoutStore.shared.movePin(id: pin.id, toList: nil, owningProjectId: pid) }
         normalizeOrder()
-        try? modelContext.save()
     }
 
-    /// Finds a pin anywhere in the project by its PersistentIdentifier.
-    private func findPin(byID id: PersistentIdentifier) -> PinnedLocationData? {
-        if let p = project.importedPhotos.first(where: { $0.persistentModelID == id }) { return p }
+    /// Finds a pin anywhere in the project by its String.
+    private func findPin(byID id: String) -> PinVM? {
+        if let p = project.importedPhotos.first(where: { $0.id == id }) { return p }
         for list in project.lists {
-            if let p = list.pins.first(where: { $0.persistentModelID == id }) { return p }
+            if let p = list.pins.first(where: { $0.id == id }) { return p }
         }
         return nil
     }
 
     /// Loads drag payload and moves the pin into a list, optionally after a specific pin.
-    private func loadDropPin(_ providers: [NSItemProvider], intoList list: LocationListData, afterPin: PinnedLocationData? = nil) -> Bool {
+    private func loadDropPin(_ providers: [NSItemProvider], intoList list: ListVM, afterPin: PinVM? = nil) -> Bool {
         guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
             return false
         }
@@ -1435,16 +1375,14 @@ private struct ProjectDetailView: View {
             switch target {
             case .list(let list):
                 // Move pin (and any other selected pins) into this list.
-                if pin.list?.persistentModelID == list.persistentModelID { return false }
+                if pin.list?.id == list.id { return false }
                 movePinsToList(pin, intoList: list)
             case .photo(let targetPin):
                 // Move out to top-level, placed near the target photo.
-                detach(pin)
-                pin.owningProject = project
-                pin.panelOrder = targetPin.panelOrder
-                project.importedPhotos.append(pin)
+                let pid = project.id
+                pin.panelOrder = targetPin.panelOrder   // write-through
+                Task { try? await ScoutStore.shared.movePin(id: pin.id, toList: nil, owningProjectId: pid) }
                 normalizeOrder()
-                try? modelContext.save()
             case .uncategorized:
                 // Dropping a list pin onto Uncategorized removes it from its list.
                 moveSelectedPinsToUncategorized(primary: pin)
@@ -1458,8 +1396,7 @@ private struct ProjectDetailView: View {
             let uuid = String(dragID.dropFirst(5))
             if let list = project.lists.first(where: { $0.uuid.uuidString == uuid }),
                list.parentList != nil {
-                list.parentList?.childLists.removeAll { $0.persistentModelID == list.persistentModelID }
-                list.parentList = nil
+                Task { try? await ScoutStore.shared.setListParent(id: list.id, parentListId: nil) }
                 reorderToTopLevel(list, near: target, after: after)
                 return true
             }
@@ -1481,7 +1418,7 @@ private struct ProjectDetailView: View {
     }
 
     /// Re-inserts a now-top-level model (e.g. a just-unnested list) next to `target`.
-    private func reorderToTopLevel(_ list: LocationListData, near target: SidebarItem, after: Bool) {
+    private func reorderToTopLevel(_ list: ListVM, near target: SidebarItem, after: Bool) {
         rebuildSidebarItems()
         reorder(.list(list), before: target, after: after)
     }
@@ -1509,13 +1446,13 @@ private struct ProjectDetailView: View {
 
     /// Soft-deletes a photo by moving it to the Trash (keeps its list/project membership so
     /// it can be restored in place). Pushes an undo batch so ⌘Z brings it back.
-    private func deletePin(_ pin: PinnedLocationData) {
+    private func deletePin(_ pin: PinVM) {
         trashPins([pin])
     }
 
     /// Moves photos to the Trash and records an undo batch. Lists are never trashed —
     /// they're not photos — so this only touches pins.
-    private func trashPins(_ pins: [PinnedLocationData]) {
+    private func trashPins(_ pins: [PinVM]) {
         let live = pins.filter { $0.deletedAt == nil }
         guard !live.isEmpty else { return }
         let now = Date()
@@ -1523,7 +1460,7 @@ private struct ProjectDetailView: View {
             pin.deletedAt = now
             selection.ids.remove(pin.uuid)
         }
-        trashUndoStack.append(live.map { $0.persistentModelID })
+        trashUndoStack.append(live.map { $0.id })
         normalizeOrder()
         try? modelContext.save()
     }
@@ -1534,8 +1471,8 @@ private struct ProjectDetailView: View {
     private func deleteSelectedItems() {
         let ids = selection.ids
         guard !ids.isEmpty else { return }
-        var pins: [PinnedLocationData] = []
-        var lists: [LocationListData] = []
+        var pins: [PinVM] = []
+        var lists: [ListVM] = []
         for id in ids {
             if let pin = findPin(uuid: id) {
                 pins.append(pin)
@@ -1556,7 +1493,7 @@ private struct ProjectDetailView: View {
     }
 
     /// Requests deletion of a single list (from its row's context menu) — always confirms.
-    private func requestDeleteList(_ list: LocationListData) {
+    private func requestDeleteList(_ list: ListVM) {
         listsPendingDelete = [list]
         pinsPendingDelete = []
         showDeleteListConfirm = true
@@ -1586,18 +1523,18 @@ private struct ProjectDetailView: View {
     }
 
     /// Live (non-trashed) photo count in a list, including its descendant child lists.
-    private func photoCount(in list: LocationListData) -> Int {
+    private func photoCount(in list: ListVM) -> Int {
         list.pins.filter { $0.deletedAt == nil }.count
             + list.childLists.reduce(0) { $0 + photoCount(in: $1) }
     }
 
     /// Soft-deletes a list (and, for folders, its child lists) to the Trash. The list's photos
     /// travel with it implicitly — they stay attached, hidden because their list is trashed.
-    private func trashList(_ list: LocationListData) {
+    private func trashList(_ list: ListVM) {
         let now = Date()
-        func mark(_ l: LocationListData) {
+        func mark(_ l: ListVM) {
             if l.deletedAt == nil { l.deletedAt = now }
-            activeListIDs.remove(l.persistentModelID)
+            activeListIDs.remove(l.id)
             selection.ids.remove(l.uuid)
             for child in l.childLists { mark(child) }
         }
@@ -1607,8 +1544,8 @@ private struct ProjectDetailView: View {
     }
 
     /// Restores a trashed list (and its trashed child lists) from the Trash.
-    private func restoreList(_ list: LocationListData) {
-        func clear(_ l: LocationListData) {
+    private func restoreList(_ list: ListVM) {
+        func clear(_ l: ListVM) {
             l.deletedAt = nil
             for child in l.childLists where child.deletedAt != nil { clear(child) }
         }
@@ -1618,11 +1555,8 @@ private struct ProjectDetailView: View {
     }
 
     /// Permanently deletes a trashed list and everything under it (pins + child lists cascade).
-    private func purgeList(_ list: LocationListData) {
-        list.project = nil
-        list.parentList = nil
-        modelContext.delete(list)   // cascade removes pins and child lists
-        try? modelContext.save()
+    private func purgeList(_ list: ListVM) {
+        Task { try? await ScoutStore.shared.purgeList(id: list.id) }   // cascade removes pins + child lists
     }
 
     // MARK: - Trash
@@ -1630,7 +1564,7 @@ private struct ProjectDetailView: View {
     /// All trashed photos in this project (top-level, or individually trashed inside a LIVE
     /// list). Photos inside a trashed *list* are excluded — they travel with their list and
     /// show under it in the Trash, not as loose photos.
-    private var trashedPins: [PinnedLocationData] {
+    private var trashedPins: [PinVM] {
         var pins = project.importedPhotos.filter { $0.deletedAt != nil }
         for list in project.lists where list.deletedAt == nil {
             pins += list.pins.filter { $0.deletedAt != nil }
@@ -1640,14 +1574,14 @@ private struct ProjectDetailView: View {
 
     /// Trashed lists shown in the Trash — only the root of each trashed subtree (a trashed
     /// child whose parent is also trashed is hidden under its parent), newest first.
-    private var trashedLists: [LocationListData] {
+    private var trashedLists: [ListVM] {
         project.lists
             .filter { $0.deletedAt != nil && ($0.parentList == nil || $0.parentList?.deletedAt == nil) }
             .sorted { ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast) }
     }
 
     /// Restores a trashed photo back to wherever it lived.
-    private func restoreFromTrash(_ pin: PinnedLocationData) {
+    private func restoreFromTrash(_ pin: PinVM) {
         pin.deletedAt = nil
         normalizeOrder()
         try? modelContext.save()
@@ -1670,14 +1604,8 @@ private struct ProjectDetailView: View {
     }
 
     /// Permanently deletes a single trashed photo (right-click → Delete Permanently).
-    private func purgePin(_ pin: PinnedLocationData) {
-        if let list = pin.list {
-            list.pins.removeAll { $0.persistentModelID == pin.persistentModelID }
-        } else {
-            project.importedPhotos.removeAll { $0.persistentModelID == pin.persistentModelID }
-        }
-        modelContext.delete(pin)
-        try? modelContext.save()
+    private func purgePin(_ pin: PinVM) {
+        Task { try? await ScoutStore.shared.purgePin(id: pin.id) }
     }
 
     /// Empties the Trash — permanently deletes every trashed photo AND trashed list.
@@ -1766,7 +1694,7 @@ private struct ProjectDetailView: View {
     /// edge (mode `.before`), bottom edge (mode `.after`), or a full-row highlight when the
     /// drag will nest the dragged list into this list (mode `.into`).
     @ViewBuilder
-    private func dropIndicator(for id: PersistentIdentifier) -> some View {
+    private func dropIndicator(for id: String) -> some View {
         if dropTargetID == id {
             switch dropMode {
             case .before:
@@ -1793,7 +1721,7 @@ private struct ProjectDetailView: View {
 
     /// Transparent background view that measures and records a row's height, so the drop
     /// delegate can map the cursor's vertical position to a before/into/after zone.
-    private func rowHeightReader(_ id: PersistentIdentifier) -> some View {
+    private func rowHeightReader(_ id: String) -> some View {
         GeometryReader { geo in
             Color.clear
                 .onAppear { rowHeights[id] = geo.size.height }
@@ -1803,7 +1731,7 @@ private struct ProjectDetailView: View {
 
     /// Records the row currently under the drag and which zone (before/into/after) the cursor
     /// is in, so `dropIndicator` can preview the result.
-    private func setDropTarget(_ id: PersistentIdentifier?, mode: DropMode) {
+    private func setDropTarget(_ id: String?, mode: DropMode) {
         if dropTargetID != id { dropTargetID = id }
         if dropMode != mode { dropMode = mode }
         // Re-arm the watchdog on every drag update; it fires only after updates stop (drag ended).
@@ -1815,7 +1743,7 @@ private struct ProjectDetailView: View {
     }
 
     /// Clears the drag highlight only if `id` is still the active target (see onExit docs).
-    private func clearDropTarget(ifOwnedBy id: PersistentIdentifier) {
+    private func clearDropTarget(ifOwnedBy id: String) {
         if dropTargetID == id { dropTargetID = nil }
     }
 
@@ -1823,7 +1751,7 @@ private struct ProjectDetailView: View {
     /// moves a dragged photo into it; `.before`/`.after` reorder at the top level.
     private func performRowDrop(target: SidebarItem, mode: DropMode, providers: [NSItemProvider]) -> Bool {
         // External files/images: import into the list when dropped onto it, else top-level.
-        let importList: LocationListData? = {
+        let importList: ListVM? = {
             if case .list(let l) = target { return l }
             return nil
         }()
@@ -1859,7 +1787,7 @@ private struct ProjectDetailView: View {
             if dragID.hasPrefix("list:") {
                 let uuid = String(dragID.dropFirst(5))
                 guard let dragged = project.lists.first(where: { $0.uuid.uuidString == uuid }),
-                      dragged.persistentModelID != folder.persistentModelID else { return }
+                      dragged.id != folder.id else { return }
                 // Prevent nesting a folder into its own descendant.
                 guard !isDescendant(folder, of: dragged) else { return }
                 nestList(dragged, into: folder)
@@ -1885,10 +1813,10 @@ private struct ProjectDetailView: View {
     }
 
     /// True if `candidate` is `ancestor` or a descendant of `ancestor` (guards nesting cycles).
-    private func isDescendant(_ candidate: LocationListData, of ancestor: LocationListData) -> Bool {
-        var node: LocationListData? = candidate
+    private func isDescendant(_ candidate: ListVM, of ancestor: ListVM) -> Bool {
+        var node: ListVM? = candidate
         while let n = node {
-            if n.persistentModelID == ancestor.persistentModelID { return true }
+            if n.id == ancestor.id { return true }
             node = n.parentList
         }
         return false
@@ -1918,7 +1846,7 @@ private struct ProjectDetailView: View {
             .listRowBackground(Color.clear)
 
             if scriptsExpanded {
-                ForEach(scripts, id: \.persistentModelID) { script in
+                ForEach(scripts, id: \.id) { script in
                     scriptRow(script)
                 }
             }
@@ -1926,7 +1854,7 @@ private struct ProjectDetailView: View {
     }
 
     @ViewBuilder
-    private func scriptRow(_ script: ScriptData) -> some View {
+    private func scriptRow(_ script: ScriptVM) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "doc.plaintext").font(.caption).foregroundStyle(.secondary).frame(width: 16)
             Text(script.name).font(.body).lineLimit(1)
@@ -1946,9 +1874,8 @@ private struct ProjectDetailView: View {
         }
     }
 
-    private func deleteScript(_ script: ScriptData) {
-        modelContext.delete(script)
-        try? modelContext.save()
+    private func deleteScript(_ script: ScriptVM) {
+        Task { try? await ScoutStore.shared.deleteScript(id: script.id) }
     }
 
     /// Trash section — soft-deleted lists and photos, with Empty Trash. Auto-purged at 30 days.
@@ -1983,10 +1910,10 @@ private struct ProjectDetailView: View {
             .help("Items here are deleted automatically after 30 days")
 
             if expandedTrash {
-                ForEach(trashedListRows, id: \.persistentModelID) { list in
+                ForEach(trashedListRows, id: \.id) { list in
                     trashedListRow(list)
                 }
-                ForEach(trashed, id: \.persistentModelID) { pin in
+                ForEach(trashed, id: \.id) { pin in
                     trashedPinRow(pin)
                 }
             }
@@ -1995,7 +1922,7 @@ private struct ProjectDetailView: View {
 
     /// A single trashed-photo row in the Trash section.
     @ViewBuilder
-    private func trashedPinRow(_ pin: PinnedLocationData) -> some View {
+    private func trashedPinRow(_ pin: PinVM) -> some View {
         PinRow(pin: pin, selection: selection, onTap: { _, _ in }, onDoubleTap: {})
             .padding(.leading, 24)
             .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
@@ -2014,10 +1941,10 @@ private struct ProjectDetailView: View {
     /// A trashed list row — collapsible, shows photos inside when expanded. Same visual
     /// language as the live sidebar: chevron, list icon, name, count badge.
     @ViewBuilder
-    private func trashedListRow(_ list: LocationListData) -> some View {
+    private func trashedListRow(_ list: ListVM) -> some View {
         let pins = list.pins.sorted { $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt }
         let n = photoCount(in: list)
-        let isExpanded = expandedTrashListIDs.contains(list.persistentModelID)
+        let isExpanded = expandedTrashListIDs.contains(list.id)
 
         // Header row
         HStack(spacing: 0) {
@@ -2025,8 +1952,8 @@ private struct ProjectDetailView: View {
             Button {
                 var tx = Transaction(animation: .none); tx.disablesAnimations = true
                 withTransaction(tx) {
-                    if isExpanded { expandedTrashListIDs.remove(list.persistentModelID) }
-                    else { expandedTrashListIDs.insert(list.persistentModelID) }
+                    if isExpanded { expandedTrashListIDs.remove(list.id) }
+                    else { expandedTrashListIDs.insert(list.id) }
                 }
             } label: {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
@@ -2058,7 +1985,7 @@ private struct ProjectDetailView: View {
 
         // Expanded photos — same PinRow as the live sidebar, indented one more level
         if isExpanded {
-            ForEach(pins, id: \.persistentModelID) { pin in
+            ForEach(pins, id: \.id) { pin in
                 PinRow(pin: pin, selection: selection, onTap: { _, _ in }, onDoubleTap: {})
                     .listRowInsets(EdgeInsets(top: 0, leading: 48, bottom: 0, trailing: 0))
                     .opacity(0.6)
@@ -2079,7 +2006,7 @@ private struct ProjectDetailView: View {
     /// collapsible, reorderable among top-level rows, eye toggle. It can't be nested into a
     /// folder, always holds the project's loose photos, and is the default import target.
     @ViewBuilder
-    private func uncategorizedSection(_ proj: ProjectData, itemID: PersistentIdentifier) -> some View {
+    private func uncategorizedSection(_ proj: ProjectVM, itemID: String) -> some View {
         let searching = !trimmedSearch.isEmpty
         let isExpanded = searching || uncategorizedExpanded
         let photos = (searching ? loosePhotos.filter { nameMatches($0.name) } : loosePhotos)
@@ -2110,7 +2037,7 @@ private struct ProjectDetailView: View {
             .onDrag { beginListDrag("uncategorized") }
 
             Button {
-                let pid = proj.persistentModelID
+                let pid = proj.id
                 if currentModifierFlags().option {
                     setProjectVisibility(!uncategorizedVisible)
                 } else if uncategorizedVisible {
@@ -2194,7 +2121,7 @@ private struct ProjectDetailView: View {
 
     /// A loose (top-level) photo row.
     @ViewBuilder
-    private func topPhotoRow(_ pin: PinnedLocationData, item: SidebarItem) -> some View {
+    private func topPhotoRow(_ pin: PinVM, item: SidebarItem) -> some View {
         PinRow(
             pin: pin,
             selection: selection,
@@ -2218,10 +2145,10 @@ private struct ProjectDetailView: View {
 
     /// A list/folder header row, plus its expanded child lists and pins.
     @ViewBuilder
-    private func listSection(_ list: LocationListData, item: SidebarItem) -> some View {
+    private func listSection(_ list: ListVM, item: SidebarItem) -> some View {
         // While searching, force lists open so matching photos are visible.
         let searching = !trimmedSearch.isEmpty
-        let isExpanded = searching || expandedListIDs.contains(list.persistentModelID)
+        let isExpanded = searching || expandedListIDs.contains(list.id)
         let isFolder = !list.childLists.isEmpty
         let isNested = list.parentList != nil
         ListRow(
@@ -2233,8 +2160,8 @@ private struct ProjectDetailView: View {
             onToggleExpand: {
                 var tx = Transaction(animation: .none); tx.disablesAnimations = true
                 withTransaction(tx) {
-                    if isExpanded { expandedListIDs.remove(list.persistentModelID) }
-                    else { expandedListIDs.insert(list.persistentModelID) }
+                    if isExpanded { expandedListIDs.remove(list.id) }
+                    else { expandedListIDs.insert(list.id) }
                 }
             },
             onTap: { shift, option in handleTap(list.uuid, shift: shift, option: option) },
@@ -2270,7 +2197,7 @@ private struct ProjectDetailView: View {
             // Script scenes assigned to this list — pinned at the TOP of the list (above photos
             // and child lists). Click to jump to that spot in the script.
             let scenes = list.sceneLinks.sorted { $0.rangeStart < $1.rangeStart }
-            ForEach(scenes, id: \.persistentModelID) { scene in
+            ForEach(scenes, id: \.id) { scene in
                 sceneRow(scene, color: Color(hexString: list.colorHex))
             }
 
@@ -2280,13 +2207,13 @@ private struct ProjectDetailView: View {
                 .sorted {
                     $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
                 }.filter { !searching || nameMatches($0.name) || $0.livePins.contains { nameMatches($0.name) } }
-            ForEach(childLists, id: \.persistentModelID) { child in
+            ForEach(childLists, id: \.id) { child in
                 childListRow(child, folder: list)
             }
 
             let pins = flaggedFirst(list.pins.filter { $0.deletedAt == nil && (!flaggedOnly || $0.isFlagged) })
                 .filter { !searching || nameMatches(list.name) || nameMatches($0.name) }
-            ForEach(Array(pins.enumerated()), id: \.element.persistentModelID) { idx, pin in
+            ForEach(Array(pins.enumerated()), id: \.element.id) { idx, pin in
                 expandedPinRow(pin, in: list, indexBefore: idx > 0 ? pins[idx - 1] : nil)
             }
         }
@@ -2294,7 +2221,7 @@ private struct ProjectDetailView: View {
 
     /// A "scene" row inside an expanded list: the linked script excerpt; tap to open it.
     @ViewBuilder
-    private func sceneRow(_ scene: ScriptHighlight, color: Color) -> some View {
+    private func sceneRow(_ scene: HighlightVM, color: Color) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "text.quote").font(.caption2).foregroundStyle(color).frame(width: 16)
             VStack(alignment: .leading, spacing: 1) {
@@ -2320,15 +2247,14 @@ private struct ProjectDetailView: View {
         }
     }
 
-    private func deleteSceneLink(_ scene: ScriptHighlight) {
-        modelContext.delete(scene)
-        try? modelContext.save()
+    private func deleteSceneLink(_ scene: HighlightVM) {
+        Task { try? await ScoutStore.shared.deleteHighlight(id: scene.id) }
     }
 
     /// A pin row shown inside an expanded list, with reorder drop support.
     @ViewBuilder
-    private func expandedPinRow(_ pin: PinnedLocationData, in list: LocationListData,
-                                indexBefore beforeNeighbor: PinnedLocationData?) -> some View {
+    private func expandedPinRow(_ pin: PinVM, in list: ListVM,
+                                indexBefore beforeNeighbor: PinVM?) -> some View {
         PinRow(
             pin: pin,
             selection: selection,
@@ -2339,14 +2265,14 @@ private struct ProjectDetailView: View {
         .padding(.leading, 24)
         .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
         .contextMenu { pinContextMenu(pin) }
-        .background { rowHeightReader(pin.persistentModelID) }
-        .overlay { dropIndicator(for: pin.persistentModelID) }
+        .background { rowHeightReader(pin.id) }
+        .overlay { dropIndicator(for: pin.id) }
         .onDrag { beginPhotoDrag("pin:\(pin.uuid.uuidString)") }
         .onDrop(of: [.text, .fileURL, .image],
                 delegate: SidebarRowDropDelegate(
-                    targetID: pin.persistentModelID,
+                    targetID: pin.id,
                     allowNest: false,
-                    height: { rowHeights[pin.persistentModelID] ?? 60 },
+                    height: { rowHeights[pin.id] ?? 60 },
                     onTargetChange: { id, mode in setDropTarget(id, mode: mode) },
                     onExit: { id in clearDropTarget(ifOwnedBy: id) },
                     onPerform: { mode, providers in
@@ -2358,8 +2284,8 @@ private struct ProjectDetailView: View {
 
     /// One child-list row inside a folder, with drag-to-reorder and its pin expansion.
     @ViewBuilder
-    private func childListRow(_ child: LocationListData, folder: LocationListData) -> some View {
-        let childExpanded = expandedListIDs.contains(child.persistentModelID)
+    private func childListRow(_ child: ListVM, folder: ListVM) -> some View {
+        let childExpanded = expandedListIDs.contains(child.id)
         ListRow(
             list: child,
             isExpanded: childExpanded,
@@ -2369,8 +2295,8 @@ private struct ProjectDetailView: View {
             onToggleExpand: {
                 var tx = Transaction(animation: .none); tx.disablesAnimations = true
                 withTransaction(tx) {
-                    if childExpanded { expandedListIDs.remove(child.persistentModelID) }
-                    else { expandedListIDs.insert(child.persistentModelID) }
+                    if childExpanded { expandedListIDs.remove(child.id) }
+                    else { expandedListIDs.insert(child.id) }
                 }
             },
             onTap: { shift, option in handleTap(child.uuid, shift: shift, option: option) },
@@ -2395,10 +2321,10 @@ private struct ProjectDetailView: View {
         // passes on expand, making folders far slower to open than plain photo lists.
         // These rows are single-line and use allowNest:false (a plain before/after split
         // at the midpoint), so a constant height is exact enough for drag-reorder.
-        .overlay { dropIndicator(for: child.persistentModelID) }
+        .overlay { dropIndicator(for: child.id) }
         .onDrop(of: [.text, .fileURL, .image],
                 delegate: SidebarRowDropDelegate(
-                    targetID: child.persistentModelID,
+                    targetID: child.id,
                     // Allow nesting so the middle zone is a "drop INTO this list" target (the
                     // row highlights) — needed so photos can be dropped straight into a list
                     // that lives inside a folder, not just reordered around it.
@@ -2414,7 +2340,7 @@ private struct ProjectDetailView: View {
         if childExpanded {
             // Scene links pinned at the top of the child list too.
             let scenes = child.sceneLinks.sorted { $0.rangeStart < $1.rangeStart }
-            ForEach(scenes, id: \.persistentModelID) { scene in
+            ForEach(scenes, id: \.id) { scene in
                 sceneRow(scene, color: Color(hexString: child.colorHex))
                     .padding(.leading, 18)
             }
@@ -2438,11 +2364,11 @@ private struct ProjectDetailView: View {
     /// Right-click menu for a sidebar pin row — uses the SHARED pin menu (origin .sidebar), so
     /// it's identical to the grid/map menus aside from the sidebar-only "Reveal in Photo Grid"
     /// and "Reveal on Map" options.
-    @ViewBuilder private func pinContextMenu(_ pin: PinnedLocationData) -> some View {
+    @ViewBuilder private func pinContextMenu(_ pin: PinVM) -> some View {
         pinContextMenuItems(.sidebar, sidebarPinMenuActions(pin))
     }
 
-    private func sidebarPinMenuActions(_ pin: PinnedLocationData) -> PinMenuActions {
+    private func sidebarPinMenuActions(_ pin: PinVM) -> PinMenuActions {
         let multi = isInMultiSelection(pin.uuid)
         var revealFinder: (() -> Void)? = nil
         #if os(macOS)
@@ -2502,7 +2428,7 @@ private struct ProjectDetailView: View {
             if !initialExpandedUUIDs.isEmpty {
                 expandedListIDs = Set(
                     project.lists.filter { initialExpandedUUIDs.contains($0.uuid.uuidString) }
-                                 .map(\.persistentModelID)
+                                 .map(\.id)
                 )
             }
             #if os(macOS)
@@ -2550,7 +2476,7 @@ private struct ProjectDetailView: View {
         .onChange(of: expandedListIDs) { _, ids in
             // Persist current expanded state as UUID strings (stable across relaunches).
             let uuids = project.lists
-                .filter { ids.contains($0.persistentModelID) }
+                .filter { ids.contains($0.id) }
                 .map(\.uuid.uuidString)
             onExpandedChanged?(uuids)
         }
@@ -2625,15 +2551,12 @@ private struct ProjectDetailView: View {
                 text: $newListName,
                 onDismiss: { showAddList = false }
             ) { name in
-                let colorHex = LocationListData.palette[project.lists.count % LocationListData.palette.count]
-                let list = LocationListData(context: modelContext, name: name, colorHex: colorHex)
-                // Shift every existing item down to make room at the top.
+                let colorHex = ListVM.palette[project.lists.count % ListVM.palette.count]
+                // Shift every existing item down to make room at the top (write-through).
                 for existing in project.lists { existing.panelOrder += 1 }
                 project.importedPhotos.forEach { $0.panelOrder += 1 }
-                list.panelOrder = 0
-                list.project = project
-                project.lists.append(list)
-                try? modelContext.save()
+                let pid = project.id
+                Task { try? await ScoutStore.shared.createList(projectId: pid, name: name, colorHex: colorHex, panelOrder: 0) }
                 showAddList = false
             }
         }
@@ -2645,7 +2568,7 @@ private struct ProjectDetailView: View {
             // and the sidebar rows already reflect it. Overwriting it with [pin.uuid] on every
             // highlight change clobbered grid/map MULTI-select back to a single item — that was
             // the long-standing "can't multi-select in the grid" bug.
-            listProxyBox.proxy?.scrollTo(pin.persistentModelID, anchor: nil)
+            listProxyBox.proxy?.scrollTo(pin.id, anchor: nil)
         }
         .onChange(of: revealInListUUID) { _, uuid in
             guard let uuid, let target = revealPin(uuid) else { return }
@@ -2743,7 +2666,7 @@ private struct ProjectDetailView: View {
         // iOS uses PhotosPicker instead — see IOS_PLAN.md (not wired into this Mac sidebar).
     }
 
-    /// Imports one or more `.fountain` scripts: reads each file's text into a new ScriptData
+    /// Imports one or more `.fountain` scripts: reads each file's text into a new ScriptVM
     /// (copied in, not referenced) under the project's "Scripts" section.
     private func importScript() {
         #if os(macOS)
@@ -2755,14 +2678,14 @@ private struct ProjectDetailView: View {
         panel.allowsOtherFileTypes = true
         guard panel.runModal() == .OK else { return }
         var nextOrder = (project.scripts.map(\.sortOrder).max() ?? -1) + 1
+        let pid = project.id
         for url in panel.urls {
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let name = url.deletingPathExtension().lastPathComponent
-            let script = ScriptData(context: modelContext, name: name, rawText: text, sortOrder: nextOrder)
+            let order = nextOrder
+            Task { try? await ScoutStore.shared.createScript(projectId: pid, name: name, rawText: text, sortOrder: order) }
             nextOrder += 1
-            script.project = project
         }
-        try? modelContext.save()
         scriptsExpanded = true
         #endif
     }
@@ -2792,9 +2715,9 @@ private struct ProjectDetailView: View {
                 "Timeline import done — timezone: \(result.detectedTimezone), updated: \(result.updated), skipped: \(result.skipped), failed: \(result.failed)",
                 level: result.failed > 0 ? .warning : .success
             )
-            if !result.updatedPins.isEmpty {
-                onRevealPins?(result.updatedPins)
-            }
+            // TODO(P2): TimelineGeoService still backfills the Core Data store; reveal is disabled
+            // until it's ported to ScoutStore (its results aren't VMs in the synced graph).
+            _ = result.updatedPins
         }
         #endif
     }
@@ -2802,7 +2725,7 @@ private struct ProjectDetailView: View {
     /// Imports photo files into a list (or top-level when `list` is nil), inserting the
     /// pins and wiring their relationship. Shared by the Import menu and Finder drag-drop.
     @MainActor
-    private func importImageURLs(_ urls: [URL], into list: LocationListData?) async {
+    private func importImageURLs(_ urls: [URL], into list: ListVM?) async {
         // Collect all existing pins across this project for duplicate detection. Build the dedup
         // index here (main thread) — it reads managed objects, which importPhotos must not touch.
         let existingPins = (project.lists.flatMap(\.pins)) + project.importedPhotos
@@ -2814,28 +2737,26 @@ private struct ProjectDetailView: View {
             importProgress = (current, total)
         }
         importProgress = nil
+        let pid = project.id
         if let list {
+            let listId = list.id
             for result in results {
-                let pin = result.makePin(in: modelContext)
-                pin.list = list
+                try? await ScoutStore.shared.insertPin(result.storeRecord(listId: listId, owningProjectId: nil, panelOrder: 0))
             }
         } else {
             var nextOrder = sidebarItems.count
             for result in results {
-                let pin = result.makePin(in: modelContext)
-                pin.panelOrder = nextOrder
+                try? await ScoutStore.shared.insertPin(result.storeRecord(listId: nil, owningProjectId: pid, panelOrder: nextOrder))
                 nextOrder += 1
-                project.importedPhotos.append(pin)
             }
         }
         normalizeOrder()
-        try? modelContext.save()
     }
 
     /// If `providers` carry Finder image files, kicks off an import into `list`
     /// (top-level when nil) and returns true. Returns false for internal reorder drags
     /// (plain-text drag ids), so the caller can fall back to its move/reorder handler.
-    private func tryImportDrop(_ providers: [NSItemProvider], into list: LocationListData?) -> Bool {
+    private func tryImportDrop(_ providers: [NSItemProvider], into list: ListVM?) -> Bool {
         let hasFiles = providers.contains {
             $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) ||
             $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
@@ -2853,7 +2774,7 @@ private struct ProjectDetailView: View {
 // MARK: - List row (expand in place to see pins)
 
 private struct ListRow: View {
-    let list: LocationListData
+    let list: ListVM
     let isExpanded: Bool
     var isFolder: Bool = false
     var isNested: Bool = false
@@ -2861,8 +2782,8 @@ private struct ListRow: View {
     let onToggleExpand: () -> Void
     var onTap: ((Bool, Bool) -> Void)? = nil
     var onDoubleTap: (() -> Void)? = nil
-    @Binding var activeListIDs: Set<PersistentIdentifier>
-    var onFitToList: (([PinnedLocationData]) -> Void)?
+    @Binding var activeListIDs: Set<String>
+    var onFitToList: (([PinVM]) -> Void)?
     var onRename: (() -> Void)? = nil
     /// Called when the user Option+clicks the eye. `true` = show all, `false` = hide all.
     var onToggleAllVisibility: ((Bool) -> Void)? = nil
@@ -2877,22 +2798,22 @@ private struct ListRow: View {
     /// row whose `list.uuid` matches. Set by clicking the chip or the panel's "e" shortcut.
     var sceneTypeEditID: Binding<UUID?>? = nil
     /// Tapping the header's scene-count badge opens the script at that scene link.
-    var onOpenSceneLink: ((ScriptHighlight) -> Void)? = nil
+    var onOpenSceneLink: ((HighlightVM) -> Void)? = nil
     @Environment(\.managedObjectContext) private var modelContext
 
-    private var isActive: Bool { activeListIDs.contains(list.persistentModelID) }
+    private var isActive: Bool { activeListIDs.contains(list.id) }
     private var isSelected: Bool { selection.contains(list.uuid) }
     private var listColor: Color { Color(hexString: list.colorHex) }
 
     /// Live (non-trashed) photo count for a list, including its live child lists (recursively).
-    static func liveCount(_ list: LocationListData) -> Int {
+    static func liveCount(_ list: ListVM) -> Int {
         list.pins.filter { $0.deletedAt == nil }.count
             + list.childLists.filter { $0.deletedAt == nil }.reduce(0) { $0 + liveCount($1) }
     }
 
     /// True if any live photo in this list (or a live child list) is flagged — so the header can
     /// show a flag, signalling a filming location has already been chosen for the list.
-    static func hasFlagged(_ list: LocationListData) -> Bool {
+    static func hasFlagged(_ list: ListVM) -> Bool {
         list.pins.contains { $0.deletedAt == nil && $0.isFlagged }
             || list.childLists.filter { $0.deletedAt == nil }.contains { hasFlagged($0) }
     }
@@ -3038,8 +2959,8 @@ private struct ListRow: View {
                     // Option+click: show all when this one is hidden, hide all when visible.
                     toggle(!isActive)
                 } else {
-                    if isActive { activeListIDs.remove(list.persistentModelID) }
-                    else { activeListIDs.insert(list.persistentModelID) }
+                    if isActive { activeListIDs.remove(list.id) }
+                    else { activeListIDs.insert(list.id) }
                 }
             } label: {
                 Image(systemName: isActive ? "eye.fill" : "eye")
@@ -3106,7 +3027,7 @@ private struct OptionalDrag: ViewModifier {
 // MARK: - Pin row (shared by photos and list pins)
 
 private struct PinRow: View {
-    let pin: PinnedLocationData
+    let pin: PinVM
     @ObservedObject var selection: SelectionStore
     var listColor: Color? = nil
     var onTap: ((Bool, Bool) -> Void)? = nil
@@ -3182,8 +3103,8 @@ private struct PinRow: View {
 
 // MARK: - OutlineGroup children helper
 
-extension LocationListData {
-    var sortedChildren: [LocationListData]? {
+extension ListVM {
+    var sortedChildren: [ListVM]? {
         let children = childLists.sorted { $0.sortOrder < $1.sortOrder }
         return children.isEmpty ? nil : children
     }
@@ -3222,31 +3143,31 @@ struct NameEntrySheet: View {
 /// optional "nest inside" picker that reuses the same project.lists source and row style as the
 /// Move ("m") box. Selecting a folder nests the new list inside it; "Top level" keeps it loose.
 struct NewListForSceneSheet: View {
-    let project: ProjectData
+    let project: ProjectVM
     @Binding var name: String
     let onDismiss: () -> Void
-    let onConfirm: (String, LocationListData?) -> Void
+    let onConfirm: (String, ListVM?) -> Void
 
     /// The committed parent (nil = top level).
-    @State private var parent: LocationListData?
+    @State private var parent: ListVM?
     @State private var query = ""
     /// Keyboard highlight index into `options` (0 = "Top level", then filtered lists).
     @State private var highlighted = 0
     @FocusState private var nameFocused: Bool
 
     // Same source + ordering the sidebar and Move box use; trashed excluded.
-    private var projectLists: [LocationListData] {
+    private var projectLists: [ListVM] {
         project.lists.filter { $0.deletedAt == nil }.sorted {
             $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
         }
     }
-    private var filtered: [LocationListData] {
+    private var filtered: [ListVM] {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return projectLists }
         return projectLists.filter { $0.name.localizedCaseInsensitiveContains(q) }
     }
     /// Selectable options: index 0 is "Top level" (nil), the rest are the filtered lists.
-    private var options: [LocationListData?] { [nil] + filtered }
+    private var options: [ListVM?] { [nil] + filtered }
 
     var body: some View {
         VStack(spacing: 14) {
@@ -3274,7 +3195,7 @@ struct NewListForSceneSheet: View {
                                 parentRow(
                                     label: opt?.name ?? "Top level (no folder)",
                                     color: opt.map { Color(hexString: $0.colorHex) },
-                                    isSelected: parent?.persistentModelID == opt?.persistentModelID,
+                                    isSelected: parent?.id == opt?.id,
                                     isHighlighted: idx == highlighted
                                 ) {
                                     highlighted = idx
@@ -3345,7 +3266,7 @@ struct NewListForSceneSheet: View {
     private func handleReturn() {
         guard !options.isEmpty else { commit(); return }
         let opt = options[min(max(highlighted, 0), options.count - 1)]
-        if parent?.persistentModelID != opt?.persistentModelID {
+        if parent?.id != opt?.id {
             parent = opt
         } else {
             commit()
@@ -3437,7 +3358,7 @@ private struct TimelineProgressOverlay: View {
 // macOS/SwiftUI footguns that each independently break it — all are avoided below, and
 // changing any of them brings the bug back (you type "temple" and get an unrelated list):
 //
-//   1. ForEach row identity MUST be `id: \.persistentModelID` ONLY. Do NOT also put
+//   1. ForEach row identity MUST be `id: \.id` ONLY. Do NOT also put
 //      `.id(idx)` (or any index-based id) on the row. Two competing identities make
 //      SwiftUI reuse the row at a given position and keep showing STALE content when the
 //      filtered array changes. (This was the final root cause.)
@@ -3452,15 +3373,15 @@ private struct TimelineProgressOverlay: View {
 // If you touch this view, re-test: open the M-menu, type a substring of a known list name,
 // and confirm ONLY matching lists show, live, on every keystroke.
 struct MoveToListSheet: View {
-    let project: ProjectData
-    let onMove: (LocationListData) -> Void
+    let project: ProjectVM
+    let onMove: (ListVM) -> Void
     let onDismiss: () -> Void
 
     @State private var query = ""
     @State private var highlighted = 0
     @FocusState private var fieldFocused: Bool
 
-    private var projectLists: [LocationListData] {
+    private var projectLists: [ListVM] {
         // Use the project.lists forward relationship — the exact same source the
         // sidebar uses — sorted to match sidebar order (panelOrder, then createdAt).
         // Trashed lists are excluded so you can't move photos into a deleted list.
@@ -3469,14 +3390,14 @@ struct MoveToListSheet: View {
         }
     }
 
-    private var filtered: [LocationListData] {
+    private var filtered: [ListVM] {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return projectLists }
         return projectLists.filter { $0.name.localizedCaseInsensitiveContains(q) }
     }
 
     /// The currently highlighted list (clamped), or nil when there are no results.
-    private var highlightedList: LocationListData? {
+    private var highlightedList: ListVM? {
         guard !filtered.isEmpty else { return nil }
         return filtered[min(max(highlighted, 0), filtered.count - 1)]
     }
@@ -3512,8 +3433,8 @@ struct MoveToListSheet: View {
                             // version also set .id(idx), which conflicted with the ForEach
                             // identity and made SwiftUI keep showing a stale row's content
                             // when the filter narrowed — that was the M-menu search bug.
-                            ForEach(filtered, id: \.persistentModelID) { list in
-                                let isHi = highlightedList?.persistentModelID == list.persistentModelID
+                            ForEach(filtered, id: \.id) { list in
+                                let isHi = highlightedList?.id == list.id
                                 HStack(spacing: 8) {
                                     Circle()
                                         .fill(Color(hexString: list.colorHex))
@@ -3535,14 +3456,14 @@ struct MoveToListSheet: View {
                                 .onTapGesture { onMove(list) }
                                 // ⚠️ Keep this as persistentModelID. NEVER add `.id(idx)` —
                                 // see the warning above the struct. It breaks live search.
-                                .id(list.persistentModelID)
+                                .id(list.id)
                             }
                         }
                         .padding(.vertical, 6)
                     }
                     .onChange(of: highlighted) { _, _ in
                         if let hl = highlightedList {
-                            withAnimation { proxy.scrollTo(hl.persistentModelID, anchor: .center) }
+                            withAnimation { proxy.scrollTo(hl.id, anchor: .center) }
                         }
                     }
                     // Cap the scroll area so a long list can't make the sheet taller than the
@@ -3650,118 +3571,6 @@ struct SceneTypePickerSheet: View {
 
 // MARK: - Previews
 
-#if DEBUG
-/// Rich in-memory sample data for the sidebar previews: one project with several
-/// colour-coded lists (each holding a few photos), some uncategorised photos, and a
-/// couple of trashed photos so the Trash section shows too.
-@MainActor
-private enum SidebarPreviewData {
-    /// A handful of Creative-Commons image URLs so thumbnails render when online
-    /// (they fall back to the mappin placeholder offline — layout still looks right).
-    nonisolated static let imageURLs = [
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/3/30/Vasquez_Rocks_2013.jpg/320px-Vasquez_Rocks_2013.jpg",
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Vasquez_Rocks_County_Park_2.jpg/320px-Vasquez_Rocks_County_Park_2.jpg",
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Vasquez_Rocks.jpg/320px-Vasquez_Rocks.jpg",
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Tokyo_Tower_and_around_Skyscrapers.jpg/320px-Tokyo_Tower_and_around_Skyscrapers.jpg",
-    ]
-
-    static let controller: PersistenceController = {
-        let controller = PersistenceController(inMemory: true)
-        let ctx = controller.viewContext
-
-        let project = ProjectData(context: ctx, name: "Tokyo Shoot")
-
-        // Builds a pin with a thumbnail URL and a GPS coordinate.
-        func makePin(_ name: String, urlIndex: Int, lat: Double, lng: Double, order: Int) -> PinnedLocationData {
-            let loc = ScoutLocation(
-                name: name,
-                coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng),
-                images: [ScoutImage(url: URL(string: imageURLs[urlIndex % imageURLs.count]), source: .imported)]
-            )
-            return PinnedLocationData(context: ctx, from: loc, sortOrder: order)
-        }
-
-        // Colour-coded lists (palette indices chosen for variety), each with a few photos.
-        let listSpecs: [(name: String, palette: Int)] = [
-            ("Cycling Roads", 1),     // blue
-            ("Temples", 3),           // purple
-            ("Abandoned Houses", 4),  // pink
-            ("Tea Farms", 2),         // green
-        ]
-        for (i, spec) in listSpecs.enumerated() {
-            let list = LocationListData(context: ctx, name: spec.name, colorHex: LocationListData.palette[spec.palette])
-            list.project = project              // inverse populates project.lists
-            list.panelOrder = i
-            for j in 0..<3 {
-                let pin = makePin("\(spec.name) \(j + 1)", urlIndex: i + j,
-                                  lat: 35.66 + Double(i) * 0.01, lng: 139.70 + Double(j) * 0.01, order: j)
-                pin.list = list                 // inverse populates list.pins
-            }
-        }
-
-        // Loose, uncategorised photos imported straight into the project.
-        for k in 0..<4 {
-            let pin = makePin("DSC0\(2530 + k)", urlIndex: k, lat: 35.64, lng: 139.74, order: k)
-            pin.owningProject = project          // inverse populates project.importedPhotos
-            pin.panelOrder = 100 + k
-        }
-
-        // A couple of trashed photos so the Trash section appears.
-        for k in 0..<2 {
-            let pin = makePin("DSC0\(2999 - k)", urlIndex: k, lat: 35.63, lng: 139.73, order: k)
-            pin.owningProject = project
-            pin.deletedAt = Date()
-        }
-
-        try? ctx.save()
-        return controller
-    }()
-
-    static var context: NSManagedObjectContext { controller.viewContext }
-
-    static var project: ProjectData {
-        (try? controller.viewContext.fetch(FetchDescriptor(ProjectData.self)))?.first
-            ?? ProjectData(context: controller.viewContext, name: "Empty")
-    }
-}
-
-/// Hosts ProjectDetailView with live @State bindings and turns every list's eye on so
-/// the preview shows a fully-populated, expanded sidebar.
-private struct SidebarDetailPreview: View {
-    let project: ProjectData
-    @State private var activeListIDs: Set<PersistentIdentifier> = []
-    @State private var hiddenUncategorizedProjectIDs: Set<PersistentIdentifier> = []
-    @State private var externalMoveUUIDs: [UUID] = []
-
-    var body: some View {
-        ProjectDetailView(
-            project: project,
-            selection: SelectionStore(),
-            initialExpandedUUIDs: Set(project.lists.map(\.uuid.uuidString)),
-            activeListIDs: $activeListIDs,
-            hiddenUncategorizedProjectIDs: $hiddenUncategorizedProjectIDs,
-            onFitToList: { _ in },
-            onSelectPin: { _ in },
-            onZoomToPin: { _ in },
-            onClearPin: {},
-            externalMoveUUIDs: $externalMoveUUIDs
-        )
-        .onAppear { activeListIDs = Set(project.lists.map(\.persistentModelID)) }
-    }
-}
-
-#Preview("Project detail — full") {
-    SidebarDetailPreview(project: SidebarPreviewData.project)
-        .frame(width: 280, height: 760)
-        .environment(\.managedObjectContext, SidebarPreviewData.context)
-}
-
-#Preview("Projects list") {
-    ProjectsPanel(selection: SelectionStore(), activeListIDs: .constant([]), hiddenUncategorizedProjectIDs: .constant([]), externalMoveUUIDs: .constant([]))
-        .frame(width: 280, height: 600)
-        .environment(\.managedObjectContext, SidebarPreviewData.context)
-}
-#endif
 
 // MARK: - Hex color helper
 

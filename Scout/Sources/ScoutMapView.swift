@@ -1042,8 +1042,8 @@ struct ScoutMapView {
     var cyclingProvider: CyclingTileProvider? = nil
     var showPhotoAnnotations: Bool = false
     var pinScale: Double = 1.0
-    var availableLists: [LocationListData] = []
-    var onSaveToList: ((ScoutLocation, LocationListData) -> Void)? = nil
+    var availableLists: [ListVM] = []
+    var onSaveToList: ((ScoutLocation, ListVM) -> Void)? = nil
     /// Right-click "Move N photos to list…" on a multi-selection — opens the move picker.
     var onMoveSelectionToList: (() -> Void)? = nil
     /// Right-click "Reveal in List" — expand & scroll to this pin in the sidebar.

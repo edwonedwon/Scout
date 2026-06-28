@@ -41,6 +41,23 @@ enum PhotoImportService {
                 dateTaken: dateTaken, originalFilePath: originalFilePath, fullFilename: fullFilename,
                 thumbFilename: thumbFilename, sortOrder: sortOrder, aspectRatio: aspectRatio)
         }
+
+        /// Builds a store PinRecord for this import (migration plan P2). The local originalFilePath
+        /// isn't in the synced schema; only its basename (originalFilename) travels.
+        func storeRecord(listId: String?, owningProjectId: String?, panelOrder: Int) -> PinRecord {
+            PinRecord(
+                id: id.uuidString, listId: listId, owningProjectId: owningProjectId,
+                name: name, notes: "", latitude: coordinate.latitude, longitude: coordinate.longitude,
+                hasGPS: hasGPS, gpsFromTimeline: false, isFlagged: false,
+                rotationQuarterTurns: 0, aspectRatio: aspectRatio, panelOrder: panelOrder, sortOrder: sortOrder,
+                statusRaw: LocationStatus.scouted.rawValue,
+                imageSourceRaw: ScoutImage.ImageSource.imported.rawValue,
+                imageURL: nil, googlePlaceId: nil, googleMapsURL: nil, sourceURL: nil,
+                originalFilename: URL(fileURLWithPath: originalFilePath).lastPathComponent,
+                photoFiles: [fullFilename], thumbnailFiles: [thumbFilename],
+                dateTaken: dateTaken, createdAt: Date(), deletedAt: nil
+            )
+        }
     }
 
     // MARK: - Public entry point
@@ -58,7 +75,7 @@ enum PhotoImportService {
         var dateName:  Set<String> = []   // "timestamp|name"   (GPS-less fallback)
 
         @MainActor
-        init(existingPins: [PinnedLocationData]) {
+        init(existingPins: [PinVM]) {
             for pin in existingPins {
                 if let path = pin.originalFilePath {
                     filenames.insert(URL(fileURLWithPath: path).lastPathComponent)
@@ -310,7 +327,7 @@ enum PhotoImportService {
     /// duplicate cluster, the "original large" file) and which to remove (the compressed
     /// copies, e.g. "DSC02796 Large.jpeg"). `clusters` is the number of duplicate groups.
     struct DuplicatePlan {
-        var remove: [PinnedLocationData] = []
+        var remove: [PinVM] = []
         var clusters: Int = 0
     }
 
@@ -325,7 +342,7 @@ enum PhotoImportService {
     /// Within each cluster it keeps the highest-scoring pin (see `keepScore` — original camera
     /// formats and non-"Large" names win) and marks the rest for removal. Read-only: it never
     /// mutates the pins; the caller decides what to do with `plan.remove`.
-    static func findDuplicates(in pins: [PinnedLocationData]) -> DuplicatePlan {
+    @MainActor static func findDuplicates(in pins: [PinVM]) -> DuplicatePlan {
         let live = pins.filter { $0.deletedAt == nil }
         guard live.count > 1 else { return DuplicatePlan() }
 
@@ -391,7 +408,7 @@ enum PhotoImportService {
 
     /// Higher = more likely the "original" the user wants to keep. The compressed copies
     /// (names containing "large"/"small"/"copy", JPEG exports) score low and get removed.
-    private static func keepScore(_ pin: PinnedLocationData) -> Int {
+    @MainActor private static func keepScore(_ pin: PinVM) -> Int {
         var score = 0
         let lname = pin.name.lowercased()
         if lname.contains("large") { score -= 1000 }

@@ -4,8 +4,8 @@ import ScoutKit
 
 struct LocationCalloutView: View {
     let location: ScoutLocation
-    var availableLists: [LocationListData] = []
-    var onSaveToList: ((LocationListData) -> Void)? = nil
+    var availableLists: [ListVM] = []
+    var onSaveToList: ((ListVM) -> Void)? = nil
     /// True when this location is a saved pin — enables drag-to-sidebar-list.
     var isPinned: Bool = false
 

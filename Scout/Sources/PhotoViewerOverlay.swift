@@ -419,8 +419,8 @@ struct PhotoViewerOverlay: View {
     @FocusState private var focused: Bool
 
     /// Lists available to save into. A nil list means a general (unfiled) pin.
-    var availableLists: [LocationListData] = []
-    var onSave: ((ScoutLocation, LocationListData?) -> Void)? = nil
+    var availableLists: [ListVM] = []
+    var onSave: ((ScoutLocation, ListVM?) -> Void)? = nil
     /// Persists a 90° CCW rotation for the photo at the given file URL (the displayed image).
     var onRotate: ((URL) -> Void)? = nil
     /// Deletes the pin for the given location. The carousel closes immediately after.
@@ -664,7 +664,7 @@ struct PhotoViewerOverlay: View {
     }
 
     @ViewBuilder
-    private func saveMenu(for loc: ScoutLocation, onSave: @escaping (ScoutLocation, LocationListData?) -> Void) -> some View {
+    private func saveMenu(for loc: ScoutLocation, onSave: @escaping (ScoutLocation, ListVM?) -> Void) -> some View {
         Menu {
             Button {
                 // Defer the model insert out of the menu's view-update cycle so the
@@ -704,7 +704,7 @@ struct PhotoViewerOverlay: View {
         .fixedSize()
     }
 
-    private func listLabel(_ list: LocationListData) -> String {
+    private func listLabel(_ list: ListVM) -> String {
         list.name
     }
 

@@ -16,7 +16,7 @@ typealias ScriptHighlightColor = UIColor
 /// layout & count match a printed PDF export. Select a range and press `m` (or right-click) to
 /// assign it to a list; assigned ranges are tinted with the list's colour.
 struct ScriptView: View {
-    let script: ScriptData?
+    let script: ScriptVM?
     /// List-coloured highlight ranges to tint (supplied reactively by the owner).
     var highlights: [(NSRange, ScriptHighlightColor)] = []
     /// Called with the selected character range (into rawText) when the user presses `m`.

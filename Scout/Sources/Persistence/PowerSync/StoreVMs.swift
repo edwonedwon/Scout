@@ -106,20 +106,43 @@ final class MacStore: ObservableObject {
     }
 }
 
+// Identity-based Hashable/Equatable (by row id) so VMs work in navigationDestination, onChange,
+// Set, and ForEach selection just like the Core Data objects did.
+extension ProjectVM: Hashable { nonisolated static func == (l: ProjectVM, r: ProjectVM) -> Bool { l.id == r.id }; nonisolated func hash(into h: inout Hasher) { h.combine(id) } }
+extension ListVM: Hashable { nonisolated static func == (l: ListVM, r: ListVM) -> Bool { l.id == r.id }; nonisolated func hash(into h: inout Hasher) { h.combine(id) } }
+extension PinVM: Hashable { nonisolated static func == (l: PinVM, r: PinVM) -> Bool { l.id == r.id }; nonisolated func hash(into h: inout Hasher) { h.combine(id) } }
+extension ScriptVM: Hashable { nonisolated static func == (l: ScriptVM, r: ScriptVM) -> Bool { l.id == r.id }; nonisolated func hash(into h: inout Hasher) { h.combine(id) } }
+extension HighlightVM: Hashable { nonisolated static func == (l: HighlightVM, r: HighlightVM) -> Bool { l.id == r.id }; nonisolated func hash(into h: inout Hasher) { h.combine(id) } }
+
+// MARK: - Write-through helpers
+//
+// VM property setters persist to ScoutStore so existing `vm.prop = x` mutations in the views Just
+// Work. `applying` suppresses the write-through while reconciling from a watch update (otherwise
+// every incoming sync would echo back as a write).
+
+@MainActor
+private func persistChange(_ applying: Bool, _ op: @escaping () async throws -> Void) {
+    guard !applying else { return }
+    Task { try? await op() }
+}
+
 // MARK: - Project
 
 @MainActor
 final class ProjectVM: ObservableObject, Identifiable {
     let id: String
     unowned let s: MacStore
-    @Published var name: String = ""
-    @Published var notes: String = ""
-    @Published var uncategorizedPanelOrder: Int = 0
+    private var applying = false
+    @Published var name: String = "" { didSet { persistChange(applying) { [id, name] in try await ScoutStore.shared.renameProject(id: id, name: name) } } }
+    @Published var notes: String = "" { didSet { persistChange(applying) { [id, notes] in try await ScoutStore.shared.setProjectNotes(id: id, notes: notes) } } }
+    @Published var uncategorizedPanelOrder: Int = 0 { didSet { persistChange(applying) { [id, uncategorizedPanelOrder] in try await ScoutStore.shared.setUncategorizedPanelOrder(projectId: id, order: uncategorizedPanelOrder) } } }
     var createdAt: Date = Date()
-    @Published var deletedAt: Date?
+    @Published var deletedAt: Date? { didSet { persistChange(applying) { [id, deletedAt] in
+        if deletedAt == nil { try await ScoutStore.shared.restoreProject(id: id) } else { try await ScoutStore.shared.softDeleteProject(id: id) } } } }
 
     init(_ r: ProjectRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
     func apply(_ r: ProjectRecord) {
+        applying = true; defer { applying = false }
         name = r.name; notes = r.notes; uncategorizedPanelOrder = r.uncategorizedPanelOrder
         createdAt = r.createdAt; deletedAt = r.deletedAt
     }
@@ -138,18 +161,21 @@ final class ProjectVM: ObservableObject, Identifiable {
 final class ListVM: ObservableObject, Identifiable {
     let id: String
     unowned let s: MacStore
-    @Published var name: String = ""
-    @Published var colorHex: String = "#FF6B35"
-    @Published var sortOrder: Int = 0
-    @Published var panelOrder: Int = 0
-    @Published var sceneType: String?
-    @Published var deletedAt: Date?
+    private var applying = false
+    @Published var name: String = "" { didSet { persistChange(applying) { [id, name] in try await ScoutStore.shared.renameList(id: id, name: name) } } }
+    @Published var colorHex: String = "#FF6B35" { didSet { persistChange(applying) { [id, colorHex] in try await ScoutStore.shared.setListColor(id: id, colorHex: colorHex) } } }
+    @Published var sortOrder: Int = 0 { didSet { persistChange(applying) { [id, sortOrder] in try await ScoutStore.shared.setListSortOrder(id: id, order: sortOrder) } } }
+    @Published var panelOrder: Int = 0 { didSet { persistChange(applying) { [id, panelOrder] in try await ScoutStore.shared.setListPanelOrder(id: id, order: panelOrder) } } }
+    @Published var sceneType: String? { didSet { persistChange(applying) { [id, sceneType] in try await ScoutStore.shared.setListSceneType(id: id, sceneType: sceneType) } } }
+    @Published var deletedAt: Date? { didSet { persistChange(applying) { [id, deletedAt] in
+        if deletedAt == nil { try await ScoutStore.shared.restoreList(id: id) } else { try await ScoutStore.shared.softDeleteList(id: id) } } } }
     var createdAt: Date = Date()
     private(set) var projectId: String?
     private(set) var parentListId: String?
 
     init(_ r: ListRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
     func apply(_ r: ListRecord) {
+        applying = true; defer { applying = false }
         name = r.name; colorHex = r.colorHex; sortOrder = r.sortOrder; panelOrder = r.panelOrder
         sceneType = r.sceneType; deletedAt = r.deletedAt; createdAt = r.createdAt
         projectId = r.projectId; parentListId = r.parentListId
@@ -175,23 +201,28 @@ final class ListVM: ObservableObject, Identifiable {
 final class PinVM: ObservableObject, Identifiable {
     let id: String
     unowned let s: MacStore
-    @Published var name: String = ""
-    @Published var notes: String = ""
-    @Published var latitude: Double = 0
-    @Published var longitude: Double = 0
-    @Published var statusRaw: String = ""
-    @Published var sortOrder: Int = 0
-    @Published var panelOrder: Int = 0
-    @Published var isFlagged: Bool = false
-    @Published var rotationQuarterTurns: Int = 0
-    @Published var aspectRatio: Double = 0
-    @Published var deletedAt: Date?
+    private var applying = false
+    @Published var name: String = "" { didSet { persistChange(applying) { [id, name] in try await ScoutStore.shared.renamePin(id: id, name: name) } } }
+    @Published var notes: String = "" { didSet { persistChange(applying) { [id, notes] in try await ScoutStore.shared.setPinNotes(id: id, notes: notes) } } }
+    @Published var latitude: Double = 0 { didSet { persistChange(applying) { [id, latitude, longitude, hasGPS] in try await ScoutStore.shared.setPinCoordinate(id: id, latitude: latitude, longitude: longitude, hasGPS: hasGPS) } } }
+    @Published var longitude: Double = 0 { didSet { persistChange(applying) { [id, latitude, longitude, hasGPS] in try await ScoutStore.shared.setPinCoordinate(id: id, latitude: latitude, longitude: longitude, hasGPS: hasGPS) } } }
+    @Published var statusRaw: String = "" { didSet { persistChange(applying) { [id, statusRaw] in try await ScoutStore.shared.setPinStatus(id: id, statusRaw: statusRaw) } } }
+    @Published var sortOrder: Int = 0 { didSet { persistChange(applying) { [id, sortOrder] in try await ScoutStore.shared.setPinSortOrder(id: id, order: sortOrder) } } }
+    @Published var panelOrder: Int = 0 { didSet { persistChange(applying) { [id, panelOrder] in try await ScoutStore.shared.setPinPanelOrder(id: id, order: panelOrder) } } }
+    @Published var isFlagged: Bool = false { didSet { persistChange(applying) { [id, isFlagged] in try await ScoutStore.shared.setPinFlagged(id: id, flagged: isFlagged) } } }
+    @Published var rotationQuarterTurns: Int = 0 { didSet { persistChange(applying) { [id, rotationQuarterTurns] in try await ScoutStore.shared.setPinRotation(id: id, quarterTurns: rotationQuarterTurns) } } }
+    @Published var aspectRatio: Double = 0 { didSet { persistChange(applying) { [id, aspectRatio] in try await ScoutStore.shared.setPinAspectRatio(id: id, ratio: aspectRatio) } } }
+    @Published var deletedAt: Date? { didSet { persistChange(applying) { [id, deletedAt] in
+        if deletedAt == nil { try await ScoutStore.shared.restorePin(id: id) } else { try await ScoutStore.shared.softDeletePin(id: id) } } } }
     var imageURL: String?
     var googlePlaceId: String?
     var sourceURLString: String?
     var googleMapsURLString: String?
     var imageSourceRaw: String?
     var originalFilename: String?
+    /// Local absolute path to the original file, if downloaded on this device. Not in the synced
+    /// schema (originals are opt-in via Supabase Storage); nil unless a local original is present.
+    var originalFilePath: String?
     var hasGPS: Bool = true
     var gpsFromTimeline: Bool = false
     var dateTaken: Date?
@@ -203,6 +234,7 @@ final class PinVM: ObservableObject, Identifiable {
 
     init(_ r: PinRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
     func apply(_ r: PinRecord) {
+        applying = true; defer { applying = false }
         name = r.name; notes = r.notes; latitude = r.latitude; longitude = r.longitude
         statusRaw = r.statusRaw; sortOrder = r.sortOrder; panelOrder = r.panelOrder
         isFlagged = r.isFlagged; rotationQuarterTurns = r.rotationQuarterTurns; aspectRatio = r.aspectRatio
@@ -260,15 +292,17 @@ final class PinVM: ObservableObject, Identifiable {
 final class ScriptVM: ObservableObject, Identifiable {
     let id: String
     unowned let s: MacStore
-    @Published var name: String = ""
-    @Published var rawText: String = ""
-    @Published var sortOrder: Int = 0
+    private var applying = false
+    @Published var name: String = "" { didSet { persistChange(applying) { [id, name] in try await ScoutStore.shared.renameScript(id: id, name: name) } } }
+    @Published var rawText: String = "" { didSet { persistChange(applying) { [id, rawText] in try await ScoutStore.shared.updateScriptText(id: id, rawText: rawText) } } }
+    @Published var sortOrder: Int = 0 { didSet { persistChange(applying) { [id, sortOrder] in try await ScoutStore.shared.setScriptSortOrder(id: id, order: sortOrder) } } }
     var importedAt: Date = Date()
     var updatedAt: Date = Date()
     private(set) var projectId: String?
 
     init(_ r: ScriptRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
     func apply(_ r: ScriptRecord) {
+        applying = true; defer { applying = false }
         name = r.name; rawText = r.rawText; sortOrder = r.sortOrder
         importedAt = r.importedAt; updatedAt = r.updatedAt; projectId = r.projectId
     }
