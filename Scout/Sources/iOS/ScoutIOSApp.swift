@@ -29,6 +29,11 @@ struct IOSPinThumb: View {
         }
         .aspectRatio(contentMode: .fill)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        // On a device that didn't create the photo, the thumbnail file isn't local yet — fetch it
+        // from Storage (no-op if already present); the image view reloads on .photoDidMaterialize.
+        .task(id: pin.id) {
+            await PhotoStorageService.shared.ensureThumbnailLocal(pinId: pin.id, thumbnailFiles: pin.thumbnailFiles)
+        }
     }
 }
 

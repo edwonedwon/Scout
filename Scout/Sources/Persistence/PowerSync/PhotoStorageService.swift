@@ -1,6 +1,12 @@
 import Foundation
 import Supabase
 
+extension Notification.Name {
+    /// Posted (main thread) after a photo file is downloaded from Storage to the local cache, so
+    /// image views currently showing a "still downloading" placeholder can reload.
+    static let photoDidMaterialize = Notification.Name("scout.photoDidMaterialize")
+}
+
 /// Photo files in Supabase Storage (migration plan P5). Photos never travel through PowerSync sync
 /// (that's for row data) — only filename references live in the `pins` rows; the bytes live here.
 ///
@@ -81,6 +87,19 @@ struct PhotoStorageService {
             return localURL
         } catch {
             return nil
+        }
+    }
+
+    /// Ensure a pin's displayed thumbnail is in the local cache, downloading it from Storage if it's
+    /// missing (the case on a device that didn't create the photo). On success, posts
+    /// `.photoDidMaterialize` so on-screen image views reload and show it. The thumbnail tier caches
+    /// at the bare filename — exactly where the thumbnail image views look — so no rename is needed.
+    func ensureThumbnailLocal(pinId: String, thumbnailFiles: [String]) async {
+        guard client != nil, let file = thumbnailFiles.first else { return }
+        if FileManager.default.fileExists(atPath: PinPhotoStore.fileURL(file).path) { return }
+        guard let projectId = await projectId(forPin: pinId) else { return }
+        if await ensureLocal(filename: file, projectId: projectId, tier: .thumbnail) != nil {
+            await MainActor.run { NotificationCenter.default.post(name: .photoDidMaterialize, object: nil) }
         }
     }
 
