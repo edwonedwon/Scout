@@ -34,6 +34,33 @@ final class ScoutStore {
     // handful. The SDK still delivers the FIRST result immediately, so initial load isn't delayed.
     private static let watchThrottle: TimeInterval = 0.25
 
+    /// Projects with live list/pin counts computed in SQL — the iOS browse screen binds this so it
+    /// never has to load every pin into a view-model just to show counts.
+    func watchProjectSummaries() -> AsyncThrowingStream<[ProjectSummary], Error> {
+        try! db.watch(options: WatchOptions(
+            sql: """
+            SELECT p.id AS id, p.name AS name,
+              (SELECT COUNT(*) FROM location_lists l
+                 WHERE l.project_id = p.id AND l.parent_list_id IS NULL AND l.deleted_at IS NULL) AS list_count,
+              (SELECT COUNT(*) FROM pins pn
+                 WHERE (pn.owning_project_id = p.id
+                        OR pn.list_id IN (SELECT id FROM location_lists l2 WHERE l2.project_id = p.id))
+                   AND pn.deleted_at IS NULL) AS pin_count
+            FROM projects p
+            WHERE p.deleted_at IS NULL
+            ORDER BY p.created_at DESC
+            """,
+            parameters: [], throttle: Self.watchThrottle
+        ) { c in
+            ProjectSummary(
+                id: try c.getString(name: "id"),
+                name: (try c.getStringOptional(name: "name")) ?? "",
+                listCount: Int((try c.getInt64Optional(name: "list_count")) ?? 0),
+                pinCount: Int((try c.getInt64Optional(name: "pin_count")) ?? 0)
+            )
+        })
+    }
+
     func watchAllProjectsRaw() -> AsyncThrowingStream<[ProjectRecord], Error> {
         try! db.watch(options: WatchOptions(sql: "SELECT * FROM projects ORDER BY created_at", parameters: [], throttle: Self.watchThrottle) { try ProjectRecord(cursor: $0) })
     }

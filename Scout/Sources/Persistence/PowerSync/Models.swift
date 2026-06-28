@@ -55,6 +55,15 @@ struct ProjectRecord: Identifiable, Hashable {
     }
 }
 
+/// A project plus its live list/pin counts, computed in SQL — lets the browse screen show projects
+/// without loading every pin into a view-model (which is what made the iOS projects screen hang).
+struct ProjectSummary: Identifiable, Hashable {
+    var id: String
+    var name: String
+    var listCount: Int
+    var pinCount: Int
+}
+
 struct ListRecord: Identifiable, Hashable {
     var id: String
     var projectId: String?

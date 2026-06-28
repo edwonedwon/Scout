@@ -41,20 +41,31 @@ struct IOSPinThumb: View {
 
 // MARK: - Root: project list → in-project shell
 
-struct ScoutIOSRootView: View {
-    @ObservedObject private var store = MacStore.shared
-    @EnvironmentObject private var auth: AuthManager
-    @State private var activeProject: ProjectVM?
-
-    private var projects: [ProjectVM] {
-        store.projects.filter { $0.deletedAt == nil }.sorted { $0.createdAt > $1.createdAt }
+/// Lightweight browse-screen data: project names + SQL-computed counts. Crucially this does NOT
+/// touch MacStore, so just looking at the projects list never loads every pin into a view-model
+/// (which is what hung the iOS projects screen). The heavy store is created only on project open.
+@MainActor
+final class ProjectSummariesModel: ObservableObject {
+    @Published private(set) var summaries: [ProjectSummary] = []
+    private var task: Task<Void, Never>?
+    init() {
+        task = Task { [weak self] in
+            do { for try await rows in ScoutStore.shared.watchProjectSummaries() { self?.summaries = rows } } catch {}
+        }
     }
+    deinit { task?.cancel() }
+}
+
+struct ScoutIOSRootView: View {
+    @StateObject private var model = ProjectSummariesModel()
+    @EnvironmentObject private var auth: AuthManager
+    @State private var activeProjectId: String?
 
     var body: some View {
         Group {
-            if let project = activeProject {
-                InProjectShell(project: project, onSwitchProject: {
-                    withAnimation(.easeInOut(duration: 0.28)) { activeProject = nil }
+            if let id = activeProjectId {
+                InProjectLoader(projectId: id, onBack: {
+                    withAnimation(.easeInOut(duration: 0.28)) { activeProjectId = nil }
                 })
                 .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
             } else {
@@ -66,8 +77,8 @@ struct ScoutIOSRootView: View {
         .onAppear {
             // Launch-arg hooks for automated screenshot verification (no UI tapping needed).
             let env = ProcessInfo.processInfo.environment
-            if env["SCOUT_SEED"] != nil, projects.isEmpty { Task { await seedSampleProject() } }
-            if env["SCOUT_OPEN_FIRST"] != nil, activeProject == nil { activeProject = projects.first }
+            if env["SCOUT_SEED"] != nil, model.summaries.isEmpty { Task { await seedSampleProject() } }
+            if env["SCOUT_OPEN_FIRST"] != nil, activeProjectId == nil { activeProjectId = model.summaries.first?.id }
         }
         #endif
     }
@@ -75,7 +86,7 @@ struct ScoutIOSRootView: View {
     private var projectList: some View {
         NavigationStack {
             Group {
-                if projects.isEmpty {
+                if model.summaries.isEmpty {
                     ContentUnavailableView {
                         Label("No Projects", systemImage: "folder")
                     } description: {
@@ -86,16 +97,16 @@ struct ScoutIOSRootView: View {
                     }
                 } else {
                     List {
-                        ForEach(projects) { project in
+                        ForEach(model.summaries) { summary in
                             Button {
-                                withAnimation(.easeInOut(duration: 0.28)) { activeProject = project }
+                                withAnimation(.easeInOut(duration: 0.28)) { activeProjectId = summary.id }
                             } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: "folder.fill")
                                         .font(.title3).foregroundStyle(.orange)
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(project.name).font(.body).foregroundStyle(.primary)
-                                        Text("\(project.topLevelLists.count) lists · \(project.pinCount) locations")
+                                        Text(summary.name).font(.body).foregroundStyle(.primary)
+                                        Text("\(summary.listCount) lists · \(summary.pinCount) locations")
                                             .font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -132,19 +143,12 @@ struct ScoutIOSRootView: View {
 
     private func createProject() async {
         guard let id = try? await ScoutStore.shared.createProject(name: "New Project") else { return }
-        // The watch stream delivers the new project; select it once its VM exists.
-        for _ in 0..<20 {
-            if let vm = store.projects.first(where: { $0.id == id }) {
-                withAnimation { activeProject = vm }
-                return
-            }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
+        withAnimation { activeProjectId = id }   // InProjectLoader waits for the VM to materialize
     }
 
     private func deleteProjects(_ offsets: IndexSet) {
-        let targets = offsets.map { projects[$0] }
-        for p in targets { p.deletedAt = Date() }   // VM write-through soft-deletes via the store
+        let ids = offsets.map { model.summaries[$0].id }
+        Task { for id in ids { try? await ScoutStore.shared.softDeleteProject(id: id) } }
     }
 
     #if DEBUG
@@ -186,6 +190,29 @@ struct ScoutIOSRootView: View {
         }
     }
     #endif
+}
+
+/// Bridges the lightweight browse screen to the full store: touching MacStore here is what triggers
+/// loading the project's view-models. Shows a spinner until this project's VM exists, so the heavy
+/// work happens *after* you've tapped in — never while you're just looking at the projects list.
+struct InProjectLoader: View {
+    let projectId: String
+    let onBack: () -> Void
+    @ObservedObject private var store = MacStore.shared
+
+    var body: some View {
+        if let project = store.project(projectId) {
+            InProjectShell(project: project, onSwitchProject: onBack)
+        } else {
+            ZStack {
+                Color(.systemBackground).ignoresSafeArea()
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Loading…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - In-project shell (tabs + sidebar drawer)
