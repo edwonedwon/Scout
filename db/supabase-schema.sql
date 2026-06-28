@@ -98,5 +98,54 @@ create index if not exists idx_highlights_script on script_highlights(script_id)
 create index if not exists idx_members_project on project_members(project_id);
 create index if not exists idx_members_user on project_members(user_id);
 
--- NOTE: Row-Level Security policies (owner/editor/viewer access via project_members) are added
--- in Phase 6. Enable RLS + policies before exposing to multiple users.
+-- ============================================================================
+-- Row-Level Security (run this whole block AFTER the tables above).
+-- Each signed-in user (auth.uid()) sees only projects they own or are a member
+-- of, and every child row inherits that access through its project. This is what
+-- makes the shippable multi-user app secure — without it the anon key could read
+-- everything. Sharing (editor/viewer) lands in P6 by inserting project_members.
+-- ============================================================================
+
+alter table projects          enable row level security;
+alter table location_lists    enable row level security;
+alter table pins              enable row level security;
+alter table scripts           enable row level security;
+alter table script_highlights enable row level security;
+alter table project_members   enable row level security;
+
+-- Helper: is the current user allowed to touch this project?
+create or replace function can_access_project(pid text)
+returns boolean language sql security definer stable as $$
+  select exists (
+    select 1 from projects p where p.id = pid and p.owner_id = auth.uid()
+  ) or exists (
+    select 1 from project_members m where m.project_id = pid and m.user_id = auth.uid()
+  );
+$$;
+
+-- projects: owner has full control; members can read.
+create policy projects_owner_all on projects
+  for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+create policy projects_member_read on projects
+  for select using (can_access_project(id));
+
+-- Child tables: gated by the owning project.
+create policy lists_access on location_lists
+  for all using (can_access_project(project_id)) with check (can_access_project(project_id));
+create policy pins_access on pins
+  for all using (can_access_project(coalesce(owning_project_id,
+                   (select project_id from location_lists l where l.id = pins.list_id))))
+  with check (can_access_project(coalesce(owning_project_id,
+                   (select project_id from location_lists l where l.id = pins.list_id))));
+create policy scripts_access on scripts
+  for all using (can_access_project(project_id)) with check (can_access_project(project_id));
+create policy highlights_access on script_highlights
+  for all using (can_access_project((select project_id from scripts s where s.id = script_highlights.script_id)))
+  with check (can_access_project((select project_id from scripts s where s.id = script_highlights.script_id)));
+
+-- project_members: the project owner manages membership; a member can read the roster.
+create policy members_owner_all on project_members
+  for all using (exists (select 1 from projects p where p.id = project_id and p.owner_id = auth.uid()))
+  with check (exists (select 1 from projects p where p.id = project_id and p.owner_id = auth.uid()));
+create policy members_self_read on project_members
+  for select using (user_id = auth.uid());

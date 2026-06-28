@@ -39,11 +39,32 @@ predictable cost, and sharing via Postgres Row-Level Security instead of CKShare
       sheet that adds a member row (no more CKShare hangs).
 - [ ] **P7 — Cleanup.** Delete Core Data/CloudKit code + entitlements; update CLAUDE.md.
 
+## Auth (DONE in code — P4 backend wiring)
+Supabase Auth (GoTrue) with **email/password** and **Sign in with Apple** (OIDC id-token flow).
+- `SupabaseConfig.swift` — paste URL / anon key / PowerSync URL here (anon key is public-safe; RLS
+  protects data). Blank = auth disabled, app runs local-only (build never blocked).
+- `AuthManager` — session + sign in/up/out, password reset, Apple nonce flow; observes
+  `authStateChanges`; stores session in Keychain via the SDK.
+- `AuthView` — shared login UI (both platforms). `RootGate` in `ScoutApp` shows it until signed in.
+- `SupabaseConnector` — PowerSync backend connector: `fetchCredentials` (session token) +
+  `uploadData` (CRUD batch → PostgREST upsert/delete). `ScoutStore.connectIfPossible()` starts sync.
+- Entitlement `com.apple.developer.applesignin` added for both targets.
+
 ## Account setup the USER must do (blocks P4+)
-1. Create a **Supabase** project → run `db/supabase-schema.sql`.
-2. Create a **PowerSync** instance (free tier) → connect it to the Supabase Postgres → define
-   sync rules → copy the instance URL.
-3. Provide: Supabase URL + anon key, PowerSync instance URL. (P0–P3 need none of this.)
+1. Create a **Supabase** project → SQL editor → run `db/supabase-schema.sql` (tables **and** the RLS
+   block at the bottom).
+2. **Auth → Providers:** Email is on by default. For **Apple**, enable the Apple provider and set the
+   Services ID / team / key (Apple Developer → Certificates, IDs & Profiles). For native iOS/macOS
+   Sign in with Apple, also add the app's **bundle id** (`com.cutetech.scout`) to the provider's
+   allowed client ids so the id-token audience validates.
+3. Create a **PowerSync** instance (free tier) → connect it to the Supabase Postgres → define sync
+   rules (sync rows where the user owns/belongs to the project) → copy the instance URL.
+4. Paste **Supabase URL + anon key + PowerSync URL** into `SupabaseConfig.swift`. (P0–P3 need none.)
+
+## Importing pre-migration data
+No automatic Core Data → PowerSync migration. Old projects come in through the existing **Export
+Project Data** backup → an **Import** path that writes into `ScoutStore` (wire `BackupService` to the
+store; tracked under P3).
 
 ## ID strategy
 Every row uses a client-generated UUID text primary key (matches today's `uuid`), so offline

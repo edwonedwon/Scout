@@ -75,6 +75,9 @@ targets:
           - CloudKit
         # Remote (silent) push so NSPersistentCloudKitContainer gets change notifications.
         aps-environment: development
+        # Sign in with Apple (Supabase Auth OIDC id-token flow — migration plan P4).
+        com.apple.developer.applesignin:
+          - Default
     info:
       path: Scout/Info.plist
       properties:

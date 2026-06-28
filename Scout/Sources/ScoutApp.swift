@@ -72,9 +72,34 @@ final class ScoutAppDelegate: NSObject, UIApplicationDelegate {
 }
 #endif
 
+/// Auth gate: shows the login screen until the user is signed in, then the app. When Supabase
+/// isn't configured yet (`authDisabled`), it falls straight through to the app (local-only mode),
+/// so the build is never blocked on account setup.
+private struct RootGate: View {
+    @EnvironmentObject private var auth: AuthManager
+    var body: some View {
+        Group {
+            if auth.isAuthenticated {
+                #if os(iOS)
+                ScoutIOSRootView()
+                #else
+                ContentView()
+                #endif
+            } else {
+                AuthView()
+            }
+        }
+        // Start/refresh sync whenever the signed-in state changes.
+        .task(id: auth.isAuthenticated) {
+            if auth.isAuthenticated { await ScoutStore.shared.connectIfPossible() }
+        }
+    }
+}
+
 @main
 struct ScoutApp: App {
     @StateObject private var apiKeyState = APIKeyState.shared
+    @StateObject private var auth = AuthManager.shared
     #if os(macOS)
     @NSApplicationDelegateAdaptor(ScoutAppDelegate.self) private var appDelegate
     #else
@@ -89,18 +114,13 @@ struct ScoutApp: App {
         WindowGroup {
             // No onboarding gate — open straight into the app. The Anthropic key (and any
             // other keys) can be set anytime in Settings; AI features prompt if it's missing.
-            Group {
-                #if os(iOS)
-                ScoutIOSRootView()
-                #else
-                ContentView()
-                #endif
-            }
+            RootGate()
             // Always-visible first-time photo download progress, centered at the top under the
             // dynamic island / toolbar.
             .overlay(alignment: .top) { PhotoSyncBar() }
         }
         .environmentObject(apiKeyState)
+        .environmentObject(auth)
         .environment(\.managedObjectContext, persistence.viewContext)
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
