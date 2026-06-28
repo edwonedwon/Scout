@@ -36,6 +36,14 @@ struct ProjectRecord: Identifiable, Hashable {
     var createdAt: Date
     var deletedAt: Date?
 
+    /// Local construction (e.g. reflecting a just-created project before the watch stream fires).
+    init(id: String, ownerId: String? = nil, name: String, notes: String = "",
+         uncategorizedPanelOrder: Int = 0, createdAt: Date = Date(), deletedAt: Date? = nil) {
+        self.id = id; self.ownerId = ownerId; self.name = name; self.notes = notes
+        self.uncategorizedPanelOrder = uncategorizedPanelOrder
+        self.createdAt = createdAt; self.deletedAt = deletedAt
+    }
+
     init(cursor c: SqlCursor) throws {
         id = try c.getString(name: "id")
         ownerId = try c.getStringOptional(name: "owner_id")
@@ -45,6 +53,14 @@ struct ProjectRecord: Identifiable, Hashable {
         createdAt = parseDate(try c.getStringOptional(name: "created_at")) ?? Date()
         deletedAt = parseDate(try c.getStringOptional(name: "deleted_at"))
     }
+}
+
+/// A project with its live list/pin counts, for the browse screen.
+struct ProjectSummary: Identifiable, Hashable {
+    var project: ProjectRecord
+    var listCount: Int
+    var pinCount: Int
+    var id: String { project.id }
 }
 
 struct ListRecord: Identifiable, Hashable {
