@@ -46,14 +46,14 @@ predictable cost, and sharing via Postgres Row-Level Security instead of CKShare
       Storage bucket + RLS in the schema. Hook into pin display/import during P2.
 - [x] **P6 — Sharing (code).** `project_members` + RLS; `ProjectSharing` (invite by email via the
       `user_id_for_email` RPC, roles, remove); `ShareProjectView`. Replaces CKShare — no hang.
-- [ ] **P7 — Cleanup.** Delete Core Data/CloudKit code + entitlements; update CLAUDE.md.
-      **Unblocked (P2 landed) but not started.** Order: (1) strip the residual Mac-UI Core Data calls
-      listed under P2; (2) redirect SettingsView import to `importIntoStore`; (3) delete
-      PersistenceController, ProjectData/PreviewData (managed objects), `.xcdatamodeld`,
-      PhotoBlobSync, OrphanSweeper, and the Core Data paths in BackupService/PhotoImportService;
-      (4) remove the CloudKit entitlements + Core Data bits from `project.yml`; (5) drop the
-      `managedObjectContext` injection + CKShare handlers in ScoutApp. Large destructive pass —
-      removes the fallback path, so do it deliberately with a green build at each step.
+- [x] **P7 — Cleanup. DONE.** Deleted the entire Core Data/CloudKit stack on both platforms:
+      PersistenceController, PhotoBlobSync, OrphanSweeper, the ProjectData/LocationListData/
+      PinnedLocationData/ScriptData managed objects, PreviewData, `ScoutModel.xcdatamodeld`, the
+      Core Data halves of BackupService (export(ProjectData)/importBackup/fromBackup) and
+      PhotoImportService (makePin/fromImport). Removed all `import CoreData`, the modelContext
+      injection + no-op `save()` calls + undoManager hookup, the CKShare app/scene delegates, and
+      the iCloud/CloudKit/aps entitlements from `project.yml` (Apple Sign-In kept). PhotoSyncProgress
+      moved into PhotoSyncBar; list-color palette moved onto ListVM. Both targets build green.
 
 ## Auth (DONE in code — P4 backend wiring)
 Supabase Auth (GoTrue) with **email/password** and **Sign in with Apple** (OIDC id-token flow).
