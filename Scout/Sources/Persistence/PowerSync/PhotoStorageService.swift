@@ -71,15 +71,20 @@ struct PhotoStorageService {
         let ledger = PhotoUploadLedger.shared
         let present = jobs.filter { FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0.filename).path) }
         let total = present.count
+        let missingLocally = jobs.count - total
         let pending = force ? present
             : present.filter { !ledger.contains(tier: $0.tier.rawValue, filename: $0.filename) }
         var done = total - pending.count   // "already on the server" per the ledger
 
+        // Always log the lay of the land — this is the line that tells us whether the files even
+        // exist on this Mac (missingLocally) and how many still need sending.
+        dlog("upload: \(jobs.count) referenced, \(total) present on disk (\(missingLocally) missing locally), \(done) already sent, \(pending.count) to upload (force=\(force))",
+             level: missingLocally > 0 ? .warning : .info, tag: "Photos")
+
         guard !pending.isEmpty else {
-            dlog("upload: all \(total) local files already on the server — nothing to send", level: .success, tag: "Photos")
+            dlog("upload: nothing to send — \(total) present files all marked uploaded", level: .success, tag: "Photos")
             return
         }
-        dlog("upload: \(total) local files, \(done) already sent, \(pending.count) to upload (force=\(force))", tag: "Photos")
 
         func report() async {
             let d = done, t = total
