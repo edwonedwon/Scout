@@ -473,6 +473,8 @@ struct ProjectsPanel: View {
         }
         modelContext.delete(project)
         try? modelContext.save()
+        // Sweep any records the manual cascade (or a CloudKit merge) might have stranded.
+        OrphanSweeper.sweep(context: modelContext)
     }
 
     /// Permanently deletes all trashed projects and their contents.
@@ -2477,6 +2479,7 @@ private struct ProjectDetailView: View {
         .onAppear {
             normalizeOrder()
             purgeExpiredTrash()   // remove photos trashed > 30 days ago
+            OrphanSweeper.sweep(context: modelContext)  // clear records stranded by deletes/merges
             // project.lists is synchronously available here via SwiftData.
             if !initialExpandedUUIDs.isEmpty {
                 expandedListIDs = Set(
