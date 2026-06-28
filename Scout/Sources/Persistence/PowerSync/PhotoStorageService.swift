@@ -104,6 +104,30 @@ struct PhotoStorageService {
         }
     }
 
+    /// Pre-download a project's thumbnails into the local cache when it's opened, a few at a time so
+    /// the network/UI never gets flooded. Skips files already cached; posts `.photoDidMaterialize`
+    /// per file so on-screen placeholders fill in as they arrive. Honors task cancellation, so
+    /// leaving the project stops it.
+    func prefetchThumbnails(projectId: String, files: [String], maxConcurrent: Int = 5) async {
+        guard client != nil else { return }
+        let missing = Array(Set(files)).filter { !FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0).path) }
+        var i = 0
+        while i < missing.count {
+            if Task.isCancelled { return }
+            let chunk = missing[i ..< min(i + maxConcurrent, missing.count)]
+            await withTaskGroup(of: Void.self) { group in
+                for file in chunk {
+                    group.addTask {
+                        if await self.ensureLocal(filename: file, projectId: projectId, tier: .thumbnail) != nil {
+                            await MainActor.run { NotificationCenter.default.post(name: .photoDidMaterialize, object: file) }
+                        }
+                    }
+                }
+            }
+            i += maxConcurrent
+        }
+    }
+
     /// Fetch every photo's thumbnail for a pin (the always-available tier). Originals are skipped
     /// unless `autoDownloadOriginals` is on.
     func prefetch(pin: PinRecord) async {

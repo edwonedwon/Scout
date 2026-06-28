@@ -264,6 +264,12 @@ struct InProjectShell: View {
         .onAppear {
             if visibleListIDs.isEmpty { visibleListIDs = project.allListIDs }
         }
+        // Warm the local thumbnail cache for this project, a few downloads at a time, so scrolling
+        // photos is instant instead of fetching one-by-one on demand. Cancelled when you leave.
+        .task(id: project.id) {
+            let files = project.allMapPins.flatMap { $0.thumbnailFiles }
+            await PhotoStorageService.shared.prefetchThumbnails(projectId: project.id, files: files)
+        }
         .fullScreenCover(isPresented: $showCamera) {
             IOSCameraSheet(project: project)
         }
