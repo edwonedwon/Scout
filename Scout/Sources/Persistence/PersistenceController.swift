@@ -180,30 +180,25 @@ final class PersistenceController {
             share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
             share.publicPermission = editor ? .readWrite : .readOnly
 
-            // Apply the permission change best-effort in the background. We do NOT await
-            // persistUpdatedShare — it hangs indefinitely on some accounts.
-            Task.detached { [container] in
-                do { _ = try await container.persistUpdatedShare(share, in: privateStore) }
-                catch { dlog("Permission update failed (link still works): \(error.localizedDescription)", level: .warning, tag: "Share") }
-            }
-
-            // The share's URL is assigned by the server asynchronously, so it's often nil right
-            // after share(). Poll the locally-cached share until the URL appears (CloudKit fills
-            // it once the share record finishes exporting).
+            // If the share already has a URL (e.g. it existed from a prior share), use it.
             if let url = share.url {
-                dlog("Invite link ready: \(url)", level: .success, tag: "Share")
+                dlog("Invite link ready (existing): \(url)", level: .success, tag: "Share")
                 return url
             }
-            dlog("Share created; waiting for iCloud to assign the link…", tag: "Share")
-            for attempt in 1...15 {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                if let url = self.existingShare(for: project)?.url {
-                    dlog("Invite link ready after \(attempt)s: \(url)", level: .success, tag: "Share")
-                    return url
-                }
+
+            // Persist the share to CloudKit — THIS is the call that saves it to the server and
+            // assigns the URL. Await it (with a generous timeout); the first share can be slow
+            // while CloudKit creates the share schema. Surface the real error if it fails.
+            dlog("Persisting share to iCloud to obtain the link…", tag: "Share")
+            let saved = try await withTimeout(60, step: "saving the share to iCloud") {
+                try await self.container.persistUpdatedShare(share, in: privateStore)
             }
-            dlog("No invite link after 15s", level: .error, tag: "Share")
-            throw SharingError.timedOut("waiting for iCloud to assign the invite link")
+            guard let url = saved.url else {
+                dlog("Share persisted but no URL was assigned", level: .error, tag: "Share")
+                throw SharingError.noURL
+            }
+            dlog("Invite link ready: \(url)", level: .success, tag: "Share")
+            return url
         } catch {
             dlog("Share failed: \(error.localizedDescription)", level: .error, tag: "Share")
             throw error
