@@ -458,6 +458,11 @@ enum BackupService {
         // Photo files to copy into the local cache (src basename), and per-project upload jobs.
         var photoCopies = Set<String>()
         var uploads: [(projectId: String, tier: PhotoStorageService.Tier, filename: String)] = []
+        // Maps each backup list's original uuid → its freshly generated store id, so script
+        // highlights can re-link to the right list (ids are regenerated on import). Lists are
+        // always inserted before their project's scripts, so the map is complete when used.
+        var listIdByOriginalUUID: [UUID: String] = [:]
+        var highlightLinksRestored = 0
 
         func remember(photos files: [String]) { files.forEach { photoCopies.insert($0) } }
 
@@ -484,10 +489,11 @@ enum BackupService {
 
         func addList(_ bl: BackupList, projectId: String, parentId: String?) {
             let id = ScoutStore.newID()
-            ops.append((listInsertSQL, [id, projectId, parentId as Any, bl.name, bl.colorHex,
-                                        bl.sceneType as Any, bl.panelOrder, bl.sortOrder,
+            listIdByOriginalUUID[bl.uuid] = id
+            ops.append((listInsertSQL, [id, projectId, parentId, bl.name, bl.colorHex,
+                                        bl.sceneType, bl.panelOrder, bl.sortOrder,
                                         ISO8601DateFormatter.string(bl.createdAt),
-                                        bl.deletedAt.map { ISO8601DateFormatter.string($0) } as Any]))
+                                        bl.deletedAt.map { ISO8601DateFormatter.string($0) }]))
             summary.listsAdded += 1
             for bp in bl.pins { addPin(bp, listId: id, projectId: projectId) }
             for child in (bl.childLists ?? []) { addList(child, projectId: projectId, parentId: id) }
@@ -506,14 +512,16 @@ enum BackupService {
                                               ISO8601DateFormatter.string(bs.importedAt),
                                               ISO8601DateFormatter.string(bs.updatedAt)]))
                 summary.scriptsAdded += 1
-                // Highlights re-link to lists by original uuid only where the list was imported;
-                // since list ids are freshly generated, we drop scene→list links on store import
-                // (the text + highlight ranges are preserved). Re-link is a later refinement.
+                // Re-link each scene to its list via the original-uuid → new-id map built above.
+                // A nil result means the linked list wasn't part of this backup (link stays nil);
+                // the text + highlight ranges are preserved either way.
                 for bh in bs.highlights {
                     let hid = ScoutStore.newID()
-                    ops.append((highlightInsertSQL, [hid, sid, nil, bh.rangeStart, bh.rangeLength,
+                    let linkedListId = bh.listUUID.flatMap { listIdByOriginalUUID[$0] }
+                    if linkedListId != nil { highlightLinksRestored += 1 }
+                    ops.append((highlightInsertSQL, [hid, sid, linkedListId, bh.rangeStart, bh.rangeLength,
                                                      bh.excerpt, bh.contextBefore, bh.contextAfter,
-                                                     bh.sceneHeading as Any,
+                                                     bh.sceneHeading,
                                                      ISO8601DateFormatter.string(bh.createdAt)]))
                 }
             }
@@ -527,7 +535,7 @@ enum BackupService {
             addProject(wrapper)
         }
 
-        await ilog("Built \(ops.count) row insert(s): \(summary.projectsAdded) projects, \(summary.listsAdded) lists, \(summary.pinsAdded) pins, \(summary.scriptsAdded) scripts. \(photoCopies.count) photo file(s) referenced.")
+        await ilog("Built \(ops.count) row insert(s): \(summary.projectsAdded) projects, \(summary.listsAdded) lists, \(summary.pinsAdded) pins, \(summary.scriptsAdded) scripts. \(highlightLinksRestored) scene→list link(s) restored. \(photoCopies.count) photo file(s) referenced.")
 
         // Copy photo bytes into the local cache so thumbnails/full-res work immediately offline.
         var missingLocal = 0
