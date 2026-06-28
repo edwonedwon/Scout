@@ -2704,9 +2704,8 @@ private struct ProjectDetailView: View {
         isBackfilling = true
         timelineProgress = (0, 0, "")
         DebugLogger.shared.log("Timeline import started…", level: .info)
-        let context = modelContext
         Task {
-            let result = await TimelineGeoService.backfill(timelineURL: url, context: context) { current, total, name in
+            let result = await TimelineGeoService.backfill(timelineURL: url) { current, total, name in
                 timelineProgress = (current, total, name)
             }
             isBackfilling = false
@@ -2715,9 +2714,8 @@ private struct ProjectDetailView: View {
                 "Timeline import done — timezone: \(result.detectedTimezone), updated: \(result.updated), skipped: \(result.skipped), failed: \(result.failed)",
                 level: result.failed > 0 ? .warning : .success
             )
-            // TODO(P2): TimelineGeoService still backfills the Core Data store; reveal is disabled
-            // until it's ported to ScoutStore (its results aren't VMs in the synced graph).
-            _ = result.updatedPins
+            // The store's reactive watch refreshes the map/grid VMs automatically as pins gain GPS.
+            _ = result.updatedPinIDs
         }
         #endif
     }

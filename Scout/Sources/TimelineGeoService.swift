@@ -1,7 +1,6 @@
 import Foundation
 import CoreLocation
 import ImageIO
-import CoreData
 
 // MARK: - Timeline JSON model
 
@@ -55,20 +54,20 @@ enum TimelineGeoService {
         var skipped: Int = 0     // no dateTaken or no matching timeline window
         var failed: Int = 0      // matched but file write failed
         var detectedTimezone: String = ""
-        var updatedPins: [PinnedLocationData] = []
+        var updatedPinIDs: [String] = []
     }
 
     // MARK: - Public entry point
 
-    /// Loads the timeline JSON at `url`, then for every pin in `context` that has
-    /// `hasGPS == false`, resolves the coordinate, writes GPS EXIF back to the photo
-    /// file on disk (losslessly), and updates the SwiftData record.
+    /// Loads the timeline JSON at `url`, then for every pin in the store that has
+    /// `hasGPS == false` (or GPS from a prior backfill), resolves the coordinate, writes GPS EXIF
+    /// back to the photo file on disk (losslessly), and updates the store record (which syncs).
     ///
     /// EXIF `DateTimeOriginal` has no timezone. We detect the timezone from the
     /// timeline entries' ISO 8601 offset and re-parse the EXIF date with that timezone
     /// so the timestamps match correctly — without this, e.g. a UTC system clock
     /// shifts all Japan photos 9 hours into the wrong activity windows.
-    static func backfill(timelineURL: URL, context: NSManagedObjectContext,
+    static func backfill(timelineURL: URL,
                          onProgress: (@MainActor (Int, Int, String) -> Void)? = nil) async -> BackfillResult {
         let scoped = timelineURL.startAccessingSecurityScopedResource()
         defer { if scoped { timelineURL.stopAccessingSecurityScopedResource() } }
@@ -83,11 +82,9 @@ enum TimelineGeoService {
         let (visits, fixes) = buildIndex(entries)
         let exifFmt = makeDateFormatter(timezone: detectedTZ)
 
-        let pins: [PinnedLocationData] = (try? context.fetch(FetchDescriptor(PinnedLocationData.self))) ?? []
-        // Candidates: photos with no GPS yet, OR photos whose GPS came from a *previous*
-        // timeline backfill (so re-importing can correct them). Photos with GPS baked into
-        // the original file are never touched.
-        let candidates = pins.filter { (pin: PinnedLocationData) in !pin.hasGPS || pin.gpsFromTimeline }
+        // Candidates: photos with no GPS yet, OR photos whose GPS came from a *previous* timeline
+        // backfill (so re-importing can correct them). Photos with GPS baked in are never touched.
+        let candidates = (try? await ScoutStore.shared.timelineBackfillCandidates()) ?? []
 
         var result = BackfillResult(detectedTimezone: tzName)
         let total = candidates.count
@@ -99,28 +96,22 @@ enum TimelineGeoService {
             guard let date else { result.skipped += 1; continue }
             guard let coord = coordinate(at: date, visits: visits, fixes: fixes) else { result.skipped += 1; continue }
 
-            let fileCount = pin.photoFiles.count
-            let writeOK = fileCount == 0 || pin.photoFiles.allSatisfy {
+            let writeOK = pin.photoFiles.isEmpty || pin.photoFiles.allSatisfy {
                 writeGPS(coord, to: PinPhotoStore.fileURL($0))
             }
 
             if writeOK {
-                pin.latitude        = coord.latitude
-                pin.longitude       = coord.longitude
-                pin.hasGPS          = true
-                pin.gpsFromTimeline = true   // mark so a future re-import may correct it
-                // Persist the corrected date too.
-                if let corrected = exifDate(from: pin, formatter: exifFmt) {
-                    pin.dateTaken = corrected
-                }
+                // Persist the corrected date too (re-read with the right timezone).
+                let correctedDate = exifDate(from: pin, formatter: exifFmt) ?? pin.dateTaken
+                try? await ScoutStore.shared.setPinTimelineGPS(
+                    id: pin.id, latitude: coord.latitude, longitude: coord.longitude, dateTaken: correctedDate)
                 result.updated += 1
-                result.updatedPins.append(pin)
+                result.updatedPinIDs.append(pin.id)
             } else {
                 result.failed += 1
             }
         }
 
-        try? context.save()
         return result
     }
 
@@ -128,7 +119,7 @@ enum TimelineGeoService {
 
     /// Reads `DateTimeOriginal` from the first photo file of a pin using the supplied
     /// formatter (which has the correct timezone baked in).
-    private static func exifDate(from pin: PinnedLocationData, formatter: DateFormatter) -> Date? {
+    private static func exifDate(from pin: PinRecord, formatter: DateFormatter) -> Date? {
         guard let filename = pin.photoFiles.first else { return nil }
         let url = PinPhotoStore.fileURL(filename)
         guard let data   = try? Data(contentsOf: url),

@@ -1767,7 +1767,7 @@ struct ContentView: View {
         }
         guard let url = picked else { isBackupBusy = false; return }
         backupProgress = 0
-        let result = await BackupService.relinkOriginals(folder: url, context: modelContext) { stage, frac in
+        let result = await BackupService.relinkOriginals(folder: url) { stage, frac in
             Task { @MainActor in
                 backupStatusMessage = stage
                 backupProgress = frac

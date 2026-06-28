@@ -627,15 +627,15 @@ enum BackupService {
     /// iCloud) plus the local absolute path (`originalFilePath`, a this-Mac convenience), and
     /// regenerates the compressed `photoFiles` image so full-resolution viewing and sync work again.
     ///
-    /// The heavy folder scan, metadata reads and image compression run off the main actor; only the
-    /// final managed-object writes happen on the context's queue. `progress` is called with a stage
+    /// The heavy folder scan, metadata reads and image compression run off the main actor; the final
+    /// writes go through `ScoutStore` (so the recovered originalFilename + regenerated full-res sync)
+    /// and `OriginalPathStore` (the local-only absolute path). `progress` is called with a stage
     /// description and a 0–1 fraction; it may fire from a background thread.
     static func relinkOriginals(folder: URL,
-                                context: NSManagedObjectContext,
                                 progress: (@Sendable (String, Double) -> Void)? = nil) async -> RelinkSummary {
-        // --- Snapshot the pins that still need work (main/context thread, value types only) ---
-        let allPins: [PinnedLocationData] = (try? context.fetch(FetchDescriptor(PinnedLocationData.self))) ?? []
-        var objectIDs: [NSManagedObjectID] = []
+        // --- Snapshot the pins that still need work (value types only for the off-main matcher) ---
+        let allPins = (try? await ScoutStore.shared.allActivePins()) ?? []
+        var matchedPins: [PinRecord] = []   // parallel to `infos`, indexed by RelinkResult.idx
         var infos: [RelinkPinInfo] = []
         var alreadyLinked = 0
         for pin in allPins {
@@ -645,7 +645,7 @@ enum BackupService {
             infos.append(RelinkPinInfo(idx: infos.count, name: pin.name, dateTaken: pin.dateTaken,
                                        lat: pin.latitude, lng: pin.longitude, hasGPS: pin.hasGPS,
                                        needsFullRes: needsFullRes))
-            objectIDs.append(pin.objectID)
+            matchedPins.append(pin)
         }
 
         // --- Off-main: scan, read metadata, match, and compress originals ---
@@ -654,21 +654,30 @@ enum BackupService {
             RelinkMatcher.run(folder: folder, pins: captured, progress: progress)
         }.value
 
-        // --- Apply results on the context's queue ---
+        // --- Apply results through the store + local path map ---
         var summary = RelinkSummary()
         summary.scanned       = outcome.scanned
         summary.notFound      = outcome.notFound
         summary.alreadyLinked = alreadyLinked
+        var localPaths: [String: String] = [:]
         for r in outcome.results {
-            guard r.idx < objectIDs.count,
-                  let pin = context.object(with: objectIDs[r.idx]) as? PinnedLocationData else { continue }
-            pin.originalFilename = r.originalFilename
-            pin.originalFilePath = r.originalPath
-            if pin.aspectRatio == 0, r.aspect > 0 { pin.aspectRatio = r.aspect }
-            if let full = r.fullResName { pin.photoFiles = [full]; summary.photosGenerated += 1 }
+            guard r.idx < matchedPins.count else { continue }
+            let pin = matchedPins[r.idx]
+            let newAspect = (pin.aspectRatio == 0 && r.aspect > 0) ? r.aspect : pin.aspectRatio
+            let newPhotoFiles = r.fullResName.map { [$0] } ?? pin.photoFiles
+            try? await ScoutStore.shared.setPinOriginalLink(
+                id: pin.id, originalFilename: r.originalFilename, aspectRatio: newAspect,
+                photoFiles: newPhotoFiles, thumbnailFiles: pin.thumbnailFiles)
+            localPaths[pin.id] = r.originalPath
+            if let full = r.fullResName {
+                // Push the regenerated full-res to Storage so other devices get it.
+                await PhotoStorageService.shared.uploadLocalTiers(
+                    pinId: pin.id, fullFiles: [full], thumbnailFiles: [])
+                summary.photosGenerated += 1
+            }
             summary.linked += 1
         }
-        try? context.save()
+        await OriginalPathStore.shared.merge(localPaths)
         progress?("Done", 1.0)
         return summary
     }

@@ -172,6 +172,14 @@ final class ScoutStore {
         ) { try PinRecord(cursor: $0) }
     }
 
+    /// Every live pin across all projects (used by relink, which matches the whole library at once).
+    func allActivePins() async throws -> [PinRecord] {
+        try await db.getAll(
+            sql: "SELECT * FROM pins WHERE deleted_at IS NULL",
+            parameters: []
+        ) { try PinRecord(cursor: $0) }
+    }
+
     func projectCount() async throws -> Int {
         let rows = try await db.getAll(
             sql: "SELECT COUNT(*) AS c FROM projects",
@@ -341,6 +349,23 @@ final class ScoutStore {
                              parameters: [latitude, longitude, hasGPS ? 1 : 0, id])
     }
 
+    /// Pins eligible for Google Timeline GPS backfill: no GPS yet, or GPS set by a *previous*
+    /// backfill (so a re-import can correct it). Pins with GPS baked into the original are skipped.
+    func timelineBackfillCandidates() async throws -> [PinRecord] {
+        try await db.getAll(
+            sql: "SELECT * FROM pins WHERE deleted_at IS NULL AND (has_gps = 0 OR gps_from_timeline = 1) ORDER BY created_at",
+            parameters: []
+        ) { try PinRecord(cursor: $0) }
+    }
+
+    /// Persist a timeline-derived GPS fix. Marks `gps_from_timeline` so a later re-import may
+    /// correct it, and stores the timezone-corrected capture date.
+    func setPinTimelineGPS(id: String, latitude: Double, longitude: Double, dateTaken: Date?) async throws {
+        try await db.execute(
+            sql: "UPDATE pins SET latitude = ?, longitude = ?, has_gps = 1, gps_from_timeline = 1, date_taken = ? WHERE id = ?",
+            parameters: [latitude, longitude, dateTaken.map { ISO8601DateFormatter.string($0) }, id])
+    }
+
     /// Move a pin into a list (or, with listId nil + a projectId, into the project's loose photos).
     func movePin(id: String, toList listId: String?, owningProjectId: String? = nil, sortOrder: Int? = nil) async throws {
         if let sortOrder {
@@ -354,6 +379,17 @@ final class ScoutStore {
                 parameters: [listId, owningProjectId, id]
             )
         }
+    }
+
+    /// Apply a relink match: restores the device-independent original filename and, when the
+    /// original was re-found, the regenerated full-res image + corrected aspect ratio. Thumbnails
+    /// are passed through unchanged. (The machine-specific absolute path lives in OriginalPathStore.)
+    func setPinOriginalLink(id: String, originalFilename: String, aspectRatio: Double,
+                            photoFiles: [String], thumbnailFiles: [String]) async throws {
+        try await db.execute(
+            sql: "UPDATE pins SET original_filename = ?, aspect_ratio = ?, photo_files = ?, thumbnail_files = ? WHERE id = ?",
+            parameters: [originalFilename, aspectRatio, encodeJSON(photoFiles), encodeJSON(thumbnailFiles), id]
+        )
     }
 
     func setPinPhotoFiles(id: String, photoFiles: [String], thumbnailFiles: [String]) async throws {

@@ -172,13 +172,12 @@ private struct BackupSection: View {
             }
         }
         guard let url else { return }
-        let result = await BackupService.relinkOriginals(folder: url, context: modelContext) { stage, _ in
+        let result = await BackupService.relinkOriginals(folder: url) { stage, _ in
             Task { @MainActor in statusMessage = stage }
         }
         statusMessage = "Relinked \(result.linked) of \(result.linked + result.notFound) photos "
             + "(\(result.photosGenerated) images rebuilt, \(result.notFound) not found) from \(result.scanned) files."
-        // Upload the freshly-generated full-res derivatives to iCloud so they sync to other devices.
-        PhotoBlobSync.reconcile(container: PersistenceController.shared.container)
+        // relinkOriginals already pushed the regenerated full-res images to Supabase Storage.
     }
 }
 #endif

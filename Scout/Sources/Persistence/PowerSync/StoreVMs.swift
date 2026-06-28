@@ -243,6 +243,8 @@ final class PinVM: ObservableObject, Identifiable {
         originalFilename = r.originalFilename; hasGPS = r.hasGPS; gpsFromTimeline = r.gpsFromTimeline
         dateTaken = r.dateTaken; createdAt = r.createdAt; photoFiles = r.photoFiles
         thumbnailFiles = r.thumbnailFiles; listId = r.listId; owningProjectId = r.owningProjectId
+        // Local-only: the absolute path to this device's original file, if a relink found one.
+        originalFilePath = OriginalPathStore.shared.path(for: id)
     }
 
     var uuid: UUID { UUID(uuidString: id) ?? UUID() }
