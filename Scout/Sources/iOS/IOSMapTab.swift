@@ -17,6 +17,11 @@ struct IOSMapTab: View {
     @State private var showPhotos = false
     // The current visible span, used to size cluster cells. Updated as the camera moves.
     @State private var visibleSpan = MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
+    @Namespace private var mapScope
+
+    // Pan + zoom only — NOT rotate — so a stray two-finger twist while pinch-zooming can't knock the
+    // map off north. The compass button is still here as a one-tap "reset to north" affordance.
+    private let interaction: MapInteractionModes = [.pan, .zoom]
 
     enum MapStyleChoice: String, CaseIterable, Identifiable {
         case standard, satellite, hybrid
@@ -82,7 +87,8 @@ struct IOSMapTab: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            Map(position: $cameraPosition) {
+            Map(position: $cameraPosition, interactionModes: interaction, scope: mapScope) {
+                UserAnnotation()
                 ForEach(clusters) { cluster in
                     Annotation(cluster.pins.first?.name ?? "", coordinate: cluster.coordinate) {
                         if let pin = cluster.single {
@@ -99,6 +105,16 @@ struct IOSMapTab: View {
             .ignoresSafeArea()
             .onAppear { cameraPosition = .region(defaultRegion); visibleSpan = defaultRegion.span }
             .onMapCameraChange(frequency: .onEnd) { ctx in visibleSpan = ctx.region.span }
+            // User-location + compass controls, stacked above the tab bar on the trailing side.
+            .overlay(alignment: .bottomTrailing) {
+                VStack(spacing: 10) {
+                    MapCompass(scope: mapScope)
+                    MapUserLocationButton(scope: mapScope)
+                }
+                .mapControlVisibility(.visible)
+                .padding(.trailing, 12)
+                .padding(.bottom, 28)
+            }
             .onChange(of: focusPin) { _, pin in
                 guard let pin else { return }
                 withAnimation(.easeInOut(duration: 0.5)) {
