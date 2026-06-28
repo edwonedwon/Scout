@@ -24,11 +24,17 @@ predictable cost, and sharing via Postgres Row-Level Security instead of CKShare
 - [x] **P0 — Foundation.** PowerSync + supabase-swift deps; PowerSync `Schema` + `db/supabase-schema.sql`.
 - [x] **P1 — Local data layer.** `ScoutStore` over PowerSync SQLite + `*Record` models, full CRUD,
       `watch` queries, transactions. Testable offline with no account.
-- [ ] **P2 — Wire the UI.** Replace `@FetchRequest`/NSManagedObject usage in ContentView,
-      ProjectsPanel, iOS views, DataInspector, DebugPanel with `ScoutStore` + observable queries.
-      **NOT STARTED — the one risky phase.** Deliberately deferred until accounts are live so each
-      screen can be verified against real sync; swapping it blind would break live TestFlight data.
-      Plan: one screen at a time (start with the iOS sidebar), Core Data path staying until proven.
+- [x] **P2 — Wire the UI.** Mac (ContentView/ProjectsPanel/DataInspector/DebugPanel) and the iOS
+      browse tree (ScoutIOSRootView/InProjectShell/IOSSidebarDrawer/IOSMapTab/IOSPhotosTab/Script/
+      Scout) now read/write the store via the **MacStore VM adapter** (ProjectVM/ListVM/PinVM/
+      ScriptVM). RootGate shows the store-backed iOS tree by default. Timeline GPS backfill + original
+      relink also ported (relink writes a local-only OriginalPathStore for absolute paths). In-app
+      photo imports upload thumb+full to Storage.
+      **Residual before P7:** ContentView/ProjectsPanel still have ~40 dead `try? modelContext.save()`
+      no-ops + dead `modelContext.undoManager`/`OrphanSweeper.sweep`/`purgeAllProjects(context)`;
+      SettingsView still calls the old Core Data `BackupService.importBackup(from:context:)` +
+      `PhotoBlobSync.reconcile`. These must be stripped/redirected first. iOS photo import / camera /
+      scout recording remain stubs (later milestones, not blockers for P7).
 - [x] **P3 — Data import.** `BackupService.importIntoStore(from:)` loads a pre-migration Export zip
       into `ScoutStore` (no auto Core Data migration). Copies photo bytes locally + uploads to
       Storage when configured. (Wire the Import menu action to it as part of P2.)
@@ -40,8 +46,14 @@ predictable cost, and sharing via Postgres Row-Level Security instead of CKShare
       Storage bucket + RLS in the schema. Hook into pin display/import during P2.
 - [x] **P6 — Sharing (code).** `project_members` + RLS; `ProjectSharing` (invite by email via the
       `user_id_for_email` RPC, roles, remove); `ShareProjectView`. Replaces CKShare — no hang.
-- [ ] **P7 — Cleanup.** Delete Core Data/CloudKit code + entitlements; update CLAUDE.md. Do this
-      only AFTER P2 lands and sync is verified (it removes the fallback path).
+- [ ] **P7 — Cleanup.** Delete Core Data/CloudKit code + entitlements; update CLAUDE.md.
+      **Unblocked (P2 landed) but not started.** Order: (1) strip the residual Mac-UI Core Data calls
+      listed under P2; (2) redirect SettingsView import to `importIntoStore`; (3) delete
+      PersistenceController, ProjectData/PreviewData (managed objects), `.xcdatamodeld`,
+      PhotoBlobSync, OrphanSweeper, and the Core Data paths in BackupService/PhotoImportService;
+      (4) remove the CloudKit entitlements + Core Data bits from `project.yml`; (5) drop the
+      `managedObjectContext` injection + CKShare handlers in ScoutApp. Large destructive pass —
+      removes the fallback path, so do it deliberately with a green build at each step.
 
 ## Auth (DONE in code — P4 backend wiring)
 Supabase Auth (GoTrue) with **email/password** and **Sign in with Apple** (OIDC id-token flow).
