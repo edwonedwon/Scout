@@ -1736,7 +1736,9 @@ struct ContentView: View {
         }
         guard let url = picked else { isBackupBusy = false; return }
         do {
-            let s = try await BackupService.importBackup(from: url, context: modelContext)
+            // Import into ScoutStore (PowerSync) — syncs up to Supabase and copies photo bytes to
+            // the local cache (and Storage when configured). Replaces the old Core Data import.
+            let s = try await BackupService.importIntoStore(from: url)
             backupStatusMessage = "Imported \(s.projectsAdded) projects, \(s.listsAdded) lists, \(s.pinsAdded) pins. Skipped \(s.skippedDuplicates) duplicates."
         } catch {
             backupStatusMessage = "Import failed: \(error.localizedDescription)"
