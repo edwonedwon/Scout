@@ -389,7 +389,33 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.15), value: sharingProject != nil)
         }
         .frame(minWidth: 820, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
+        #if os(macOS)
+        .task { await photoUploadCheckLoop() }
+        #endif
     }
+
+    #if os(macOS)
+    /// Periodically make sure every local photo has been pushed to Storage, so other devices can
+    /// download them. Runs shortly after launch (once the store has pins) and every few minutes
+    /// after. The ledger makes repeat passes cheap — only new/missing files are sent — and the sync
+    /// bar shows progress while an upload is actually in flight.
+    private func photoUploadCheckLoop() async {
+        while !Task.isCancelled {
+            if !mac.pins.isEmpty {
+                // Thumbnails for every pin first (what the grid needs), then full-res.
+                var thumbs: [(projectId: String, tier: PhotoStorageService.Tier, filename: String)] = []
+                var fulls: [(projectId: String, tier: PhotoStorageService.Tier, filename: String)] = []
+                for pin in mac.pins where pin.deletedAt == nil {
+                    guard let pid = pin.owningProjectId ?? pin.list?.projectId else { continue }
+                    for f in pin.thumbnailFiles { thumbs.append((pid, .thumbnail, f)) }
+                    for f in pin.photoFiles { fulls.append((pid, .full, f)) }
+                }
+                await PhotoStorageService.shared.uploadLocalPhotos(thumbs + fulls)
+            }
+            try? await Task.sleep(for: .seconds(300))
+        }
+    }
+    #endif
 
     @ViewBuilder private var rootLayoutWithObservers: some View {
         rootLayoutWithCacheObservers
@@ -539,6 +565,8 @@ struct ContentView: View {
                 )
             }
             centerPanel
+                // Photo upload progress (the periodic "are all photos on the server?" check).
+                .overlay(alignment: .top) { PhotoSyncBar().padding(.top, 10) }
             if showRightPanel {
                 Divider()
                 scoutPanel

@@ -56,33 +56,59 @@ struct PhotoStorageService {
         try await upload(data, projectId: projectId, tier: tier, filename: filename)
     }
 
-    /// Repair pass: (re-)upload every locally-cached photo file for these jobs to Storage so other
-    /// devices can download them. Idempotent (upsert), skips files not present on disk, a few at a
-    /// time. Use when an import only partially uploaded and a device shows stuck placeholders.
-    /// `progress(done, total)` is called on the main actor as it advances.
+    /// (Re-)upload locally-cached photo files to Storage so other devices can download them. Drives
+    /// PhotoSyncProgress ("Uploading photos N / M") so the sync bar shows progress — `total` counts
+    /// every file present on disk and `done` starts at however many are already uploaded (per the
+    /// ledger), so the bar reflects "X already on the server, working up to all". Idempotent upserts,
+    /// a few at a time. `force` ignores the ledger and re-sends everything (the manual repair button);
+    /// the periodic check leaves it false so it only sends new/missing files.
     func uploadLocalPhotos(_ jobs: [(projectId: String, tier: Tier, filename: String)],
+                           force: Bool = false,
                            maxConcurrent: Int = 4,
-                           progress: @escaping @MainActor (Int, Int) -> Void) async {
+                           onProgress: (@MainActor (Int, Int) -> Void)? = nil) async {
         guard client != nil else { return }
+        let ledger = PhotoUploadLedger.shared
         let present = jobs.filter { FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0.filename).path) }
-        await MainActor.run { progress(0, present.count) }
-        var done = 0
+        let total = present.count
+        let pending = force ? present
+            : present.filter { !ledger.contains(tier: $0.tier.rawValue, filename: $0.filename) }
+        var done = total - pending.count   // "already on the server" per the ledger
+
+        func report() async {
+            let d = done, t = total
+            await MainActor.run {
+                PhotoSyncProgress.shared.update(downloaded: d, total: t, verb: "Uploading")
+                onProgress?(d, t)
+            }
+        }
+        await report()
+
         var i = 0
-        while i < present.count {
-            if Task.isCancelled { return }
-            let chunk = present[i ..< min(i + maxConcurrent, present.count)]
-            await withTaskGroup(of: Void.self) { group in
-                for job in chunk {
+        while i < pending.count {
+            if Task.isCancelled { ledger.save(); return }
+            let chunk = Array(pending[i ..< min(i + maxConcurrent, pending.count)])
+            await withTaskGroup(of: (Int, Bool).self) { group in
+                for (offset, job) in chunk.enumerated() {
                     group.addTask {
-                        try? await self.upload(fileURL: PinPhotoStore.fileURL(job.filename),
-                                               projectId: job.projectId, tier: job.tier, filename: job.filename)
+                        do {
+                            try await self.upload(fileURL: PinPhotoStore.fileURL(job.filename),
+                                                  projectId: job.projectId, tier: job.tier, filename: job.filename)
+                            return (offset, true)
+                        } catch { return (offset, false) }
                     }
+                }
+                for await (offset, ok) in group where ok {
+                    let job = chunk[offset]
+                    ledger.mark(tier: job.tier.rawValue, filename: job.filename)
                 }
             }
             done += chunk.count
-            await MainActor.run { progress(done, present.count) }
+            await report()
             i += maxConcurrent
         }
+        ledger.save()
+        // Settle the bar at total/total so it hides itself.
+        await MainActor.run { PhotoSyncProgress.shared.update(downloaded: total, total: total, verb: "Uploading") }
     }
 
     /// Best-effort upload of a freshly imported pin's locally-cached tiers (thumbnail + full) to

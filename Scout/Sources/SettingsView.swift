@@ -169,7 +169,7 @@ private struct BackupSection: View {
         }
         guard !jobs.isEmpty else { statusMessage = "No local photos to upload."; return }
         statusMessage = "Uploading photos to cloud…"
-        await PhotoStorageService.shared.uploadLocalPhotos(jobs) { done, total in
+        await PhotoStorageService.shared.uploadLocalPhotos(jobs, force: true) { done, total in
             statusMessage = "Uploading photos to cloud… \(done) / \(total)"
         }
         statusMessage = "Photo upload complete — your phone can now download them."

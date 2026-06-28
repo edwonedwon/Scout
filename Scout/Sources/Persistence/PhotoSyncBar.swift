@@ -8,13 +8,16 @@ final class PhotoSyncProgress: ObservableObject {
     static let shared = PhotoSyncProgress()
     @Published private(set) var downloaded = 0
     @Published private(set) var total = 0
+    /// "Downloading" (iOS pull) or "Uploading" (Mac push) — shown in the bar label.
+    @Published private(set) var verb = "Downloading"
 
     var isDownloading: Bool { total > 0 && downloaded < total }
     var fraction: Double { total > 0 ? Double(downloaded) / Double(total) : 0 }
 
-    func update(downloaded: Int, total: Int) {
+    func update(downloaded: Int, total: Int, verb: String = "Downloading") {
         self.downloaded = downloaded
         self.total = total
+        self.verb = verb
     }
 }
 
@@ -28,9 +31,9 @@ struct PhotoSyncBar: View {
         if progress.isDownloading {
             VStack(spacing: 6) {
                 HStack(spacing: 8) {
-                    Image(systemName: "icloud.and.arrow.down")
+                    Image(systemName: progress.verb == "Uploading" ? "icloud.and.arrow.up" : "icloud.and.arrow.down")
                         .font(.caption)
-                    Text("Downloading photos \(progress.downloaded) / \(progress.total)")
+                    Text("\(progress.verb) photos \(progress.downloaded) / \(progress.total)")
                         .font(.caption.weight(.medium))
                         .monospacedDigit()
                 }
