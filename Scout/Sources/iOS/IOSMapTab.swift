@@ -3,6 +3,7 @@
 #if os(iOS)
 import SwiftUI
 import MapKit
+import CoreLocation
 import ScoutKit
 
 struct IOSMapTab: View {
@@ -18,10 +19,14 @@ struct IOSMapTab: View {
     // The current visible span, used to size cluster cells. Updated as the camera moves.
     @State private var visibleSpan = MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
     @Namespace private var mapScope
+    @StateObject private var location = MapLocationProvider()
+    @State private var focusUserPending = false
 
-    // Pan + zoom only — NOT rotate — so a stray two-finger twist while pinch-zooming can't knock the
-    // map off north. The compass button is still here as a one-tap "reset to north" affordance.
-    private let interaction: MapInteractionModes = [.pan, .zoom]
+    // Rotation is allowed (so the compass can reset it and deliberate turns work), but the camera's
+    // onEnd handler snaps small accidental twists back to north — so a stray rotation while
+    // pinch-zooming self-corrects, while a larger intentional turn sticks.
+    private let interaction: MapInteractionModes = [.pan, .zoom, .rotate]
+    private let northSnapDegrees: Double = 12
 
     enum MapStyleChoice: String, CaseIterable, Identifiable {
         case standard, satellite, hybrid
@@ -85,6 +90,18 @@ struct IOSMapTab: View {
         visibleSpan = span
     }
 
+    /// Snap back to north when the heading is only slightly off (an accidental twist), leaving a
+    /// deliberate larger rotation alone. Keeps the map north-facing without fully disabling rotation.
+    private func snapNorthIfNudged(_ camera: MapCamera) {
+        let h = camera.heading
+        let offNorth = min(h, 360 - h)   // degrees away from north, 0...180
+        guard offNorth >= 0.5, offNorth < northSnapDegrees else { return }
+        withAnimation(.easeOut(duration: 0.2)) {
+            cameraPosition = .camera(MapCamera(centerCoordinate: camera.centerCoordinate,
+                                               distance: camera.distance, heading: 0, pitch: camera.pitch))
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             Map(position: $cameraPosition, interactionModes: interaction, scope: mapScope) {
@@ -104,14 +121,38 @@ struct IOSMapTab: View {
             .mapStyle(mapStyleChoice.style)
             .ignoresSafeArea()
             .onAppear { cameraPosition = .region(defaultRegion); visibleSpan = defaultRegion.span }
-            .onMapCameraChange(frequency: .onEnd) { ctx in visibleSpan = ctx.region.span }
-            // User-location + compass controls, stacked above the tab bar on the trailing side.
-            .overlay(alignment: .bottomTrailing) {
-                VStack(spacing: 10) {
-                    MapCompass(scope: mapScope)
-                    MapUserLocationButton(scope: mapScope)
+            .onMapCameraChange(frequency: .onEnd) { ctx in
+                visibleSpan = ctx.region.span
+                snapNorthIfNudged(ctx.camera)
+            }
+            // When the locate button gets a fresh fix, zoom in on the user.
+            .onChange(of: location.lastFixID) { _, _ in
+                guard focusUserPending, let c = location.lastLocation else { return }
+                focusUserPending = false
+                let span = MKCoordinateSpan(latitudeDelta: 0.008, longitudeDelta: 0.008)
+                withAnimation(.easeInOut(duration: 0.45)) {
+                    cameraPosition = .region(MKCoordinateRegion(center: c, span: span))
                 }
-                .mapControlVisibility(.visible)
+                visibleSpan = span
+            }
+            // Compass (reset-to-north) + zoom-to-my-location, stacked above the tab bar.
+            .overlay(alignment: .bottomTrailing) {
+                VStack(spacing: 12) {
+                    MapCompass(scope: mapScope)
+                        .mapControlVisibility(.visible)
+                    Button {
+                        focusUserPending = true
+                        location.requestOneShot()
+                    } label: {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.tint)
+                            .frame(width: 40, height: 40)
+                            .background(.regularMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(.quaternary, lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                }
                 .padding(.trailing, 12)
                 .padding(.bottom, 28)
             }
@@ -216,6 +257,43 @@ struct IOSPhotoMarker: View {
             }
             .shadow(radius: 3)
     }
+}
+
+/// One-shot location provider for the map's "zoom to me" button. Prompts for permission on first
+/// use and publishes each fix; `lastFixID` increments per fix so the view can react even when the
+/// coordinate is unchanged.
+final class MapLocationProvider: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    @Published private(set) var lastLocation: CLLocationCoordinate2D?
+    @Published private(set) var lastFixID = 0
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    /// Ask for a single fix, prompting for permission the first time.
+    func requestOneShot() {
+        switch manager.authorizationStatus {
+        case .notDetermined: manager.requestWhenInUseAuthorization()   // the fix follows on grant
+        case .authorizedWhenInUse, .authorizedAlways: manager.requestLocation()
+        default: break   // denied/restricted — nothing to do
+        }
+    }
+
+    func locationManager(_ m: CLLocationManager, didUpdateLocations locs: [CLLocation]) {
+        guard let c = locs.last?.coordinate else { return }
+        lastLocation = c
+        lastFixID += 1
+    }
+    func locationManagerDidChangeAuthorization(_ m: CLLocationManager) {
+        switch m.authorizationStatus {
+        case .authorizedWhenInUse, .authorizedAlways: m.requestLocation()
+        default: break
+        }
+    }
+    func locationManager(_ m: CLLocationManager, didFailWithError error: Error) {}
 }
 
 struct IOSPinCalloutSheet: View {
