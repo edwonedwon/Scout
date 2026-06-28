@@ -15,6 +15,8 @@ struct IOSMapTab: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var mapStyleChoice: MapStyleChoice = .standard
     @State private var showPhotos = false
+    // The current visible span, used to size cluster cells. Updated as the camera moves.
+    @State private var visibleSpan = MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12)
 
     enum MapStyleChoice: String, CaseIterable, Identifiable {
         case standard, satellite, hybrid
@@ -40,31 +42,63 @@ struct IOSMapTab: View {
         project.visiblePins(visibleListIDs).filter { $0.latitude != 0 || $0.longitude != 0 }
     }
 
+    /// Grid-bucket the visible pins by the current zoom so the map draws a few dozen markers, not
+    /// hundreds (which froze it). Cells shrink as you zoom in, so clusters split apart naturally.
+    private var clusters: [MapCluster] {
+        let pins = visiblePins
+        guard pins.count > 1 else { return pins.map { MapCluster(id: $0.id, coordinate: $0.coordinate, pins: [$0]) } }
+        let cellLat = max(visibleSpan.latitudeDelta / 18, 0.00015)
+        let cellLng = max(visibleSpan.longitudeDelta / 18, 0.00015)
+        var buckets: [String: [PinVM]] = [:]
+        for p in pins {
+            let key = "\(Int((p.latitude / cellLat).rounded(.down)))_\(Int((p.longitude / cellLng).rounded(.down)))"
+            buckets[key, default: []].append(p)
+        }
+        return buckets.map { key, ps in
+            if ps.count == 1 { return MapCluster(id: ps[0].id, coordinate: ps[0].coordinate, pins: ps) }
+            let lat = ps.reduce(0) { $0 + $1.latitude } / Double(ps.count)
+            let lng = ps.reduce(0) { $0 + $1.longitude } / Double(ps.count)
+            return MapCluster(id: key, coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lng), pins: ps)
+        }
+    }
+
     private var defaultRegion: MKCoordinateRegion {
         let center = project.allMapPins.first.map(\.coordinate)
             ?? CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917)
         return MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12))
     }
 
+    /// Tapping a cluster zooms to fit its pins (or just tightens if they're stacked).
+    private func zoomInto(_ cluster: MapCluster) {
+        let lats = cluster.pins.map(\.latitude), lngs = cluster.pins.map(\.longitude)
+        let center = CLLocationCoordinate2D(latitude: (lats.min()! + lats.max()!) / 2,
+                                            longitude: (lngs.min()! + lngs.max()!) / 2)
+        let span = MKCoordinateSpan(
+            latitudeDelta: max((lats.max()! - lats.min()!) * 1.4, visibleSpan.latitudeDelta / 3),
+            longitudeDelta: max((lngs.max()! - lngs.min()!) * 1.4, visibleSpan.longitudeDelta / 3))
+        withAnimation(.easeInOut(duration: 0.4)) { cameraPosition = .region(MKCoordinateRegion(center: center, span: span)) }
+        visibleSpan = span
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             Map(position: $cameraPosition) {
-                ForEach(visiblePins, id: \.uuid) { pin in
-                    Annotation(pin.name, coordinate: pin.coordinate) {
-                        Group {
-                            if showPhotos {
-                                IOSPhotoMarker(pin: pin)
-                            } else {
-                                IOSPinDot(color: pin.displayColor)
-                            }
+                ForEach(clusters) { cluster in
+                    Annotation(cluster.pins.first?.name ?? "", coordinate: cluster.coordinate) {
+                        if let pin = cluster.single {
+                            Group { showPhotos ? AnyView(IOSPhotoMarker(pin: pin)) : AnyView(IOSPinDot(color: pin.displayColor)) }
+                                .onTapGesture { selectedPin = pin }
+                        } else {
+                            ClusterBadge(count: cluster.pins.count)
+                                .onTapGesture { zoomInto(cluster) }
                         }
-                        .onTapGesture { selectedPin = pin }
                     }
                 }
             }
             .mapStyle(mapStyleChoice.style)
             .ignoresSafeArea()
-            .onAppear { cameraPosition = .region(defaultRegion) }
+            .onAppear { cameraPosition = .region(defaultRegion); visibleSpan = defaultRegion.span }
+            .onMapCameraChange(frequency: .onEnd) { ctx in visibleSpan = ctx.region.span }
             .onChange(of: focusPin) { _, pin in
                 guard let pin else { return }
                 withAnimation(.easeInOut(duration: 0.5)) {
@@ -116,6 +150,26 @@ struct IOSMapTab: View {
                 .presentationDragIndicator(.visible)
                 .presentationBackgroundInteraction(.enabled)
         }
+    }
+}
+
+/// A grid bucket of nearby pins at the current zoom (1 pin = shown directly, >1 = a count badge).
+struct MapCluster: Identifiable {
+    let id: String
+    let coordinate: CLLocationCoordinate2D
+    let pins: [PinVM]
+    var single: PinVM? { pins.count == 1 ? pins[0] : nil }
+}
+
+struct ClusterBadge: View {
+    let count: Int
+    var body: some View {
+        Text("\(count)")
+            .font(.caption.bold()).foregroundStyle(.white)
+            .frame(minWidth: 30, minHeight: 30).padding(3)
+            .background(Circle().fill(.orange))
+            .overlay(Circle().stroke(.white, lineWidth: 2))
+            .shadow(radius: 2)
     }
 }
 
