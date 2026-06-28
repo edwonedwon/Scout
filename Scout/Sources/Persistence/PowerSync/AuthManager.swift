@@ -27,6 +27,9 @@ final class AuthManager: ObservableObject {
     @Published var isBusy = false
     /// Set after sending a password-reset or sign-up confirmation email, to show a confirmation.
     @Published var infoMessage: String?
+    /// When set, sign-up succeeded but the account needs email confirmation. The login form is
+    /// replaced by a "check your email" waiting screen until the user confirms and signs in.
+    @Published var pendingConfirmationEmail: String?
 
     let authDisabled: Bool
     var isAuthenticated: Bool { authDisabled || session != nil }
@@ -61,11 +64,28 @@ final class AuthManager: ObservableObject {
     func signUp(email: String, password: String) async {
         await run {
             let response = try await self.client!.auth.signUp(email: email.trimmed, password: password)
-            // When email confirmation is on, `session` is nil until the user taps the link.
+            // When email confirmation is on, `session` is nil until the user taps the link — switch
+            // the UI to the waiting screen. Otherwise the authStateChanges stream signs them in.
             if response.session == nil {
-                self.infoMessage = "Check your email to confirm your account, then sign in."
+                self.pendingConfirmationEmail = email.trimmed
             }
         }
+    }
+
+    /// Re-send the confirmation email for the pending sign-up.
+    func resendConfirmation() async {
+        guard let email = pendingConfirmationEmail else { return }
+        await run {
+            try await self.client!.auth.resend(email: email, type: .signup)
+            self.infoMessage = "Confirmation email re-sent to \(email)."
+        }
+    }
+
+    /// Leave the waiting screen (e.g. "use a different email" / back to sign in).
+    func cancelPendingConfirmation() {
+        pendingConfirmationEmail = nil
+        errorMessage = nil
+        infoMessage = nil
     }
 
     func resetPassword(email: String) async {

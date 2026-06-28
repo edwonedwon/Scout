@@ -31,6 +31,64 @@ struct AuthView: View {
     }
 
     var body: some View {
+        if auth.pendingConfirmationEmail != nil {
+            confirmationWaitingView
+        } else {
+            formView
+        }
+    }
+
+    // MARK: - "Check your email" waiting state
+
+    private var confirmationWaitingView: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "envelope.badge.fill")
+                .font(.system(size: 48, weight: .semibold))
+                .foregroundStyle(Color(hexString: "#FF6B35"))
+            Text("Check your email").font(.largeTitle.bold())
+            VStack(spacing: 6) {
+                Text("We sent a confirmation link to")
+                    .foregroundStyle(.secondary)
+                Text(auth.pendingConfirmationEmail ?? "")
+                    .font(.headline)
+                Text("Tap it, then come back and sign in.")
+                    .foregroundStyle(.secondary)
+            }
+            .multilineTextAlignment(.center)
+
+            if let info = auth.infoMessage {
+                Text(info).font(.callout).foregroundStyle(.green)
+            }
+
+            VStack(spacing: 10) {
+                Button {
+                    Task { await auth.resendConfirmation() }
+                } label: {
+                    HStack {
+                        if auth.isBusy { ProgressView().controlSize(.small) }
+                        Text("Resend email")
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 6)
+                }
+                .buttonStyle(.bordered)
+                .disabled(auth.isBusy)
+
+                Button("Back to sign in") {
+                    auth.cancelPendingConfirmation()
+                    mode = .signIn
+                }
+                .buttonStyle(.plain)
+                .tint(Color(hexString: "#FF6B35"))
+            }
+        }
+        .padding(32)
+        .frame(maxWidth: 380)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Sign in / up / reset form
+
+    private var formView: some View {
         VStack(spacing: 24) {
             VStack(spacing: 8) {
                 Image(systemName: "mappin.and.ellipse")
