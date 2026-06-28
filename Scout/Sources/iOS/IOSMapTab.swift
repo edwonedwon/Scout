@@ -3,15 +3,15 @@
 #if os(iOS)
 import SwiftUI
 import MapKit
-import CoreData
+import ScoutKit
 
 struct IOSMapTab: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     @Binding var visibleListIDs: Set<UUID>
-    @Binding var focusPin: PinnedLocationData?
+    @Binding var focusPin: PinVM?
     let onMenu: () -> Void
 
-    @State private var selectedPin: PinnedLocationData?
+    @State private var selectedPin: PinVM?
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var mapStyleChoice: MapStyleChoice = .standard
     @State private var showPhotos = false
@@ -36,7 +36,7 @@ struct IOSMapTab: View {
         }
     }
 
-    private var visiblePins: [PinnedLocationData] {
+    private var visiblePins: [PinVM] {
         project.visiblePins(visibleListIDs).filter { $0.latitude != 0 || $0.longitude != 0 }
     }
 
@@ -131,7 +131,7 @@ struct IOSPinDot: View {
 }
 
 struct IOSPhotoMarker: View {
-    let pin: PinnedLocationData
+    let pin: PinVM
     var body: some View {
         IOSPinThumb(pin: pin, targetPixelSize: 96, cornerRadius: 8)
             .frame(width: 48, height: 48)
@@ -145,7 +145,7 @@ struct IOSPhotoMarker: View {
 }
 
 struct IOSPinCalloutSheet: View {
-    @ObservedObject var pin: PinnedLocationData
+    @ObservedObject var pin: PinVM
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

@@ -1,52 +1,18 @@
 // ScoutIOSApp.swift
-// Real, data-backed iOS app shell (Milestone 1: browse-first).
-// Replaces the former mock `iOSLayoutPreview.swift`. Wired to the shared Core Data
-// entities (ProjectData / LocationListData / PinnedLocationData / ScriptData) and reuses
-// the Mac app's services & helpers (GooglePhotoImage, Color(hexString:), FountainParser…).
+// Real, data-backed iOS app shell (browse-first).
+// Wired to the PowerSync-backed store via the shared VM adapter (ProjectVM / ListVM / PinVM /
+// ScriptVM from StoreVMs.swift) — the same reference-type VMs the Mac UI uses, so the two platforms
+// share one data layer and sync live. iOS-specific display helpers live in IOSStoreSupport.swift.
 
 #if os(iOS)
 import SwiftUI
-import CoreData
 import MapKit
 import ScoutKit
-
-// MARK: - Entity display helpers
-
-extension ProjectData {
-    /// Top-level lists (not nested), in panel order, excluding trashed.
-    var topLevelLists: [LocationListData] {
-        liveLists.filter { $0.parentList == nil }.sorted { $0.panelOrder < $1.panelOrder }
-    }
-    /// Every (live) list id — used to seed "all visible" on the map.
-    var allListIDs: Set<UUID> { Set(liveLists.map(\.uuid)) }
-    /// Pins belonging to the lists currently toggled visible.
-    func visiblePins(_ visible: Set<UUID>) -> [PinnedLocationData] {
-        liveLists.filter { visible.contains($0.uuid) }.flatMap { $0.livePins }
-    }
-    /// All pins in the project (for default map framing).
-    var allMapPins: [PinnedLocationData] { liveLists.flatMap { $0.livePins } + livePhotos }
-    var pinCount: Int { allMapPins.count }
-}
-
-extension LocationListData {
-    var displayColor: Color { Color(hexString: colorHex) }
-    var iosSortedChildren: [LocationListData] { liveChildLists.sorted { $0.panelOrder < $1.panelOrder } }
-    var sortedPins: [PinnedLocationData] { livePins.sorted { $0.sortOrder < $1.sortOrder } }
-    var isFolder: Bool { !liveChildLists.isEmpty }
-    /// Pins in this list plus any in its child lists (folder rollup count).
-    var rollupPinCount: Int { livePins.count + liveChildLists.reduce(0) { $0 + $1.livePins.count } }
-}
-
-extension PinnedLocationData {
-    var displayColor: Color { Color(hexString: list?.colorHex ?? LocationListData.palette[0]) }
-    /// Best thumbnail URL: a stored thumbnail file, else the remote source image.
-    var thumbURL: URL? { thumbnailImages.first?.url ?? imageURL.flatMap { URL(string: $0) } }
-}
 
 // MARK: - Reusable pin thumbnail (wraps the shared cached image view)
 
 struct IOSPinThumb: View {
-    let pin: PinnedLocationData
+    @ObservedObject var pin: PinVM
     var targetPixelSize: CGFloat? = nil
     var cornerRadius: CGFloat = 0
 
@@ -69,13 +35,12 @@ struct IOSPinThumb: View {
 // MARK: - Root: project list → in-project shell
 
 struct ScoutIOSRootView: View {
-    @Environment(\.managedObjectContext) private var context
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \ProjectData.createdAt, ascending: false)],
-        predicate: NSPredicate(format: "deletedAt == nil")
-    ) private var projects: FetchedResults<ProjectData>
+    @ObservedObject private var store = MacStore.shared
+    @State private var activeProject: ProjectVM?
 
-    @State private var activeProject: ProjectData?
+    private var projects: [ProjectVM] {
+        store.projects.filter { $0.deletedAt == nil }.sorted { $0.createdAt > $1.createdAt }
+    }
 
     var body: some View {
         Group {
@@ -93,7 +58,7 @@ struct ScoutIOSRootView: View {
         .onAppear {
             // Launch-arg hooks for automated screenshot verification (no UI tapping needed).
             let env = ProcessInfo.processInfo.environment
-            if env["SCOUT_SEED"] != nil, projects.isEmpty { seedSampleProject() }
+            if env["SCOUT_SEED"] != nil, projects.isEmpty { Task { await seedSampleProject() } }
             if env["SCOUT_OPEN_FIRST"] != nil, activeProject == nil { activeProject = projects.first }
         }
         #endif
@@ -108,7 +73,7 @@ struct ScoutIOSRootView: View {
                     } description: {
                         Text("Create a project to start scouting locations.")
                     } actions: {
-                        Button("New Project") { createProject() }
+                        Button("New Project") { Task { await createProject() } }
                             .buttonStyle(.borderedProminent)
                     }
                 } else {
@@ -139,9 +104,9 @@ struct ScoutIOSRootView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
-                        Button { createProject() } label: { Label("New Project", systemImage: "plus") }
+                        Button { Task { await createProject() } } label: { Label("New Project", systemImage: "plus") }
                         #if DEBUG
-                        Button { seedSampleProject() } label: { Label("Add Sample Data", systemImage: "wand.and.stars") }
+                        Button { Task { await seedSampleProject() } } label: { Label("Add Sample Data", systemImage: "wand.and.stars") }
                         #endif
                     } label: { Image(systemName: "plus") }
                 }
@@ -149,53 +114,60 @@ struct ScoutIOSRootView: View {
         }
     }
 
-    private func createProject() {
-        let project = ProjectData(context: context, name: "New Project")
-        try? context.save()
-        withAnimation { activeProject = project }
+    private func createProject() async {
+        guard let id = try? await ScoutStore.shared.createProject(name: "New Project") else { return }
+        // The watch stream delivers the new project; select it once its VM exists.
+        for _ in 0..<20 {
+            if let vm = store.projects.first(where: { $0.id == id }) {
+                withAnimation { activeProject = vm }
+                return
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     private func deleteProjects(_ offsets: IndexSet) {
-        for index in offsets { projects[index].deletedAt = Date() }
-        try? context.save()
+        let targets = offsets.map { projects[$0] }
+        for p in targets { p.deletedAt = Date() }   // VM write-through soft-deletes via the store
     }
 
     #if DEBUG
-    /// DEBUG-only seed so a fresh (CloudKit-off) store has something to browse.
-    private func seedSampleProject() {
-        let project = ProjectData(context: context, name: "Tokyo — Spring 2026")
+    /// DEBUG-only seed so a fresh store has something to browse.
+    private func seedSampleProject() async {
+        let store = ScoutStore.shared
+        guard let projectId = try? await store.createProject(name: "Tokyo — Spring 2026") else { return }
         let seeds: [(String, String, [(String, String, Double, Double)])] = [
-            ("Day 1 — Shinjuku", LocationListData.palette[0], [
+            ("Day 1 — Shinjuku", ListVM.palette[0], [
                 ("Shinjuku Gyoen", "Great light at golden hour", 35.6852, 139.7100),
                 ("Golden Gai", "Narrow alley bars", 35.6940, 139.7032),
                 ("Omoide Yokocho", "Steam and lanterns at dusk", 35.6939, 139.7001),
             ]),
-            ("Day 2 — Shibuya", LocationListData.palette[1], [
+            ("Day 2 — Shibuya", ListVM.palette[1], [
                 ("Shibuya Crossing", "Wide angle from the window", 35.6595, 139.7004),
                 ("Miyashita Park", "Rooftop skyline framing", 35.6610, 139.7039),
             ]),
-            ("Day 3 — Asakusa", LocationListData.palette[2], [
+            ("Day 3 — Asakusa", ListVM.palette[2], [
                 ("Senso-ji Temple", "Pre-dawn, before crowds", 35.7147, 139.7966),
                 ("Nakamise-dori", "Leading lines down the street", 35.7133, 139.7960),
             ]),
         ]
         for (li, (name, color, pins)) in seeds.enumerated() {
-            let list = LocationListData(context: context, name: name, colorHex: color)
-            list.project = project
-            list.panelOrder = li
+            guard let listId = try? await store.createList(projectId: projectId, name: name, colorHex: color, panelOrder: li) else { continue }
             for (pi, p) in pins.enumerated() {
-                let pin = PinnedLocationData(context: context)
-                pin.name = p.0
-                pin.notes = p.1
-                pin.latitude = p.2
-                pin.longitude = p.3
-                pin.statusRaw = "scouted"
-                pin.sortOrder = pi
-                pin.imageURL = "https://picsum.photos/seed/\(p.0.lowercased().replacingOccurrences(of: " ", with: "-"))/700/525"
-                pin.list = list
+                let rec = PinRecord(
+                    id: ScoutStore.newID(), listId: listId, owningProjectId: nil,
+                    name: p.0, notes: p.1, latitude: p.2, longitude: p.3,
+                    hasGPS: true, gpsFromTimeline: false, isFlagged: false,
+                    rotationQuarterTurns: 0, aspectRatio: 0, panelOrder: 0, sortOrder: pi,
+                    statusRaw: LocationStatus.scouted.rawValue,
+                    imageSourceRaw: ScoutImage.ImageSource.googleMaps.rawValue,
+                    imageURL: "https://picsum.photos/seed/\(p.0.lowercased().replacingOccurrences(of: " ", with: "-"))/700/525",
+                    googlePlaceId: nil, googleMapsURL: nil, sourceURL: nil, originalFilename: nil,
+                    photoFiles: [], thumbnailFiles: [], dateTaken: nil, createdAt: Date(), deletedAt: nil
+                )
+                _ = try? await store.insertPin(rec)
             }
         }
-        try? context.save()
     }
     #endif
 }
@@ -203,7 +175,7 @@ struct ScoutIOSRootView: View {
 // MARK: - In-project shell (tabs + sidebar drawer)
 
 struct InProjectShell: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     let onSwitchProject: () -> Void
 
     @State private var visibleListIDs: Set<UUID> = []
@@ -215,7 +187,7 @@ struct InProjectShell: View {
     }()
     @State private var showCamera = false
     @State private var showSidebar = false
-    @State private var mapFocusPin: PinnedLocationData?
+    @State private var mapFocusPin: PinVM?
 
     private func openSidebar() { withAnimation(.easeOut(duration: 0.28)) { showSidebar = true } }
     private func closeSidebar() { withAnimation(.easeIn(duration: 0.24)) { showSidebar = false } }
@@ -298,11 +270,11 @@ struct IOSMenuButton: View {
 /// project's lists/folders with eye toggles (driving map visibility) and expansion.
 /// Drag-to-reorder/nest is deferred to a later milestone.
 struct IOSSidebarDrawer: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     @Binding var visibleListIDs: Set<UUID>
     let onBackToProjects: () -> Void
     let onClose: () -> Void
-    let onOpenPinOnMap: (PinnedLocationData) -> Void
+    let onOpenPinOnMap: (PinVM) -> Void
 
     @State private var expanded: Set<UUID> = []
     @State private var search = ""
@@ -336,8 +308,7 @@ struct IOSSidebarDrawer: View {
         }
         .tint(.accentColor)
         .sheet(isPresented: $showShare) {
-            // Account-based sharing (project_members + RLS). The iOS tree is still Core Data, so
-            // pass the project's ids directly rather than the VM-typed ProjectShareSheet.
+            // Account-based sharing (project_members + RLS).
             ShareProjectView(projectId: project.uuid.uuidString, projectName: project.name)
         }
     }
@@ -387,7 +358,7 @@ struct IOSSidebarDrawer: View {
     }
 
     @ViewBuilder
-    private func folderRows(_ folder: LocationListData) -> some View {
+    private func folderRows(_ folder: ListVM) -> some View {
         let isOpen = expanded.contains(folder.uuid)
         let folderVisible = visibleListIDs.contains(folder.uuid)
         HStack(spacing: 8) {
@@ -409,7 +380,7 @@ struct IOSSidebarDrawer: View {
     }
 
     @ViewBuilder
-    private func leafListRow(_ list: LocationListData, indent: Int, parentVisible: Bool) -> some View {
+    private func leafListRow(_ list: ListVM, indent: Int, parentVisible: Bool) -> some View {
         let isOpen = expanded.contains(list.uuid)
         let visible = parentVisible && visibleListIDs.contains(list.uuid)
         HStack(spacing: 8) {
@@ -438,7 +409,7 @@ struct IOSSidebarDrawer: View {
     }
 
     @ViewBuilder
-    private func pinRow(_ pin: PinnedLocationData, indent: Int) -> some View {
+    private func pinRow(_ pin: PinVM, indent: Int) -> some View {
         Button {
             onOpenPinOnMap(pin)
         } label: {
@@ -478,13 +449,4 @@ struct IOSSidebarDrawer: View {
         .buttonStyle(.plain)
     }
 }
-
-// MARK: - Previews
-
-#if DEBUG
-#Preview("Project List") {
-    ScoutIOSRootView()
-        .environment(\.managedObjectContext, PreviewData.context)
-}
-#endif
 #endif

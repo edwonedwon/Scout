@@ -3,17 +3,17 @@
 #if os(iOS)
 import SwiftUI
 import MapKit
-import CoreData
+import ScoutKit
 
 // MARK: - Photos Tab
 
 struct IOSPhotosTab: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     let onMenu: () -> Void
 
     /// (list, pins) sections in display order — folders expand to their child lists.
-    private var sections: [(list: LocationListData, pins: [PinnedLocationData])] {
-        var out: [(LocationListData, [PinnedLocationData])] = []
+    private var sections: [(list: ListVM, pins: [PinVM])] {
+        var out: [(ListVM, [PinVM])] = []
         for list in project.topLevelLists {
             if list.isFolder {
                 for child in list.iosSortedChildren where !child.livePins.isEmpty {
@@ -53,7 +53,7 @@ struct IOSPhotosTab: View {
 }
 
 private struct IOSMasonryGridView: View {
-    let sections: [(list: LocationListData, pins: [PinnedLocationData])]
+    let sections: [(list: ListVM, pins: [PinVM])]
     @State private var columns = 3
     private let gap: CGFloat = 2
 
@@ -93,7 +93,7 @@ private struct IOSMasonryGridView: View {
         .colorScheme(.dark)
     }
 
-    private func masonry(_ pins: [PinnedLocationData], colWidth: CGFloat) -> some View {
+    private func masonry(_ pins: [PinVM], colWidth: CGFloat) -> some View {
         HStack(alignment: .top, spacing: gap) {
             ForEach(0..<columns, id: \.self) { col in
                 LazyVStack(spacing: gap) {
@@ -112,7 +112,7 @@ private struct IOSMasonryGridView: View {
 }
 
 private struct IOSPhotoCell: View {
-    @ObservedObject var pin: PinnedLocationData
+    @ObservedObject var pin: PinVM
     let width: CGFloat
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -128,7 +128,7 @@ private struct IOSPhotoCell: View {
 // MARK: - Pin detail
 
 struct IOSPinDetailView: View {
-    @ObservedObject var pin: PinnedLocationData
+    @ObservedObject var pin: PinVM
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -172,10 +172,10 @@ struct IOSPinDetailView: View {
 // MARK: - Script Tab
 
 struct IOSScriptTab: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     let onMenu: () -> Void
 
-    private var script: ScriptData? { project.scripts.first }
+    private var script: ScriptVM? { project.scripts.first }
     private var elements: [FountainElement] {
         script.map { FountainParser.parse($0.rawText) } ?? []
     }
@@ -254,7 +254,7 @@ private struct IOSScriptElementView: View {
 // MARK: - Scout Tab (idle stub; recording deferred to M4)
 
 struct IOSScoutTab: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     let onMenu: () -> Void
 
     var body: some View {
@@ -310,7 +310,7 @@ struct IOSScoutTab: View {
 // MARK: - Camera sheet (stub; capture deferred to M3)
 
 struct IOSCameraSheet: View {
-    @ObservedObject var project: ProjectData
+    @ObservedObject var project: ProjectVM
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {

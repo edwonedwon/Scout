@@ -81,13 +81,8 @@ private struct RootGate: View {
         Group {
             if auth.isAuthenticated {
                 #if os(iOS)
-                // P2 migration: opt into the PowerSync-backed browse UI with the SCOUT_STORE_UI
-                // launch arg. Default stays on the live Core Data tree until the port is verified.
-                if ProcessInfo.processInfo.environment["SCOUT_STORE_UI"] != nil {
-                    IOSStoreRootView()
-                } else {
-                    ScoutIOSRootView()
-                }
+                // iOS browse UI is now PowerSync-backed (ScoutIOSRootView reads the store VMs).
+                ScoutIOSRootView()
                 #else
                 ContentView()
                 #endif
