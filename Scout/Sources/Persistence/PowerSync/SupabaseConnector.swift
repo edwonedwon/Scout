@@ -73,16 +73,44 @@ struct SupabaseConnector: PowerSyncBackendConnectorProtocol {
 }
 
 extension ScoutStore {
-    /// Attach the backend and start syncing. Call after the user signs in (and the PowerSync
-    /// instance URL is configured). Safe to call repeatedly — a no-op when sync isn't set up.
+    /// Attach the backend and start syncing. Call after sign-in AND whenever the app returns to the
+    /// foreground — iOS suspends the app and drops the streaming sync connection, which otherwise
+    /// never resumes (so changes made elsewhere stop arriving). Skips the work when already
+    /// connected, so it's cheap to call on every foreground.
     func connectIfPossible() async {
         guard SupabaseConfig.syncEnabled, let client = SupabaseService.client else { return }
+        if db.currentStatus.connected { return }
         do {
             try await db.connect(connector: SupabaseConnector(client: client), options: nil)
+            await MainActor.run { DebugLogger.shared.log("Sync connected.", level: .success, tag: "Sync") }
         } catch {
-            #if DEBUG
-            print("[ScoutStore] connect failed: \(error)")
-            #endif
+            await MainActor.run { DebugLogger.shared.log("Sync connect failed: \(error)", level: .error, tag: "Sync") }
+        }
+    }
+}
+
+/// Live, observable sync status for the UI (a connection pill, "last synced" text, etc.).
+/// Mirrors PowerSync's `currentStatus` stream onto the main actor.
+@MainActor
+final class SyncStatusModel: ObservableObject {
+    static let shared = SyncStatusModel()
+    @Published private(set) var connected = false
+    @Published private(set) var downloading = false
+    @Published private(set) var uploading = false
+    @Published private(set) var lastSyncedAt: Date? = nil
+    private var task: Task<Void, Never>?
+
+    /// Begin mirroring PowerSync's status stream. Idempotent.
+    func start() {
+        guard task == nil else { return }
+        task = Task { [weak self] in
+            for await s in ScoutStore.shared.db.currentStatus.asFlow() {
+                guard let self else { return }
+                self.connected = s.connected
+                self.downloading = s.downloading
+                self.uploading = s.uploading
+                self.lastSyncedAt = s.lastSyncedAt
+            }
         }
     }
 }

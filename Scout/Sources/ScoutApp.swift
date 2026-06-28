@@ -56,6 +56,7 @@ private struct WindowFrameAutosaver: NSViewRepresentable {
 /// so the build is never blocked on account setup.
 private struct RootGate: View {
     @EnvironmentObject private var auth: AuthManager
+    @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         Group {
             if auth.isAuthenticated {
@@ -72,6 +73,7 @@ private struct RootGate: View {
         // Start/refresh sync whenever the signed-in state changes.
         .task(id: auth.isAuthenticated) {
             if auth.isAuthenticated {
+                SyncStatusModel.shared.start()
                 await ScoutStore.shared.connectIfPossible()
                 #if DEBUG
                 // End-to-end sync proof: launch a signed-in build with SCOUT_SYNC_SMOKE set.
@@ -79,6 +81,13 @@ private struct RootGate: View {
                     await SyncSmokeTest.run()
                 }
                 #endif
+            }
+        }
+        // Re-establish sync on every foreground — iOS suspends the app and drops the PowerSync
+        // streaming connection, so changes made elsewhere would otherwise stop arriving until relaunch.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, auth.isAuthenticated {
+                Task { await ScoutStore.shared.connectIfPossible() }
             }
         }
     }
