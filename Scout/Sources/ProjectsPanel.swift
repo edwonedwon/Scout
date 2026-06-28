@@ -946,7 +946,14 @@ private struct ProjectDetailView: View {
             items.append(.uncategorized(project))
         }
         cachedSidebarItems = items.sorted {
-            $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+            // Uncategorized always sorts last (just above the Scripts section), regardless of
+            // its panelOrder; real lists keep their panelOrder ordering among themselves.
+            switch ($0, $1) {
+            case (.uncategorized, _): return false
+            case (_, .uncategorized): return true
+            default:
+                return $0.panelOrder != $1.panelOrder ? $0.panelOrder < $1.panelOrder : $0.createdAt < $1.createdAt
+            }
         }
     }
 
