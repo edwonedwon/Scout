@@ -1,6 +1,5 @@
 import SwiftUI
 import MapKit
-import CoreData
 import ScoutKit
 
 /// A collaborator's access level on a shared project. Maps to CloudKit's CKShare permissions
@@ -202,8 +201,6 @@ struct ContentView: View {
         set { cyclingProviderRaw = newValue?.rawValue ?? "" }
     }
 
-    @Environment(\.managedObjectContext) private var modelContext
-    @Environment(\.undoManager) private var undoManager
     /// The store-backed VM graph (PowerSync) — replaces the Core Data @FetchRequests. The
     /// same-named computed properties below keep the rest of the view body unchanged.
     @ObservedObject private var mac = MacStore.shared
@@ -597,7 +594,6 @@ struct ContentView: View {
         showProjectsPanel = true
         showRightPanel = false
         locations = []
-        modelContext.undoManager = undoManager
         locationManager.requestIfNeeded()
         centerOnUserIfNeeded()
         backfillPhotos()
@@ -1101,7 +1097,6 @@ struct ContentView: View {
         for pin in pins {
             pin.rotationQuarterTurns = ((pin.rotationQuarterTurns - 1) % 4 + 4) % 4
         }
-        try? modelContext.save()
         rebuildPinCaches()
     }
 
@@ -1116,7 +1111,6 @@ struct ContentView: View {
         }
         guard let pin else { return }
         pin.rotationQuarterTurns = ((pin.rotationQuarterTurns - 1) % 4 + 4) % 4
-        try? modelContext.save()
         rebuildPinCaches()
     }
 
@@ -1432,7 +1426,6 @@ struct ContentView: View {
         guard !pins.isEmpty else { return }
         let shouldFlag = pins.contains { !$0.isFlagged }
         for pin in pins { pin.isFlagged = shouldFlag }
-        try? modelContext.save()
         rebuildPinCaches()   // isFlagged is in the cache signature → flagged-first re-sorts
     }
 
@@ -1598,7 +1591,6 @@ struct ContentView: View {
         let now = Date()
         for p in pins { p.deletedAt = now }
         selection.ids.subtract(uuids)
-        try? modelContext.save()
         rebuildPinCaches()
     }
 
@@ -1621,7 +1613,6 @@ struct ContentView: View {
     private func deletePinFromCarousel(_ loc: ScoutLocation) {
         guard let pin = pin(byUUID: loc.id) else { return }
         pin.deletedAt = Date()
-        try? modelContext.save()
         rebuildPinCaches()
     }
 
@@ -1653,7 +1644,6 @@ struct ContentView: View {
     private func confirmRemoveDuplicates() {
         let now = Date()
         for pin in pendingDuplicateRemoval { pin.deletedAt = now }
-        try? modelContext.save()
         rebuildPinCaches()
         DebugLogger.shared.log("Moved \(pendingDuplicateRemoval.count) duplicate photo(s) to Trash across \(pendingDuplicateClusters) group(s); kept the original files.",
                                level: .success, tag: "Dedup")
@@ -1815,7 +1805,6 @@ struct ContentView: View {
             for pin in allPins {
                 if let a = results[pin.id], pin.aspectRatio == 0 { pin.aspectRatio = a }
             }
-            try? modelContext.save()
             // ScoutLocations cached before backfill lack the aspect → drop and rebuild.
             displayCache.invalidateAll()
             rebuildPinCaches()
@@ -3034,7 +3023,6 @@ struct BoundarySettingsPopover: View {
 #Preview("Main layout", traits: .fixedLayout(width: 1200, height: 800)) {
     ContentView()
         .environmentObject(APIKeyState.shared)
-        .environment(\.managedObjectContext, PreviewData.context)
         .onAppear {
             #if os(macOS)
             NSApp.windows.forEach { window in

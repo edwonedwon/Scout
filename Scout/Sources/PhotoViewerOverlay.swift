@@ -312,10 +312,6 @@ struct GooglePhotoImage<Placeholder: View>: View {
         .onChange(of: url?.absoluteString ?? "") { _, _ in load() }
         .onChange(of: rotationQuarterTurns) { _, _ in load() }
         .onChange(of: targetPixelSize.map(sizeBucket) ?? 0) { _, _ in load() }
-        // Reload when a photo blob is materialized to disk (shared photo finished downloading).
-        .onReceive(NotificationCenter.default.publisher(for: PhotoBlobSync.didMaterializeNotification)) { _ in
-            if pendingDownload { load() }
-        }
     }
 
     /// "Not downloaded yet" state: a download icon over the placeholder with the filename visible.

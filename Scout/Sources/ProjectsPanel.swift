@@ -1,5 +1,4 @@
 import SwiftUI
-import CoreData
 import ScoutKit
 import CoreLocation
 import UniformTypeIdentifiers
@@ -105,7 +104,7 @@ private let sidebarTopPadding: CGFloat = 55
 /// Must be called only after any open-project detail view has been popped/unmounted (see the
 /// purgeTrigger handler), so no @ObservedObject view is bound to a model being deleted.
 @MainActor
-func purgeAllProjects(_ context: NSManagedObjectContext) {
+func purgeAllProjects() {
     let mac = MacStore.shared
     DebugLogger.shared.log("--- BEFORE PURGE ---", level: .warning, tag: "Purge")
     DebugLogger.shared.log("Projects (\(mac.projects.count)):", level: .info, tag: "Purge")
@@ -126,7 +125,6 @@ func purgeAllProjects(_ context: NSManagedObjectContext) {
 // MARK: - Projects panel
 
 struct ProjectsPanel: View {
-    @Environment(\.managedObjectContext) private var modelContext
     @EnvironmentObject private var auth: AuthManager
     @State private var showSignOutConfirm = false
     /// Store-backed VM graph (PowerSync) — replaces the Core Data @FetchRequests. Same-named
@@ -235,7 +233,7 @@ struct ProjectsPanel: View {
             expandedListUUIDs = ""
             activeListIDs = []
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                purgeAllProjects(modelContext)
+                purgeAllProjects()
             }
         }
         .sheet(isPresented: $showAddProject) {
@@ -341,7 +339,6 @@ struct ProjectsPanel: View {
             Button("Rename") {
                 let trimmed = renameText.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty { renamingProject?.name = trimmed }
-                try? modelContext.save()
                 renamingProject = nil
             }
             .keyboardShortcut(.defaultAction)
@@ -406,7 +403,6 @@ struct ProjectsPanel: View {
             Spacer()
             Button {
                 project.deletedAt = nil
-                try? modelContext.save()
             } label: {
                 Text("Put Back").font(.caption2)
             }
@@ -616,7 +612,6 @@ private struct ProjectDetailView: View {
     /// for specific location UUIDs, bypassing sidebar selection.
     @Binding var externalMoveUUIDs: [UUID]
 
-    @Environment(\.managedObjectContext) private var modelContext
     @State private var showAddList = false
     @State private var newListName = ""
     /// Global "show flagged only" filter — shared with the grid/map via AppStorage.
@@ -1002,7 +997,6 @@ private struct ProjectDetailView: View {
         guard let to = children.firstIndex(where: { $0.id == target.id }) else { return }
         children.insert(moving, at: after ? to + 1 : to)
         for (i, child) in children.enumerated() { child.panelOrder = i }
-        try? modelContext.save()
     }
 
 
@@ -1132,7 +1126,6 @@ private struct ProjectDetailView: View {
         }
         let shouldFlag = pins.contains { !$0.isFlagged }
         for p in pins { p.isFlagged = shouldFlag }
-        try? modelContext.save()
     }
 
     // Drag-start helpers. Each records the drag kind (so list rows can suppress the between-
@@ -1217,7 +1210,6 @@ private struct ProjectDetailView: View {
                     guard let list = project.lists.first(where: { $0.uuid.uuidString == uuid }) else { return }
                     list.panelOrder = atTop ? -1 : sidebarItems.count + 1
                     normalizeOrder()
-                    try? modelContext.save()
                     return
                 }
                 // Photo reorder: move to top or bottom (when already top-level).
@@ -1226,7 +1218,6 @@ private struct ProjectDetailView: View {
                     if let pin = project.importedPhotos.first(where: { $0.uuid.uuidString == uuid }) {
                         pin.panelOrder = atTop ? -1 : sidebarItems.count + 1
                         normalizeOrder()
-                        try? modelContext.save()
                         return
                     }
                 }
@@ -1438,7 +1429,6 @@ private struct ProjectDetailView: View {
             case .uncategorized(let proj): proj.uncategorizedPanelOrder = i
             }
         }
-        try? modelContext.save()
         // Rebuild the cached sidebar items so the new panelOrder is reflected on screen —
         // writing panelOrder alone doesn't re-sort the @State-cached display array.
         rebuildSidebarItems()
@@ -1462,7 +1452,6 @@ private struct ProjectDetailView: View {
         }
         trashUndoStack.append(live.map { $0.id })
         normalizeOrder()
-        try? modelContext.save()
     }
 
     /// Deletes every currently-selected sidebar item. Photos go straight to the Trash
@@ -1506,7 +1495,7 @@ private struct ProjectDetailView: View {
         listsPendingDelete = []
         pinsPendingDelete = []
         selection.ids = []
-        if !pins.isEmpty { trashPins(pins) } else { normalizeOrder(); try? modelContext.save() }
+        if !pins.isEmpty { trashPins(pins) } else { normalizeOrder() }
     }
 
     /// Human-readable summary for the delete-confirmation dialog.
@@ -1540,7 +1529,6 @@ private struct ProjectDetailView: View {
         }
         mark(list)
         normalizeOrder()
-        try? modelContext.save()
     }
 
     /// Restores a trashed list (and its trashed child lists) from the Trash.
@@ -1551,7 +1539,6 @@ private struct ProjectDetailView: View {
         }
         clear(list)
         normalizeOrder()
-        try? modelContext.save()
     }
 
     /// Permanently deletes a trashed list and everything under it (pins + child lists cascade).
@@ -1584,7 +1571,6 @@ private struct ProjectDetailView: View {
     private func restoreFromTrash(_ pin: PinVM) {
         pin.deletedAt = nil
         normalizeOrder()
-        try? modelContext.save()
     }
 
     /// ⌘Z — restores the most recent batch of trashed photos. Falls back to the single
@@ -1600,7 +1586,6 @@ private struct ProjectDetailView: View {
             return
         }
         normalizeOrder()
-        try? modelContext.save()
     }
 
     /// Permanently deletes a single trashed photo (right-click → Delete Permanently).
@@ -1612,7 +1597,6 @@ private struct ProjectDetailView: View {
     private func emptyTrash() {
         for pin in trashedPins { purgePin(pin) }
         for list in trashedLists { purgeList(list) }
-        try? modelContext.save()
     }
 
     /// Purges photos and lists that have been in the Trash longer than 30 days. Called on appear.
@@ -1620,7 +1604,6 @@ private struct ProjectDetailView: View {
         let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
         for pin in trashedPins.filter({ ($0.deletedAt ?? .distantFuture) < cutoff }) { purgePin(pin) }
         for list in trashedLists.filter({ ($0.deletedAt ?? .distantFuture) < cutoff }) { purgeList(list) }
-        try? modelContext.save()
     }
 
     /// True when `id` is part of a multi-item selection (used to switch context-menu
@@ -1990,7 +1973,7 @@ private struct ProjectDetailView: View {
                     .listRowInsets(EdgeInsets(top: 0, leading: 48, bottom: 0, trailing: 0))
                     .opacity(0.6)
                     .contextMenu {
-                        Button { pin.deletedAt = nil; restoreList(list); try? modelContext.save() } label: {
+                        Button { pin.deletedAt = nil; restoreList(list) } label: {
                             Label("Put Back", systemImage: "arrow.uturn.backward")
                         }
                         Divider()
@@ -2423,7 +2406,6 @@ private struct ProjectDetailView: View {
         .onAppear {
             normalizeOrder()
             purgeExpiredTrash()   // remove photos trashed > 30 days ago
-            OrphanSweeper.sweep(context: modelContext)  // clear records stranded by deletes/merges
             // project.lists is synchronously available here via SwiftData.
             if !initialExpandedUUIDs.isEmpty {
                 expandedListIDs = Set(
@@ -2526,7 +2508,6 @@ private struct ProjectDetailView: View {
                 let trimmed = name.trimmingCharacters(in: .whitespaces)
                 if !trimmed.isEmpty {
                     list.name = trimmed
-                    try? modelContext.save()
                 }
                 renamingList = nil
             }
@@ -2801,7 +2782,6 @@ private struct ListRow: View {
     var sceneTypeEditID: Binding<UUID?>? = nil
     /// Tapping the header's scene-count badge opens the script at that scene link.
     var onOpenSceneLink: ((HighlightVM) -> Void)? = nil
-    @Environment(\.managedObjectContext) private var modelContext
 
     private var isActive: Bool { activeListIDs.contains(list.id) }
     private var isSelected: Bool { selection.contains(list.uuid) }
@@ -2838,7 +2818,6 @@ private struct ListRow: View {
                 current: list.sceneType,
                 onPick: { newType in
                     list.sceneType = newType
-                    try? modelContext.save()
                     sceneTypeEditID?.wrappedValue = nil
                 },
                 onDismiss: { sceneTypeEditID?.wrappedValue = nil }

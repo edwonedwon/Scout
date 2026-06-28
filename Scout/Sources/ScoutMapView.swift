@@ -1,6 +1,5 @@
 import SwiftUI
 import MapKit
-import CoreData
 import ScoutKit
 import CoreVideo
 import Combine

@@ -1,5 +1,4 @@
 import Foundation
-import CoreData
 import CoreLocation
 import ImageIO
 import CoreGraphics
@@ -33,14 +32,6 @@ enum PhotoImportService {
         var aspectRatio: Double
         var hadGPS: Bool
 
-        /// Materializes this import as a managed object in `context` (call on the main thread).
-        @discardableResult
-        func makePin(in context: NSManagedObjectContext) -> PinnedLocationData {
-            PinnedLocationData.fromImport(
-                context: context, id: id, name: name, coordinate: coordinate, hasGPS: hasGPS,
-                dateTaken: dateTaken, originalFilePath: originalFilePath, fullFilename: fullFilename,
-                thumbFilename: thumbFilename, sortOrder: sortOrder, aspectRatio: aspectRatio)
-        }
 
         /// Builds a store PinRecord for this import (migration plan P2). The local originalFilePath
         /// isn't in the synced schema; only its basename (originalFilename) travels.
@@ -428,32 +419,3 @@ enum PhotoImportService {
     }
 }
 
-// MARK: - Model factory
-
-extension PinnedLocationData {
-    static func fromImport(
-        context: NSManagedObjectContext,
-        id: UUID = UUID(),
-        name: String,
-        coordinate: CLLocationCoordinate2D,
-        hasGPS: Bool,
-        dateTaken: Date?,
-        originalFilePath: String,
-        fullFilename: String,
-        thumbFilename: String,
-        sortOrder: Int,
-        aspectRatio: Double = 0
-    ) -> PinnedLocationData {
-        let phantom = ScoutLocation(name: name, description: "", coordinate: coordinate, images: [])
-        let pin = PinnedLocationData(context: context, from: phantom, sortOrder: sortOrder)
-        pin.imageSourceRaw   = ScoutImage.ImageSource.imported.rawValue
-        pin.photoFiles       = [fullFilename]
-        pin.thumbnailFiles   = [thumbFilename]
-        pin.originalFilePath = originalFilePath
-        pin.originalFilename = URL(fileURLWithPath: originalFilePath).lastPathComponent
-        pin.hasGPS           = hasGPS
-        pin.dateTaken        = dateTaken
-        pin.aspectRatio      = aspectRatio
-        return pin
-    }
-}

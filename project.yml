@@ -68,13 +68,6 @@ targets:
         # from this single block, so it broke the macOS upload.
         com.apple.security.personal-information.location: true
         com.apple.security.network.client: true
-        # iCloud + CloudKit (project sharing / real-time sync — docs/collaboration-plan.md).
-        com.apple.developer.icloud-container-identifiers:
-          - iCloud.com.cutetech.scout
-        com.apple.developer.icloud-services:
-          - CloudKit
-        # Remote (silent) push so NSPersistentCloudKitContainer gets change notifications.
-        aps-environment: development
         # Sign in with Apple (Supabase Auth OIDC id-token flow — migration plan P4).
         com.apple.developer.applesignin:
           - Default

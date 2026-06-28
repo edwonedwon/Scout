@@ -192,7 +192,17 @@ final class ListVM: ObservableObject, Identifiable {
 
     var displayColor: Color { Color(hexString: colorHex) }
 
-    static let palette = LocationListData.palette
+    /// Canonical list-color palette (was LocationListData.palette before the Core Data removal).
+    static let palette = [
+        "#FF6B35", // orange
+        "#2196F3", // blue
+        "#4CAF50", // green
+        "#9C27B0", // purple
+        "#E91E63", // pink
+        "#00BCD4", // cyan
+        "#FF5722", // deep orange
+        "#FFEB3B", // yellow
+    ]
 }
 
 // MARK: - Pinned location

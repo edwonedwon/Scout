@@ -1,5 +1,4 @@
 import SwiftUI
-import CoreData
 import ScoutKit
 
 struct SettingsView: View {
@@ -112,7 +111,6 @@ struct SettingsView: View {
 #if os(macOS)
 @MainActor
 private struct BackupSection: View {
-    @Environment(\.managedObjectContext) private var modelContext
     @State private var isBusy = false
     @State private var statusMessage: String? = nil
     @State private var errorMessage: String? = nil
@@ -148,10 +146,8 @@ private struct BackupSection: View {
         }
         guard let url else { return }
         do {
-            let summary = try await BackupService.importBackup(from: url, context: modelContext)
+            let summary = try await BackupService.importIntoStore(from: url)
             statusMessage = "Imported \(summary.projectsAdded) projects, \(summary.listsAdded) lists, \(summary.pinsAdded) pins, \(summary.photoFilesCopied) photos. Skipped \(summary.skippedDuplicates) duplicates."
-            // Upload the imported derivatives to iCloud so they sync to other devices.
-            PhotoBlobSync.reconcile(container: PersistenceController.shared.container)
         } catch {
             errorMessage = error.localizedDescription
         }

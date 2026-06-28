@@ -1,6 +1,4 @@
 import SwiftUI
-import CoreData
-import CloudKit
 import ScoutKit
 
 extension Notification.Name {
@@ -34,41 +32,22 @@ private struct RelinkProjectCommand: View {
 }
 #endif
 
-/// Accepts incoming CloudKit share invitations (when the user taps an invite link the OS
-/// hands the share metadata to the app delegate). Routes them into the shared store.
 #if os(macOS)
-final class ScoutAppDelegate: NSObject, NSApplicationDelegate {
-    func application(_ application: NSApplication, userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
-        PersistenceController.shared.acceptShare(metadata: metadata)
+/// Persists the main window's size/position across launches AND rebuilds. SwiftUI's default
+/// WindowGroup restoration relies on macOS "Saved Application State", which the system discards
+/// whenever the app binary changes — so every Xcode build reopened the window at the default size.
+/// A `frameAutosaveName` stores the frame in `NSUserDefaults` instead, which survives rebuilds.
+private struct WindowFrameAutosaver: NSViewRepresentable {
+    let name: String
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { [weak v] in
+            guard let window = v?.window else { return }
+            window.setFrameAutosaveName(name)
+        }
+        return v
     }
-}
-#else
-/// On iOS the app is scene-based (SwiftUI lifecycle), so the OS delivers an accepted CloudKit
-/// share to the SCENE delegate, not the app delegate. We register this scene delegate via
-/// `configurationForConnecting` below so opening an invite link actually joins the project.
-final class ScoutSceneDelegate: NSObject, UIWindowSceneDelegate {
-    // Accept an invite when the app is running or backgrounded. We deliberately do NOT implement
-    // scene(_:willConnectTo:) — doing so makes this delegate take over window setup and prevents
-    // SwiftUI's WindowGroup from installing its UI (the app launches to a blank screen).
-    func windowScene(_ windowScene: UIWindowScene,
-                     userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
-        PersistenceController.shared.acceptShare(metadata: metadata)
-    }
-}
-
-final class ScoutAppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication,
-                     configurationForConnecting connectingSceneSession: UISceneSession,
-                     options: UIScene.ConnectionOptions) -> UISceneConfiguration {
-        let config = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
-        config.delegateClass = ScoutSceneDelegate.self
-        return config
-    }
-
-    // Fallback for the app-delegate path (some launch scenarios still route here).
-    func application(_ application: UIApplication, userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
-        PersistenceController.shared.acceptShare(metadata: metadata)
-    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 #endif
 
@@ -109,15 +88,6 @@ private struct RootGate: View {
 struct ScoutApp: App {
     @StateObject private var apiKeyState = APIKeyState.shared
     @StateObject private var auth = AuthManager.shared
-    #if os(macOS)
-    @NSApplicationDelegateAdaptor(ScoutAppDelegate.self) private var appDelegate
-    #else
-    @UIApplicationDelegateAdaptor(ScoutAppDelegate.self) private var appDelegate
-    #endif
-
-    /// Core Data + CloudKit stack (docs/collaboration-plan.md, Path B). Private CloudKit sync +
-    /// a shared store for CKShare collaboration are enabled in PersistenceController.
-    private let persistence = PersistenceController.shared
 
     var body: some Scene {
         WindowGroup {
@@ -127,10 +97,13 @@ struct ScoutApp: App {
             // Always-visible first-time photo download progress, centered at the top under the
             // dynamic island / toolbar.
             .overlay(alignment: .top) { PhotoSyncBar() }
+            #if os(macOS)
+            // Remember window size/position across launches and rebuilds.
+            .background(WindowFrameAutosaver(name: "ScoutMainWindow"))
+            #endif
         }
         .environmentObject(apiKeyState)
         .environmentObject(auth)
-        .environment(\.managedObjectContext, persistence.viewContext)
         #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         #endif

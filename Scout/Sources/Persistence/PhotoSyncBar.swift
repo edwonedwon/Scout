@@ -1,5 +1,23 @@
 import SwiftUI
 
+/// Observable photo-download progress for the always-visible sync bar. Driven by the photo
+/// download flow (e.g. Supabase Storage prefetch); idle (`isDownloading == false`) when nothing
+/// is in flight, which hides the bar.
+@MainActor
+final class PhotoSyncProgress: ObservableObject {
+    static let shared = PhotoSyncProgress()
+    @Published private(set) var downloaded = 0
+    @Published private(set) var total = 0
+
+    var isDownloading: Bool { total > 0 && downloaded < total }
+    var fraction: Double { total > 0 ? Double(downloaded) / Double(total) : 0 }
+
+    func update(downloaded: Int, total: Int) {
+        self.downloaded = downloaded
+        self.total = total
+    }
+}
+
 /// Small, always-visible capsule shown while first-time photo downloads are in progress
 /// (e.g. right after accepting a shared project). Hidden when nothing is downloading.
 /// Add it as a top-level overlay on each platform's root so it's visible in any view.
