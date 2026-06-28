@@ -88,7 +88,6 @@ struct PhotoGridView: View {
     }
 
     @State private var columns = 3
-    @State private var scrollPositionID: UUID? = nil
     @State private var model = GridModel()
     private let gap: CGFloat = 2
 
@@ -153,42 +152,48 @@ struct PhotoGridView: View {
         } else {
             GeometryReader { geo in
                 let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(model.sections) { section in
-                            sectionHeader(section.title, color: section.color)
-                            masonryGrid(buckets: section.buckets, colWidth: colWidth)
-                        }
-                        if model.hasSearch {
-                            HStack {
-                                sectionHeader("Search Results")
-                                Spacer()
-                                if let onClearSearchResults {
-                                    Button(action: onClearSearchResults) {
-                                        Label("Clear", systemImage: "xmark.circle.fill")
-                                            .font(.caption)
-                                            .foregroundStyle(.white.opacity(0.55))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .padding(.trailing, 10)
-                                }
+                // ScrollViewReader (one-way: programmatic jumps only). A two-way
+                // `.scrollPosition(id:anchor:.top)` binding fought the user here — as you scrolled,
+                // SwiftUI wrote back the topmost item id then re-anchored it to the very top,
+                // snapping the view back up in an infinite loop. Native scrolling + an explicit
+                // scrollTo for the "jump to location" case avoids the feedback loop entirely.
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(model.sections) { section in
+                                sectionHeader(section.title, color: section.color)
+                                masonryGrid(buckets: section.buckets, colWidth: colWidth)
                             }
-                            masonryGrid(buckets: model.searchBuckets, colWidth: colWidth)
+                            if model.hasSearch {
+                                HStack {
+                                    sectionHeader("Search Results")
+                                    Spacer()
+                                    if let onClearSearchResults {
+                                        Button(action: onClearSearchResults) {
+                                            Label("Clear", systemImage: "xmark.circle.fill")
+                                                .font(.caption)
+                                                .foregroundStyle(.white.opacity(0.55))
+                                        }
+                                        .buttonStyle(.plain)
+                                        .padding(.trailing, 10)
+                                    }
+                                }
+                                masonryGrid(buckets: model.searchBuckets, colWidth: colWidth)
+                            }
+                        }
+                        .padding(.bottom, 44)
+                    }
+                    .overlay(alignment: .bottom) {
+                        GridSizeSlider(columns: $columns)
+                    }
+                    // Jump to a requested location (e.g. nearest the map's zoomed area). Deferred
+                    // so the grid — often just made visible — has laid out before we scroll.
+                    .onChange(of: scrollTargetID) { _, id in
+                        guard let id else { return }
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .top) }
                         }
                     }
-                    .padding(.bottom, 44)
-                }
-                // Tracks the topmost visible item UUID so the scroll position
-                // survives grid rebuilds (e.g. after a drag-drop into a list).
-                .scrollPosition(id: $scrollPositionID, anchor: .top)
-                .overlay(alignment: .bottom) {
-                    GridSizeSlider(columns: $columns)
-                }
-                // Jump to a requested location (e.g. nearest the map's zoomed area). Deferred
-                // so the grid — often just made visible — has laid out before we scroll.
-                .onChange(of: scrollTargetID) { _, id in
-                    guard let id else { return }
-                    DispatchQueue.main.async { scrollPositionID = id }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
