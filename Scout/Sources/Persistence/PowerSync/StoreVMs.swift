@@ -28,6 +28,17 @@ final class MacStore: ObservableObject {
     private var scriptVMs: [String: ScriptVM] = [:]
     private var highlightVMs: [String: HighlightVM] = [:]
 
+    // Grouping indexes, rebuilt once per reconcile (O(n)) so relationship accessors are O(1)/O(k)
+    // dictionary lookups instead of O(n) filters over the whole table on EVERY SwiftUI render.
+    // Without these, a project's pinCount is O(lists × pins) and the in-project UI crawls.
+    private var pinsByList: [String: [PinVM]] = [:]
+    private var loosePinsByProject: [String: [PinVM]] = [:]
+    private var listsByProject: [String: [ListVM]] = [:]
+    private var childListsByParent: [String: [ListVM]] = [:]
+    private var scriptsByProject: [String: [ScriptVM]] = [:]
+    private var highlightsByScript: [String: [HighlightVM]] = [:]
+    private var highlightsByList: [String: [HighlightVM]] = [:]
+
     // Published snapshots (all rows incl. trashed; views filter via `deletedAt`).
     @Published private(set) var projects: [ProjectVM] = []
     @Published private(set) var lists: [ListVM] = []
@@ -64,13 +75,48 @@ final class MacStore: ObservableObject {
     func pin(_ id: String?) -> PinVM? { id.flatMap { pinVMs[$0] } }
     func script(_ id: String?) -> ScriptVM? { id.flatMap { scriptVMs[$0] } }
 
-    func listsIn(projectId: String) -> [ListVM] { lists.filter { $0.projectId == projectId } }
-    func childLists(of listId: String) -> [ListVM] { lists.filter { $0.parentListId == listId } }
-    func pinsIn(listId: String) -> [PinVM] { pins.filter { $0.listId == listId } }
-    func loosePins(projectId: String) -> [PinVM] { pins.filter { $0.listId == nil && $0.owningProjectId == projectId } }
-    func scriptsIn(projectId: String) -> [ScriptVM] { scripts.filter { $0.projectId == projectId } }
-    func highlightsIn(scriptId: String) -> [HighlightVM] { highlights.filter { $0.scriptId == scriptId } }
-    func sceneLinks(listId: String) -> [HighlightVM] { highlights.filter { $0.listId == listId } }
+    func listsIn(projectId: String) -> [ListVM] { listsByProject[projectId] ?? [] }
+    func childLists(of listId: String) -> [ListVM] { childListsByParent[listId] ?? [] }
+    func pinsIn(listId: String) -> [PinVM] { pinsByList[listId] ?? [] }
+    func loosePins(projectId: String) -> [PinVM] { loosePinsByProject[projectId] ?? [] }
+    func scriptsIn(projectId: String) -> [ScriptVM] { scriptsByProject[projectId] ?? [] }
+    func highlightsIn(scriptId: String) -> [HighlightVM] { highlightsByScript[scriptId] ?? [] }
+    func sceneLinks(listId: String) -> [HighlightVM] { highlightsByList[listId] ?? [] }
+
+    // MARK: Index rebuilds (run once at the end of each reconcile)
+
+    private func reindexPins() {
+        var byList: [String: [PinVM]] = [:]
+        var loose: [String: [PinVM]] = [:]
+        for vm in pins {
+            if let lid = vm.listId { byList[lid, default: []].append(vm) }
+            else if let pid = vm.owningProjectId { loose[pid, default: []].append(vm) }
+        }
+        pinsByList = byList; loosePinsByProject = loose
+    }
+    private func reindexLists() {
+        var byProject: [String: [ListVM]] = [:]
+        var byParent: [String: [ListVM]] = [:]
+        for vm in lists {
+            if let pid = vm.projectId { byProject[pid, default: []].append(vm) }
+            if let par = vm.parentListId { byParent[par, default: []].append(vm) }
+        }
+        listsByProject = byProject; childListsByParent = byParent
+    }
+    private func reindexScripts() {
+        var byProject: [String: [ScriptVM]] = [:]
+        for vm in scripts { if let pid = vm.projectId { byProject[pid, default: []].append(vm) } }
+        scriptsByProject = byProject
+    }
+    private func reindexHighlights() {
+        var byScript: [String: [HighlightVM]] = [:]
+        var byList: [String: [HighlightVM]] = [:]
+        for vm in highlights {
+            if let sid = vm.scriptId { byScript[sid, default: []].append(vm) }
+            if let lid = vm.listId { byList[lid, default: []].append(vm) }
+        }
+        highlightsByScript = byScript; highlightsByList = byList
+    }
 
     // MARK: Reconciliation (upsert stable VMs, drop removed)
 
@@ -85,24 +131,28 @@ final class MacStore: ObservableObject {
         for r in rows { seen.insert(r.id); (listVMs[r.id] ?? { let vm = ListVM(r, self); listVMs[r.id] = vm; return vm }()).apply(r) }
         listVMs = listVMs.filter { seen.contains($0.key) }
         lists = rows.compactMap { listVMs[$0.id] }
+        reindexLists()
     }
     private func applyPins(_ rows: [PinRecord]) {
         var seen = Set<String>()
         for r in rows { seen.insert(r.id); (pinVMs[r.id] ?? { let vm = PinVM(r, self); pinVMs[r.id] = vm; return vm }()).apply(r) }
         pinVMs = pinVMs.filter { seen.contains($0.key) }
         pins = rows.compactMap { pinVMs[$0.id] }
+        reindexPins()
     }
     private func applyScripts(_ rows: [ScriptRecord]) {
         var seen = Set<String>()
         for r in rows { seen.insert(r.id); (scriptVMs[r.id] ?? { let vm = ScriptVM(r, self); scriptVMs[r.id] = vm; return vm }()).apply(r) }
         scriptVMs = scriptVMs.filter { seen.contains($0.key) }
         scripts = rows.compactMap { scriptVMs[$0.id] }
+        reindexScripts()
     }
     private func applyHighlights(_ rows: [HighlightRecord]) {
         var seen = Set<String>()
         for r in rows { seen.insert(r.id); (highlightVMs[r.id] ?? { let vm = HighlightVM(r, self); highlightVMs[r.id] = vm; return vm }()).apply(r) }
         highlightVMs = highlightVMs.filter { seen.contains($0.key) }
         highlights = rows.compactMap { highlightVMs[$0.id] }
+        reindexHighlights()
     }
 }
 
