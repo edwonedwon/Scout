@@ -350,15 +350,10 @@ struct IOSSidebarDrawer: View {
                         .background(Color(.secondarySystemFill), in: Circle())
                 }
                 Spacer()
+                // Share replaces the close button — tapping outside the drawer dismisses it.
                 Button { showShare = true } label: {
                     Image(systemName: "person.badge.plus")
                         .font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                        .frame(width: 34, height: 34)
-                        .background(Color(.secondarySystemFill), in: Circle())
-                }
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                         .frame(width: 34, height: 34)
                         .background(Color(.secondarySystemFill), in: Circle())
                 }
