@@ -72,7 +72,6 @@ private struct RootGate: View {
         // Start/refresh sync whenever the signed-in state changes.
         .task(id: auth.isAuthenticated) {
             if auth.isAuthenticated {
-                SyncStatusModel.shared.start()
                 await ScoutStore.shared.connectIfPossible()
                 #if DEBUG
                 // End-to-end sync proof: launch a signed-in build with SCOUT_SYNC_SMOKE set.
@@ -82,9 +81,6 @@ private struct RootGate: View {
                 #endif
             }
         }
-        // NOTE: no scenePhase auto-reconnect. Calling db.connect() again while the live watch
-        // streams are mid-flight disrupted them and blanked the UI. PowerSync auto-reconnects its
-        // own streaming connection; the sync pill offers a manual reconnect if ever needed.
     }
 }
 

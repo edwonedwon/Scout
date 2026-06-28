@@ -73,66 +73,16 @@ struct SupabaseConnector: PowerSyncBackendConnectorProtocol {
 }
 
 extension ScoutStore {
-    /// Attach the backend and start syncing. Call after sign-in AND whenever the app returns to the
-    /// foreground — iOS suspends the app and drops the streaming sync connection, which otherwise
-    /// never resumes (so changes made elsewhere stop arriving). Skips the work when already
-    /// connected, so it's cheap to call on every foreground.
-    @MainActor
+    /// Attach the backend and start syncing. Call after the user signs in (and the PowerSync
+    /// instance URL is configured). Safe to call repeatedly — a no-op when sync isn't set up.
     func connectIfPossible() async {
         guard SupabaseConfig.syncEnabled, let client = SupabaseService.client else { return }
-        // Skip when already connected OR a connect is already running/in-flight. The flag is checked
-        // and set synchronously here on the main actor before any await, so RootGate's two launch
-        // callers (.task + scenePhase) can't race into two concurrent db.connect() calls — which
-        // corrupts the connection pool and makes every watch query return nothing (empty UI).
-        if db.currentStatus.connected || isSyncConnecting { return }
-        isSyncConnecting = true
-        defer { isSyncConnecting = false }
-        let who = (try? await client.auth.session)?.user.email ?? "NOT SIGNED IN"
-        await MainActor.run { DebugLogger.shared.log("Sync connecting as \(who)…", tag: "Sync") }
         do {
             try await db.connect(connector: SupabaseConnector(client: client), options: nil)
-            await MainActor.run { DebugLogger.shared.log("Sync connected as \(who).", level: .success, tag: "Sync") }
         } catch {
-            await MainActor.run { DebugLogger.shared.log("Sync connect failed: \(error)", level: .error, tag: "Sync") }
-        }
-    }
-}
-
-/// Live, observable sync status for the UI (a connection pill, "last synced" text, etc.).
-/// Mirrors PowerSync's `currentStatus` stream onto the main actor.
-@MainActor
-final class SyncStatusModel: ObservableObject {
-    static let shared = SyncStatusModel()
-    @Published private(set) var connected = false
-    @Published private(set) var downloading = false
-    @Published private(set) var uploading = false
-    @Published private(set) var lastSyncedAt: Date? = nil
-    private var task: Task<Void, Never>?
-
-    /// Begin mirroring PowerSync's status stream. Idempotent.
-    func start() {
-        guard task == nil else { return }
-        task = Task { [weak self] in
-            var lastConnected: Bool? = nil
-            var lastSynced: Date? = nil
-            for await s in ScoutStore.shared.db.currentStatus.asFlow() {
-                guard let self else { return }
-                self.connected = s.connected
-                self.downloading = s.downloading
-                self.uploading = s.uploading
-                self.lastSyncedAt = s.lastSyncedAt
-                // Log connection flips and each completed sync so the Debug panel shows the pipe live.
-                if lastConnected != s.connected {
-                    lastConnected = s.connected
-                    DebugLogger.shared.log("Sync \(s.connected ? "CONNECTED" : "DISCONNECTED")",
-                                           level: s.connected ? .success : .warning, tag: "Sync")
-                }
-                if let t = s.lastSyncedAt, t != lastSynced {
-                    lastSynced = t
-                    DebugLogger.shared.log("Sync completed \(t.formatted(date: .omitted, time: .standard))"
-                                           + (s.downloading ? " (downloading…)" : ""), tag: "Sync")
-                }
-            }
+            #if DEBUG
+            print("[ScoutStore] connect failed: \(error)")
+            #endif
         }
     }
 }

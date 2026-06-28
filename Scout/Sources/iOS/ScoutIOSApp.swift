@@ -9,25 +9,6 @@ import SwiftUI
 import MapKit
 import ScoutKit
 
-// MARK: - Sync status pill (connection state; tap to reconnect)
-
-struct SyncStatusPill: View {
-    @ObservedObject private var status = SyncStatusModel.shared
-    var body: some View {
-        Button {
-            Task { await ScoutStore.shared.connectIfPossible() }
-        } label: {
-            if status.downloading || status.uploading {
-                ProgressView().controlSize(.small)
-            } else {
-                Image(systemName: status.connected ? "checkmark.icloud" : "icloud.slash")
-                    .font(.subheadline)
-                    .foregroundStyle(status.connected ? Color.green : .secondary)
-            }
-        }
-    }
-}
-
 // MARK: - Reusable pin thumbnail (wraps the shared cached image view)
 
 struct IOSPinThumb: View {
@@ -55,7 +36,6 @@ struct IOSPinThumb: View {
 
 struct ScoutIOSRootView: View {
     @ObservedObject private var store = MacStore.shared
-    @EnvironmentObject private var auth: AuthManager
     @State private var activeProject: ProjectVM?
 
     private var projects: [ProjectVM] {
@@ -122,10 +102,8 @@ struct ScoutIOSRootView: View {
             }
             .navigationTitle("Projects")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { SyncStatusPill() }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
-                        Section("Signed in as") { Text(auth.userEmail ?? "Not signed in") }
                         Button { Task { await createProject() } } label: { Label("New Project", systemImage: "plus") }
                         #if DEBUG
                         Button { Task { await seedSampleProject() } } label: { Label("Add Sample Data", systemImage: "wand.and.stars") }

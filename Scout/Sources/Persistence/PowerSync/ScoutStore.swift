@@ -14,11 +14,6 @@ final class ScoutStore {
 
     let db: any PowerSyncDatabaseProtocol
 
-    /// Guards against overlapping `connect()` calls (RootGate fires connect from both its .task and
-    /// its scenePhase handler at launch). Set synchronously on the main actor before the first
-    /// await, so a racing second caller bails out instead of issuing a concurrent db.connect().
-    @MainActor var isSyncConnecting = false
-
     private init() {
         #if DEBUG
         let filename = "scout-dev.sqlite"
@@ -85,25 +80,20 @@ final class ScoutStore {
     // Unlike the per-project watches above, these include soft-deleted rows so the Trash UI can
     // show them; callers filter by `deletedAt` for live views.
 
-    // A 250ms watch throttle (vs the 30ms default) coalesces the rapid-fire emissions PowerSync
-    // produces while a large initial sync streams rows in — turning ~100 full reconciles into a
-    // handful, without any perceptible lag for live edits.
-    private static let watchThrottle: TimeInterval = 0.25
-
     func watchAllProjectsRaw() -> AsyncThrowingStream<[ProjectRecord], Error> {
-        try! db.watch(options: WatchOptions(sql: "SELECT * FROM projects ORDER BY created_at", parameters: [], throttle: Self.watchThrottle) { try ProjectRecord(cursor: $0) })
+        try! db.watch(sql: "SELECT * FROM projects ORDER BY created_at", parameters: []) { try ProjectRecord(cursor: $0) }
     }
     func watchAllListsRaw() -> AsyncThrowingStream<[ListRecord], Error> {
-        try! db.watch(options: WatchOptions(sql: "SELECT * FROM location_lists ORDER BY panel_order, created_at", parameters: [], throttle: Self.watchThrottle) { try ListRecord(cursor: $0) })
+        try! db.watch(sql: "SELECT * FROM location_lists ORDER BY panel_order, created_at", parameters: []) { try ListRecord(cursor: $0) }
     }
     func watchAllPinsRaw() -> AsyncThrowingStream<[PinRecord], Error> {
-        try! db.watch(options: WatchOptions(sql: "SELECT * FROM pins ORDER BY sort_order", parameters: [], throttle: Self.watchThrottle) { try PinRecord(cursor: $0) })
+        try! db.watch(sql: "SELECT * FROM pins ORDER BY sort_order", parameters: []) { try PinRecord(cursor: $0) }
     }
     func watchAllScriptsRaw() -> AsyncThrowingStream<[ScriptRecord], Error> {
-        try! db.watch(options: WatchOptions(sql: "SELECT * FROM scripts ORDER BY sort_order", parameters: [], throttle: Self.watchThrottle) { try ScriptRecord(cursor: $0) })
+        try! db.watch(sql: "SELECT * FROM scripts ORDER BY sort_order", parameters: []) { try ScriptRecord(cursor: $0) }
     }
     func watchAllHighlightsRaw() -> AsyncThrowingStream<[HighlightRecord], Error> {
-        try! db.watch(options: WatchOptions(sql: "SELECT * FROM script_highlights ORDER BY range_start", parameters: [], throttle: Self.watchThrottle) { try HighlightRecord(cursor: $0) })
+        try! db.watch(sql: "SELECT * FROM script_highlights ORDER BY range_start", parameters: []) { try HighlightRecord(cursor: $0) }
     }
 
     /// Top-level lists in a project (no parent). Folders/children come via `watchChildLists`.
