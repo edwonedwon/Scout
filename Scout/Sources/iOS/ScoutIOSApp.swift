@@ -55,6 +55,7 @@ struct IOSPinThumb: View {
 
 struct ScoutIOSRootView: View {
     @ObservedObject private var store = MacStore.shared
+    @EnvironmentObject private var auth: AuthManager
     @State private var activeProject: ProjectVM?
 
     private var projects: [ProjectVM] {
@@ -124,6 +125,7 @@ struct ScoutIOSRootView: View {
                 ToolbarItem(placement: .topBarLeading) { SyncStatusPill() }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
+                        Section("Signed in as") { Text(auth.userEmail ?? "Not signed in") }
                         Button { Task { await createProject() } } label: { Label("New Project", systemImage: "plus") }
                         #if DEBUG
                         Button { Task { await seedSampleProject() } } label: { Label("Add Sample Data", systemImage: "wand.and.stars") }
