@@ -104,37 +104,52 @@ struct PhotoStorageService {
         }
     }
 
-    /// Pre-download a project's thumbnails into the local cache when it's opened, a few at a time so
-    /// the network/UI never gets flooded. Skips files already cached; posts `.photoDidMaterialize`
-    /// per file so on-screen placeholders fill in as they arrive. Honors task cancellation, so
-    /// leaving the project stops it.
+    /// Pre-download a project's thumbnails into the local cache, a few at a time so the network/UI
+    /// never gets flooded. Downloads in the caller's order (top-to-bottom grid order). Crucially it
+    /// RETRIES across several passes: a thumbnail that fails (a network blip, or the app being
+    /// suspended mid-download) is re-attempted next pass, so the prefetch actually runs to
+    /// completion instead of leaving permanent placeholders. Stops once everything is cached, a pass
+    /// makes no new progress (the rest genuinely aren't in Storage), or the task is cancelled.
     func prefetchThumbnails(projectId: String, files: [String], maxConcurrent: Int = 5) async {
         guard client != nil else { return }
-        // Dedupe while PRESERVING the caller's order (top-to-bottom grid order) and keep only the
-        // files not already cached — so the download priority matches what the user is looking at
-        // AND the progress count is the real number of photos still to fetch (not the whole library).
-        var seen = Set<String>()
-        let missing = files.filter { seen.insert($0).inserted
-            && !FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0).path) }
-        guard !missing.isEmpty else { await PhotoSyncProgress.shared.update(downloaded: 0, total: 0); return }
-        await PhotoSyncProgress.shared.update(downloaded: 0, total: missing.count)
-        var done = 0
-        var i = 0
-        while i < missing.count {
-            if Task.isCancelled { await PhotoSyncProgress.shared.update(downloaded: 0, total: 0); return }
-            let chunk = missing[i ..< min(i + maxConcurrent, missing.count)]
-            await withTaskGroup(of: Void.self) { group in
-                for file in chunk {
-                    group.addTask {
-                        if await self.ensureLocal(filename: file, projectId: projectId, tier: .thumbnail) != nil {
+        var dedup = Set<String>()
+        let unique = files.filter { dedup.insert($0).inserted }
+        func stillMissing() -> [String] {
+            unique.filter { !FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0).path) }
+        }
+        let initialMissing = stillMissing().count
+        guard initialMissing > 0 else { await PhotoSyncProgress.shared.update(downloaded: 0, total: 0); return }
+
+        var gotTotal = 0
+        for pass in 0..<6 {
+            if Task.isCancelled { break }
+            let toGet = stillMissing()
+            if toGet.isEmpty { break }
+            await PhotoSyncProgress.shared.update(downloaded: gotTotal, total: initialMissing)
+            var gotThisPass = 0
+            var i = 0
+            while i < toGet.count {
+                if Task.isCancelled { break }
+                let chunk = toGet[i ..< min(i + maxConcurrent, toGet.count)]
+                let got = await withTaskGroup(of: Bool.self) { group -> Int in
+                    for file in chunk {
+                        group.addTask {
+                            guard await self.ensureLocal(filename: file, projectId: projectId, tier: .thumbnail) != nil
+                            else { return false }
                             await MainActor.run { NotificationCenter.default.post(name: .photoDidMaterialize, object: file) }
+                            return true
                         }
                     }
+                    var c = 0
+                    for await ok in group where ok { c += 1 }
+                    return c
                 }
+                gotThisPass += got; gotTotal += got
+                await PhotoSyncProgress.shared.update(downloaded: gotTotal, total: initialMissing)
+                i += maxConcurrent
             }
-            done += chunk.count
-            await PhotoSyncProgress.shared.update(downloaded: done, total: missing.count)
-            i += maxConcurrent
+            if gotThisPass == 0 { break }   // a whole pass got nothing new → the rest aren't available
+            if pass < 5 { try? await Task.sleep(nanoseconds: 1_500_000_000) }   // brief backoff before retry
         }
         await PhotoSyncProgress.shared.update(downloaded: 0, total: 0)   // finished → hide the bar
     }

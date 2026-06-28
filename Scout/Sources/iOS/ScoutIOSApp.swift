@@ -221,6 +221,8 @@ struct InProjectShell: View {
     @ObservedObject var project: ProjectVM
     let onSwitchProject: () -> Void
 
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var prefetchGen = 0
     @State private var visibleListIDs: Set<UUID> = []
     @State private var selectedTab = {
         #if DEBUG
@@ -293,11 +295,14 @@ struct InProjectShell: View {
         }
         // Warm the local thumbnail cache, a few downloads at a time, in photo-grid order (top to
         // bottom) with currently-visible lists first — so whatever the user is looking at downloads
-        // first. Re-runs (re-prioritizes) when list visibility changes; cancelled when you leave.
-        .task(id: visibleListIDs) {
-            let files = project.photoGridPins(visible: visibleListIDs).flatMap { $0.thumbnailFiles }
+        // first. Covers loose/uncategorized photos too. Re-runs when list visibility changes AND on
+        // every foreground (prefetchGen), so a download interrupted by backgrounding resumes.
+        .task(id: [AnyHashable(visibleListIDs), AnyHashable(prefetchGen)]) {
+            let files = (project.photoGridPins(visible: visibleListIDs) + project.livePhotos)
+                .flatMap { $0.thumbnailFiles }
             await PhotoStorageService.shared.prefetchThumbnails(projectId: project.id, files: files)
         }
+        .onChange(of: scenePhase) { _, phase in if phase == .active { prefetchGen += 1 } }
         .fullScreenCover(isPresented: $showCamera) {
             IOSCameraSheet(project: project)
         }
