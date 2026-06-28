@@ -43,7 +43,26 @@ final class ScoutAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 #else
+/// On iOS the app is scene-based (SwiftUI lifecycle), so the OS delivers an accepted CloudKit
+/// share to the SCENE delegate, not the app delegate. We register this scene delegate via
+/// `configurationForConnecting` below so opening an invite link actually joins the project.
+final class ScoutSceneDelegate: NSObject, UIWindowSceneDelegate {
+    func windowScene(_ windowScene: UIWindowScene,
+                     userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
+        PersistenceController.shared.acceptShare(metadata: metadata)
+    }
+}
+
 final class ScoutAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     configurationForConnecting connectingSceneSession: UISceneSession,
+                     options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        let config = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        config.delegateClass = ScoutSceneDelegate.self
+        return config
+    }
+
+    // Fallback for the app-delegate path (some launch scenarios still route here).
     func application(_ application: UIApplication, userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
         PersistenceController.shared.acceptShare(metadata: metadata)
     }
