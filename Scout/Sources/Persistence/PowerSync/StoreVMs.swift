@@ -120,36 +120,76 @@ final class MacStore: ObservableObject {
 
     // MARK: Reconciliation (upsert stable VMs, drop removed)
 
+    // Each reconcile upserts stable VMs (apply returns whether it changed), then bails BEFORE
+    // touching the @Published array — which is what triggers a SwiftUI re-render — if nothing
+    // actually changed. The watch redelivers every row on each DB change, so this short-circuit is
+    // what stops the sync churn from re-rendering the whole tree on the main thread.
+
     private func applyProjects(_ rows: [ProjectRecord]) {
+        var changed = false
         var seen = Set<String>()
-        for r in rows { seen.insert(r.id); (projectVMs[r.id] ?? { let vm = ProjectVM(r, self); projectVMs[r.id] = vm; return vm }()).apply(r) }
+        for r in rows {
+            seen.insert(r.id)
+            if let vm = projectVMs[r.id] { if vm.apply(r) { changed = true } }
+            else { projectVMs[r.id] = ProjectVM(r, self); changed = true }
+        }
+        if projects.count != rows.count || !projects.elementsEqual(rows, by: { $0.id == $1.id }) { changed = true }
+        guard changed else { return }
         projectVMs = projectVMs.filter { seen.contains($0.key) }
         projects = rows.compactMap { projectVMs[$0.id] }
     }
     private func applyLists(_ rows: [ListRecord]) {
+        var changed = false
         var seen = Set<String>()
-        for r in rows { seen.insert(r.id); (listVMs[r.id] ?? { let vm = ListVM(r, self); listVMs[r.id] = vm; return vm }()).apply(r) }
+        for r in rows {
+            seen.insert(r.id)
+            if let vm = listVMs[r.id] { if vm.apply(r) { changed = true } }
+            else { listVMs[r.id] = ListVM(r, self); changed = true }
+        }
+        if lists.count != rows.count || !lists.elementsEqual(rows, by: { $0.id == $1.id }) { changed = true }
+        guard changed else { return }
         listVMs = listVMs.filter { seen.contains($0.key) }
         lists = rows.compactMap { listVMs[$0.id] }
         reindexLists()
     }
     private func applyPins(_ rows: [PinRecord]) {
+        var changed = false
         var seen = Set<String>()
-        for r in rows { seen.insert(r.id); (pinVMs[r.id] ?? { let vm = PinVM(r, self); pinVMs[r.id] = vm; return vm }()).apply(r) }
+        for r in rows {
+            seen.insert(r.id)
+            if let vm = pinVMs[r.id] { if vm.apply(r) { changed = true } }
+            else { pinVMs[r.id] = PinVM(r, self); changed = true }
+        }
+        if pins.count != rows.count || !pins.elementsEqual(rows, by: { $0.id == $1.id }) { changed = true }
+        guard changed else { return }
         pinVMs = pinVMs.filter { seen.contains($0.key) }
         pins = rows.compactMap { pinVMs[$0.id] }
         reindexPins()
     }
     private func applyScripts(_ rows: [ScriptRecord]) {
+        var changed = false
         var seen = Set<String>()
-        for r in rows { seen.insert(r.id); (scriptVMs[r.id] ?? { let vm = ScriptVM(r, self); scriptVMs[r.id] = vm; return vm }()).apply(r) }
+        for r in rows {
+            seen.insert(r.id)
+            if let vm = scriptVMs[r.id] { if vm.apply(r) { changed = true } }
+            else { scriptVMs[r.id] = ScriptVM(r, self); changed = true }
+        }
+        if scripts.count != rows.count || !scripts.elementsEqual(rows, by: { $0.id == $1.id }) { changed = true }
+        guard changed else { return }
         scriptVMs = scriptVMs.filter { seen.contains($0.key) }
         scripts = rows.compactMap { scriptVMs[$0.id] }
         reindexScripts()
     }
     private func applyHighlights(_ rows: [HighlightRecord]) {
+        var changed = false
         var seen = Set<String>()
-        for r in rows { seen.insert(r.id); (highlightVMs[r.id] ?? { let vm = HighlightVM(r, self); highlightVMs[r.id] = vm; return vm }()).apply(r) }
+        for r in rows {
+            seen.insert(r.id)
+            if let vm = highlightVMs[r.id] { if vm.apply(r) { changed = true } }
+            else { highlightVMs[r.id] = HighlightVM(r, self); changed = true }
+        }
+        if highlights.count != rows.count || !highlights.elementsEqual(rows, by: { $0.id == $1.id }) { changed = true }
+        guard changed else { return }
         highlightVMs = highlightVMs.filter { seen.contains($0.key) }
         highlights = rows.compactMap { highlightVMs[$0.id] }
         reindexHighlights()
@@ -191,10 +231,15 @@ final class ProjectVM: ObservableObject, Identifiable {
         if deletedAt == nil { try await ScoutStore.shared.restoreProject(id: id) } else { try await ScoutStore.shared.softDeleteProject(id: id) } } } }
 
     init(_ r: ProjectRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
-    func apply(_ r: ProjectRecord) {
+    private var lastRecord: ProjectRecord?
+    @discardableResult
+    func apply(_ r: ProjectRecord) -> Bool {
+        if lastRecord == r { return false }
+        lastRecord = r
         applying = true; defer { applying = false }
         name = r.name; notes = r.notes; uncategorizedPanelOrder = r.uncategorizedPanelOrder
         createdAt = r.createdAt; deletedAt = r.deletedAt
+        return true
     }
 
     var uuid: UUID { UUID(uuidString: id) ?? UUID() }
@@ -224,11 +269,16 @@ final class ListVM: ObservableObject, Identifiable {
     private(set) var parentListId: String?
 
     init(_ r: ListRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
-    func apply(_ r: ListRecord) {
+    private var lastRecord: ListRecord?
+    @discardableResult
+    func apply(_ r: ListRecord) -> Bool {
+        if lastRecord == r { return false }
+        lastRecord = r
         applying = true; defer { applying = false }
         name = r.name; colorHex = r.colorHex; sortOrder = r.sortOrder; panelOrder = r.panelOrder
         sceneType = r.sceneType; deletedAt = r.deletedAt; createdAt = r.createdAt
         projectId = r.projectId; parentListId = r.parentListId
+        return true
     }
 
     var uuid: UUID { UUID(uuidString: id) ?? UUID() }
@@ -293,7 +343,14 @@ final class PinVM: ObservableObject, Identifiable {
     private(set) var owningProjectId: String?
 
     init(_ r: PinRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
-    func apply(_ r: PinRecord) {
+    private var lastRecord: PinRecord?
+    /// Returns whether anything actually changed. The watch redelivers ALL rows on every DB change,
+    /// so during sync most rows are identical — skipping those avoids thousands of needless
+    /// @Published writes (and the main-thread churn that froze the in-project load).
+    @discardableResult
+    func apply(_ r: PinRecord) -> Bool {
+        if lastRecord == r { return false }
+        lastRecord = r
         applying = true; defer { applying = false }
         name = r.name; notes = r.notes; latitude = r.latitude; longitude = r.longitude
         statusRaw = r.statusRaw; sortOrder = r.sortOrder; panelOrder = r.panelOrder
@@ -305,6 +362,7 @@ final class PinVM: ObservableObject, Identifiable {
         thumbnailFiles = r.thumbnailFiles; listId = r.listId; owningProjectId = r.owningProjectId
         // Local-only: the absolute path to this device's original file, if a relink found one.
         originalFilePath = OriginalPathStore.shared.path(for: id)
+        return true
     }
 
     var uuid: UUID { UUID(uuidString: id) ?? UUID() }
@@ -363,10 +421,15 @@ final class ScriptVM: ObservableObject, Identifiable {
     private(set) var projectId: String?
 
     init(_ r: ScriptRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
-    func apply(_ r: ScriptRecord) {
+    private var lastRecord: ScriptRecord?
+    @discardableResult
+    func apply(_ r: ScriptRecord) -> Bool {
+        if lastRecord == r { return false }
+        lastRecord = r
         applying = true; defer { applying = false }
         name = r.name; rawText = r.rawText; sortOrder = r.sortOrder
         importedAt = r.importedAt; updatedAt = r.updatedAt; projectId = r.projectId
+        return true
     }
 
     var uuid: UUID { UUID(uuidString: id) ?? UUID() }
@@ -391,10 +454,15 @@ final class HighlightVM: ObservableObject, Identifiable {
     private(set) var listId: String?
 
     init(_ r: HighlightRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
-    func apply(_ r: HighlightRecord) {
+    private var lastRecord: HighlightRecord?
+    @discardableResult
+    func apply(_ r: HighlightRecord) -> Bool {
+        if lastRecord == r { return false }
+        lastRecord = r
         rangeStart = r.rangeStart; rangeLength = r.rangeLength; excerpt = r.excerpt
         contextBefore = r.contextBefore; contextAfter = r.contextAfter; sceneHeading = r.sceneHeading
         createdAt = r.createdAt; scriptId = r.scriptId; listId = r.listId
+        return true
     }
 
     var uuid: UUID { UUID(uuidString: id) ?? UUID() }
