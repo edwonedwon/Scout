@@ -264,10 +264,11 @@ struct InProjectShell: View {
         .onAppear {
             if visibleListIDs.isEmpty { visibleListIDs = project.allListIDs }
         }
-        // Warm the local thumbnail cache for this project, a few downloads at a time, so scrolling
-        // photos is instant instead of fetching one-by-one on demand. Cancelled when you leave.
-        .task(id: project.id) {
-            let files = project.allMapPins.flatMap { $0.thumbnailFiles }
+        // Warm the local thumbnail cache, a few downloads at a time, in photo-grid order (top to
+        // bottom) with currently-visible lists first — so whatever the user is looking at downloads
+        // first. Re-runs (re-prioritizes) when list visibility changes; cancelled when you leave.
+        .task(id: visibleListIDs) {
+            let files = project.photoGridPins(visible: visibleListIDs).flatMap { $0.thumbnailFiles }
             await PhotoStorageService.shared.prefetchThumbnails(projectId: project.id, files: files)
         }
         .fullScreenCover(isPresented: $showCamera) {

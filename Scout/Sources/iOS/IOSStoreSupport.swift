@@ -22,6 +22,32 @@ extension ProjectVM {
     /// All pins in the project (for default map framing).
     var allMapPins: [PinVM] { liveLists.flatMap { $0.livePins } + livePhotos }
     var pinCount: Int { allMapPins.count }
+
+    /// Pins in the exact order the iOS photo grid lays them out: top-level lists in panel order,
+    /// each folder expanded to its children, every list's pins in sort order. Drives thumbnail
+    /// prefetch priority so the top of the grid (what the user sees first) downloads first.
+    /// `visibleOnly` restricts to lists currently toggled visible (so changing visibility
+    /// re-prioritizes the download to match what's actually shown).
+    func photoGridPins(visible: Set<UUID>? = nil) -> [PinVM] {
+        func shown(_ list: ListVM) -> Bool { visible == nil || visible!.contains(list.uuid) }
+        var out: [PinVM] = []
+        for list in topLevelLists {
+            if list.isFolder {
+                for child in list.iosSortedChildren where !child.livePins.isEmpty && shown(child) {
+                    out += child.sortedPins
+                }
+                if !list.livePins.isEmpty && shown(list) { out += list.sortedPins }
+            } else if !list.livePins.isEmpty && shown(list) {
+                out += list.sortedPins
+            }
+        }
+        // Visible lists first (above); append the rest so everything still eventually downloads.
+        if visible != nil {
+            let shownIDs = Set(out.map(\.id))
+            out += photoGridPins().filter { !shownIDs.contains($0.id) }
+        }
+        return out
+    }
 }
 
 extension ListVM {

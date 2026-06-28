@@ -110,7 +110,11 @@ struct PhotoStorageService {
     /// leaving the project stops it.
     func prefetchThumbnails(projectId: String, files: [String], maxConcurrent: Int = 5) async {
         guard client != nil else { return }
-        let missing = Array(Set(files)).filter { !FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0).path) }
+        // Dedupe while PRESERVING the caller's order (top-to-bottom grid order) and keep only the
+        // files not already cached — so the download priority matches what the user is looking at.
+        var seen = Set<String>()
+        let missing = files.filter { seen.insert($0).inserted
+            && !FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0).path) }
         var i = 0
         while i < missing.count {
             if Task.isCancelled { return }
