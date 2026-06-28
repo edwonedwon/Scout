@@ -20,7 +20,9 @@ When the user says **"set version to X"** (e.g. "set version to 1.2"), do all of
 2. **Set the marketing version** — `MARKETING_VERSION: "X"` in `project.yml`.
 3. `xcodegen generate` and build to verify.
 4. **Commit** the change.
-5. **Tag** it: `git tag -a vX -m "Version X"`.
+5. **Tag** it with a **platform suffix** (Git tags can't contain spaces — use a hyphen):
+   `git tag -a vX-Mac -m "Version X (Mac)"` or `git tag -a vX-iOS -m "Version X (iOS)"`,
+   depending on which platform the current work targets.
 6. Mention they can `git push --tags` to push the tag (tags are created locally).
 
 `CFBundleShortVersionString` and `CFBundleVersion` are driven from those two `project.yml`
