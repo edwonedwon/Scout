@@ -13,6 +13,12 @@ packages:
   ZIPFoundation:
     url: https://github.com/weichsel/ZIPFoundation.git
     from: "0.9.19"
+  PowerSync:
+    url: https://github.com/powersync-ja/powersync-swift
+    from: "1.0.0"
+  Supabase:
+    url: https://github.com/supabase/supabase-swift
+    from: "2.0.0"
 
 targets:
   Scout:
@@ -31,6 +37,10 @@ targets:
     dependencies:
       - package: ScoutKit
       - package: ZIPFoundation
+      - package: PowerSync
+        product: PowerSync
+      - package: Supabase
+        product: Supabase
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.cutetech.scout
