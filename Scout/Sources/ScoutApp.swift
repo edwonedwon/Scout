@@ -102,8 +102,9 @@ struct ScoutApp: App {
                 ContentView()
                 #endif
             }
-            // Always-visible first-time photo download progress, on top of any view.
-            .overlay(alignment: .bottom) { PhotoSyncBar() }
+            // Always-visible first-time photo download progress, centered at the top under the
+            // dynamic island / toolbar.
+            .overlay(alignment: .top) { PhotoSyncBar() }
         }
         .environmentObject(apiKeyState)
         .environment(\.managedObjectContext, persistence.viewContext)

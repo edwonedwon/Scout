@@ -67,7 +67,9 @@ enum PhotoBlobSync {
             }
 
             // --- Map every derivative filename (thumb + full only) to its owning pin ---
+            // Skip trashed pins so deleted/duplicate data doesn't inflate counts or re-upload.
             let pinReq = NSFetchRequest<PinnedLocationData>(entityName: "PinnedLocationData")
+            pinReq.predicate = NSPredicate(format: "deletedAt == nil")
             let pins = (try? ctx.fetch(pinReq)) ?? []
             var ownerByName: [String: PinnedLocationData] = [:]
             for pin in pins {
@@ -104,10 +106,16 @@ enum PhotoBlobSync {
 
             if ctx.hasChanges { try? ctx.save() }
 
-            // Report download progress: how many referenced derivatives are now on disk vs total.
-            let total = ownerByName.count
-            let onDisk = ownerByName.keys.reduce(0) { acc, name in
-                FileManager.default.fileExists(atPath: PinPhotoStore.fileURL(name).path) ? acc + 1 : acc
+            // Progress reflects BLOBS (actual downloadable units), not every referenced filename.
+            // On the owner, every blob was created from a local file → all on disk → bar hides.
+            // On a recipient, blobs sync down with no local file yet → bar shows and climbs as
+            // they materialize. Orphan references (no blob, e.g. missing full-res) are ignored,
+            // so the bar can't get stuck on files that will never arrive.
+            let allBlobs = Array(blobsByName.values)
+            let total = allBlobs.count
+            let onDisk = allBlobs.reduce(0) { acc, blob in
+                guard let name = blob.filename else { return acc }
+                return FileManager.default.fileExists(atPath: PinPhotoStore.fileURL(name).path) ? acc + 1 : acc
             }
             Task { @MainActor in PhotoSyncProgress.shared.update(downloaded: onDisk, total: total) }
 
