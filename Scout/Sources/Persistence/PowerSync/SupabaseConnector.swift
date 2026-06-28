@@ -79,7 +79,10 @@ extension ScoutStore {
     /// connected, so it's cheap to call on every foreground.
     func connectIfPossible() async {
         guard SupabaseConfig.syncEnabled, let client = SupabaseService.client else { return }
-        if db.currentStatus.connected { return }
+        // Skip when already connected OR a connect is already in flight — RootGate's .task and its
+        // scenePhase .onChange both fire this at launch, and two concurrent db.connect() calls
+        // disrupt the connection.
+        if db.currentStatus.connected || db.currentStatus.connecting { return }
         let who = (try? await client.auth.session)?.user.email ?? "NOT SIGNED IN"
         await MainActor.run { DebugLogger.shared.log("Sync connecting as \(who)…", tag: "Sync") }
         do {

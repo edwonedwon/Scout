@@ -51,20 +51,30 @@ final class MacStore: ObservableObject {
     let store = ScoutStore.shared
 
     private init() {
+        func logWatchError(_ name: String, _ error: Error) {
+            DebugLogger.shared.log("watch[\(name)] STOPPED: \(error)", level: .error, tag: "Store")
+        }
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllProjectsRaw() { self?.applyProjects(rows) } } catch {}
+            do { for try await rows in ScoutStore.shared.watchAllProjectsRaw() {
+                DebugLogger.shared.log("watch[projects] delivered \(rows.count) row(s)", tag: "Store")
+                self?.applyProjects(rows)
+            } } catch { logWatchError("projects", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllListsRaw() { self?.applyLists(rows) } } catch {}
+            do { for try await rows in ScoutStore.shared.watchAllListsRaw() { self?.applyLists(rows) } }
+            catch { logWatchError("lists", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllPinsRaw() { self?.applyPins(rows) } } catch {}
+            do { for try await rows in ScoutStore.shared.watchAllPinsRaw() { self?.applyPins(rows) } }
+            catch { logWatchError("pins", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllScriptsRaw() { self?.applyScripts(rows) } } catch {}
+            do { for try await rows in ScoutStore.shared.watchAllScriptsRaw() { self?.applyScripts(rows) } }
+            catch { logWatchError("scripts", error) }
         })
         tasks.append(Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchAllHighlightsRaw() { self?.applyHighlights(rows) } } catch {}
+            do { for try await rows in ScoutStore.shared.watchAllHighlightsRaw() { self?.applyHighlights(rows) } }
+            catch { logWatchError("highlights", error) }
         })
     }
     deinit { tasks.forEach { $0.cancel() } }
