@@ -56,7 +56,6 @@ private struct WindowFrameAutosaver: NSViewRepresentable {
 /// so the build is never blocked on account setup.
 private struct RootGate: View {
     @EnvironmentObject private var auth: AuthManager
-    @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         Group {
             if auth.isAuthenticated {
@@ -83,13 +82,9 @@ private struct RootGate: View {
                 #endif
             }
         }
-        // Re-establish sync on every foreground — iOS suspends the app and drops the PowerSync
-        // streaming connection, so changes made elsewhere would otherwise stop arriving until relaunch.
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active, auth.isAuthenticated {
-                Task { await ScoutStore.shared.connectIfPossible() }
-            }
-        }
+        // NOTE: no scenePhase auto-reconnect. Calling db.connect() again while the live watch
+        // streams are mid-flight disrupted them and blanked the UI. PowerSync auto-reconnects its
+        // own streaming connection; the sync pill offers a manual reconnect if ever needed.
     }
 }
 
