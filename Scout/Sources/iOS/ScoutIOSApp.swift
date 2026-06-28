@@ -286,7 +286,7 @@ struct IOSSidebarDrawer: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    sectionHeader("LISTS")
+                    listsSectionHeader
                     ForEach(project.topLevelLists, id: \.uuid) { list in
                         if list.isFolder {
                             folderRows(list)
@@ -355,6 +355,33 @@ struct IOSSidebarDrawer: View {
             .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// True when every list in the project is currently toggled visible.
+    private var allListsVisible: Bool {
+        let ids = project.allListIDs
+        return !ids.isEmpty && ids.allSatisfy { visibleListIDs.contains($0) }
+    }
+
+    /// Show or hide every list at once (the iOS equivalent of the Mac "All Lists" eye).
+    private func toggleAllVisibility() {
+        let ids = project.allListIDs
+        if allListsVisible { visibleListIDs.subtract(ids) } else { visibleListIDs.formUnion(ids) }
+    }
+
+    /// "LISTS" header with a master eye that flips every list's visibility in one tap.
+    private var listsSectionHeader: some View {
+        HStack {
+            Text("LISTS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            Spacer()
+            Button(action: toggleAllVisibility) {
+                Image(systemName: allListsVisible ? "eye.fill" : "eye.slash")
+                    .font(.subheadline)
+                    .foregroundStyle(allListsVisible ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 4)
     }
 
     @ViewBuilder
