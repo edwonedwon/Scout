@@ -107,17 +107,23 @@ enum Screenplay {
 
 /// A top-down (flipped) document view that tracks the scroll view's width and keeps the page
 /// sheets centred horizontally (so the script sits centred under the island).
+/// The page is a FIXED width (Screenplay.pageW); horizontal centering is handled by
+/// CenteringClipView so it stays centered at any window size and zoom.
 final class ScriptDocView: NSView {
     override var isFlipped: Bool { true }
-    override func layout() {
-        super.layout()
-        let clipW = enclosingScrollView?.contentView.bounds.width ?? bounds.width
-        let w = max(Screenplay.pageW, clipW)
-        if abs(frame.width - w) > 0.5 { setFrameSize(NSSize(width: w, height: frame.height)) }
-        let x = ((w - Screenplay.pageW) / 2).rounded()
-        for sub in subviews where sub.frame.origin.x != x {
-            sub.frame.origin.x = x
+}
+
+/// Centers the fixed-width screenplay document horizontally whenever the scroll view is wider than
+/// the page (the reliable AppKit way — overriding the clip's bounds instead of nudging frames in
+/// layout(), which fired with stale widths and left the page hugging the left edge).
+final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        guard let doc = documentView else { return rect }
+        if rect.width > doc.frame.width {
+            rect.origin.x = ((doc.frame.width - rect.width) / 2).rounded()
         }
+        return rect
     }
 }
 
@@ -150,6 +156,7 @@ struct ScriptTextRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
+        scroll.contentView = CenteringClipView()   // keeps the page horizontally centered
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.scrollerStyle = .overlay
@@ -276,7 +283,6 @@ struct ScriptTextRepresentable: NSViewRepresentable {
 
             // Build the stacked page sheets in a self-centering document view.
             let doc = ScriptDocView(frame: .zero)
-            doc.autoresizingMask = [.width]
             for (i, container) in containers.enumerated() {
                 let y = Screenplay.pageGap + CGFloat(i) * (Screenplay.pageH + Screenplay.pageGap)
                 let sheet = PageSheetView(frame: NSRect(x: 0, y: y, width: Screenplay.pageW, height: Screenplay.pageH))
@@ -308,9 +314,8 @@ struct ScriptTextRepresentable: NSViewRepresentable {
                 }
                 doc.addSubview(sheet)
             }
-            let initialW = max(Screenplay.pageW, scroll.contentView.bounds.width)
             let docH = Screenplay.pageGap + CGFloat(containers.count) * (Screenplay.pageH + Screenplay.pageGap)
-            doc.frame = NSRect(x: 0, y: 0, width: initialW, height: docH)
+            doc.frame = NSRect(x: 0, y: 0, width: Screenplay.pageW, height: docH)
             scroll.documentView = doc
             doc.needsLayout = true
 

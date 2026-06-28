@@ -9,18 +9,22 @@ import ScoutKit
 
 struct IOSPhotosTab: View {
     @ObservedObject var project: ProjectVM
+    @Binding var visibleListIDs: Set<UUID>
     let onMenu: () -> Void
 
-    /// (list, pins) sections in display order — folders expand to their child lists.
+    private func shown(_ list: ListVM) -> Bool { visibleListIDs.contains(list.uuid) }
+
+    /// (list, pins) sections in display order — folders expand to their child lists. Only lists
+    /// currently toggled visible (the sidebar eye buttons) appear, so the grid tracks visibility.
     private var sections: [(list: ListVM, pins: [PinVM])] {
         var out: [(ListVM, [PinVM])] = []
         for list in project.topLevelLists {
             if list.isFolder {
-                for child in list.iosSortedChildren where !child.livePins.isEmpty {
+                for child in list.iosSortedChildren where !child.livePins.isEmpty && shown(child) {
                     out.append((child, child.sortedPins))
                 }
-                if !list.livePins.isEmpty { out.append((list, list.sortedPins)) }
-            } else if !list.livePins.isEmpty {
+                if !list.livePins.isEmpty && shown(list) { out.append((list, list.sortedPins)) }
+            } else if !list.livePins.isEmpty && shown(list) {
                 out.append((list, list.sortedPins))
             }
         }

@@ -244,7 +244,7 @@ struct InProjectShell: View {
                     .tabItem { Label("Map", systemImage: "map.fill") }
                     .tag(0)
 
-                IOSPhotosTab(project: project, onMenu: openSidebar)
+                IOSPhotosTab(project: project, visibleListIDs: $visibleListIDs, onMenu: openSidebar)
                     .tabItem { Label("Photos", systemImage: "photo.on.rectangle") }
                     .tag(1)
 

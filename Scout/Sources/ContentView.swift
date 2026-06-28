@@ -953,8 +953,13 @@ struct ContentView: View {
     /// Shown over the center panel when no project is open: just the app icon and name.
     private var projectEmptyState: some View {
         ZStack {
-            Color(red: 22/255, green: 24/255, blue: 32/255)
-                .ignoresSafeArea()
+            // Plain system background — adapts to light/dark (was a hardcoded dark that looked
+            // wrong in Light mode). The map/photos/script all sit behind this when no project is open.
+            #if os(macOS)
+            Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
+            #else
+            Color(.systemBackground).ignoresSafeArea()
+            #endif
             VStack(spacing: 16) {
                 #if os(macOS)
                 Image(nsImage: NSApplication.shared.applicationIconImage)
