@@ -31,8 +31,10 @@ struct IOSPinThumb: View {
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         // On a device that didn't create the photo, the thumbnail file isn't local yet — fetch it
         // from Storage (no-op if already present); the image view reloads on .photoDidMaterialize.
+        // projectId comes from the in-memory VM (NO per-pin DB query — that jammed the sync watches).
         .task(id: pin.id) {
-            await PhotoStorageService.shared.ensureThumbnailLocal(pinId: pin.id, thumbnailFiles: pin.thumbnailFiles)
+            guard !pin.thumbnailFiles.isEmpty, let projectId = pin.owningProjectId ?? pin.list?.projectId else { return }
+            await PhotoStorageService.shared.ensureThumbnailLocal(projectId: projectId, thumbnailFiles: pin.thumbnailFiles)
         }
     }
 }
@@ -41,6 +43,7 @@ struct IOSPinThumb: View {
 
 struct ScoutIOSRootView: View {
     @ObservedObject private var store = MacStore.shared
+    @EnvironmentObject private var auth: AuthManager
     @State private var activeProject: ProjectVM?
 
     private var projects: [ProjectVM] {
@@ -107,6 +110,14 @@ struct ScoutIOSRootView: View {
             }
             .navigationTitle("Projects")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        if let email = auth.userEmail { Section("Signed in as") { Text(email) } }
+                        Button(role: .destructive) { Task { await auth.signOut() } } label: {
+                            Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    } label: { Image(systemName: "person.crop.circle") }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
                         Button { Task { await createProject() } } label: { Label("New Project", systemImage: "plus") }

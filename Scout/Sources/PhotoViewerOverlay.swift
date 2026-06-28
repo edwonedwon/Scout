@@ -314,8 +314,11 @@ struct GooglePhotoImage<Placeholder: View>: View {
         .onChange(of: targetPixelSize.map(sizeBucket) ?? 0) { _, _ in load() }
         // A photo finished downloading from Storage into the local cache → reload if we were
         // showing the "not downloaded yet" placeholder.
-        .onReceive(NotificationCenter.default.publisher(for: .photoDidMaterialize)) { _ in
-            if pendingDownload { load() }
+        .onReceive(NotificationCenter.default.publisher(for: .photoDidMaterialize)) { note in
+            guard pendingDownload else { return }
+            // Only reload if it's *our* file that materialized (object carries the filename).
+            if let name = note.object as? String, name != url?.lastPathComponent { return }
+            load()
         }
     }
 

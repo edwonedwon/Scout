@@ -94,12 +94,13 @@ struct PhotoStorageService {
     /// missing (the case on a device that didn't create the photo). On success, posts
     /// `.photoDidMaterialize` so on-screen image views reload and show it. The thumbnail tier caches
     /// at the bare filename — exactly where the thumbnail image views look — so no rename is needed.
-    func ensureThumbnailLocal(pinId: String, thumbnailFiles: [String]) async {
+    func ensureThumbnailLocal(projectId: String, thumbnailFiles: [String]) async {
         guard client != nil, let file = thumbnailFiles.first else { return }
         if FileManager.default.fileExists(atPath: PinPhotoStore.fileURL(file).path) { return }
-        guard let projectId = await projectId(forPin: pinId) else { return }
         if await ensureLocal(filename: file, projectId: projectId, tier: .thumbnail) != nil {
-            await MainActor.run { NotificationCenter.default.post(name: .photoDidMaterialize, object: nil) }
+            // Target the reload at the one file that materialized (object = filename), so only the
+            // image view showing it reloads — not every on-screen photo.
+            await MainActor.run { NotificationCenter.default.post(name: .photoDidMaterialize, object: file) }
         }
     }
 
