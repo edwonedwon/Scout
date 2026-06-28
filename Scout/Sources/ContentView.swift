@@ -1738,9 +1738,11 @@ struct ContentView: View {
         do {
             // Import into ScoutStore (PowerSync) — syncs up to Supabase and copies photo bytes to
             // the local cache (and Storage when configured). Replaces the old Core Data import.
+            DebugLogger.shared.log("User picked backup: \(url.lastPathComponent)", tag: "Import")
             let s = try await BackupService.importIntoStore(from: url)
             backupStatusMessage = "Imported \(s.projectsAdded) projects, \(s.listsAdded) lists, \(s.pinsAdded) pins. Skipped \(s.skippedDuplicates) duplicates."
         } catch {
+            DebugLogger.shared.log("Import FAILED: \(error)", level: .error, tag: "Import")
             backupStatusMessage = "Import failed: \(error.localizedDescription)"
         }
         isBackupBusy = false

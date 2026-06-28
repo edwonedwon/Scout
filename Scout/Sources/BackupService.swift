@@ -444,6 +444,15 @@ enum BackupService {
         let photosDir = tmp.appendingPathComponent("photos")
         var summary = ImportSummary()
 
+        // Debug-panel logging (DebugLogger is @MainActor; hop for each line).
+        func ilog(_ s: String, _ level: DebugEntry.Level = .info) async {
+            await MainActor.run { DebugLogger.shared.log(s, level: level, tag: "Import") }
+        }
+        await ilog("=== STORE IMPORT START === file=\(url.lastPathComponent)")
+        await ilog("Decoded backup: \(manifest.projects.count) project(s), \(manifest.standaloneLists.count) standalone list(s), \(manifest.unfiledPins.count) unfiled pin(s), exportedAt=\(manifest.exportedAt)")
+        await ilog("Photos in archive folder exists=\(fm.fileExists(atPath: photosDir.path))")
+        await ilog("Storage configured (Supabase)=\(SupabaseConfig.isConfigured) — photo bytes will \(SupabaseConfig.isConfigured ? "upload to Storage" : "stay local-only")")
+
         // Accumulate all INSERTs as (sql, params) so the whole import is one atomic transaction.
         var ops: [(String, [Any?])] = []
         // Photo files to copy into the local cache (src basename), and per-project upload jobs.
@@ -518,29 +527,50 @@ enum BackupService {
             addProject(wrapper)
         }
 
+        await ilog("Built \(ops.count) row insert(s): \(summary.projectsAdded) projects, \(summary.listsAdded) lists, \(summary.pinsAdded) pins, \(summary.scriptsAdded) scripts. \(photoCopies.count) photo file(s) referenced.")
+
         // Copy photo bytes into the local cache so thumbnails/full-res work immediately offline.
+        var missingLocal = 0
         for f in photoCopies {
             let src = photosDir.appendingPathComponent(f)
             let dst = PinPhotoStore.fileURL(f)
             if fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) {
                 try? fm.copyItem(at: src, to: dst)
                 summary.photoFilesCopied += 1
+            } else if !fm.fileExists(atPath: src.path) {
+                missingLocal += 1
             }
         }
+        await ilog("Copied \(summary.photoFilesCopied) photo file(s) to local cache (\(PinPhotoStore.directory.lastPathComponent)); \(missingLocal) missing in archive.")
 
         let captured = ops
-        try await store.transaction { tx in
-            for (sql, params) in captured { try tx.execute(sql: sql, parameters: params) }
+        do {
+            try await store.transaction { tx in
+                for (sql, params) in captured { try tx.execute(sql: sql, parameters: params) }
+            }
+            await ilog("Inserted \(captured.count) row(s) into the store (one transaction). ✅", .success)
+        } catch {
+            await ilog("Row insert FAILED: \(error)", .error)
+            throw error
         }
 
         // Best-effort: push photo bytes to Storage when configured (no-op otherwise).
+        await ilog("Uploading \(uploads.count) photo file(s) (thumbnail+full tiers) to Supabase Storage…")
+        var uploaded = 0, uploadFailed = 0, uploadMissing = 0
         for job in uploads {
             let local = photosDir.appendingPathComponent(job.filename)
-            if fm.fileExists(atPath: local.path) {
-                try? await PhotoStorageService.shared.upload(fileURL: local, projectId: job.projectId,
-                                                             tier: job.tier, filename: job.filename)
+            guard fm.fileExists(atPath: local.path) else { uploadMissing += 1; continue }
+            do {
+                try await PhotoStorageService.shared.upload(fileURL: local, projectId: job.projectId,
+                                                            tier: job.tier, filename: job.filename)
+                uploaded += 1
+            } catch {
+                uploadFailed += 1
+                if uploadFailed <= 3 { await ilog("Upload failed (\(job.tier.rawValue)/\(job.filename)): \(error)", .warning) }
             }
         }
+        await ilog("Storage upload done: \(uploaded) uploaded, \(uploadFailed) failed, \(uploadMissing) missing. (Originals are NOT uploaded — opt-in only.)", uploadFailed > 0 ? .warning : .success)
+        await ilog("=== STORE IMPORT COMPLETE === projects=\(summary.projectsAdded) lists=\(summary.listsAdded) pins=\(summary.pinsAdded) scripts=\(summary.scriptsAdded)", .success)
         return summary
     }
 
