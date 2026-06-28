@@ -60,6 +60,7 @@ struct ScoutIOSRootView: View {
     @StateObject private var model = ProjectSummariesModel()
     @EnvironmentObject private var auth: AuthManager
     @State private var activeProjectId: String?
+    @State private var showDebugLog = false
 
     var body: some View {
         Group {
@@ -120,10 +121,14 @@ struct ScoutIOSRootView: View {
                 }
             }
             .navigationTitle("Projects")
+            .sheet(isPresented: $showDebugLog) { IOSDebugLogView() }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
                         if let email = auth.userEmail { Section("Signed in as") { Text(email) } }
+                        Button { showDebugLog = true } label: {
+                            Label("Debug Log", systemImage: "ant.fill")
+                        }
                         Button(role: .destructive) { Task { await auth.signOut() } } label: {
                             Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
                         }

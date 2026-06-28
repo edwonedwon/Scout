@@ -410,6 +410,7 @@ struct ContentView: View {
                     for f in pin.thumbnailFiles { thumbs.append((pid, .thumbnail, f)) }
                     for f in pin.photoFiles { fulls.append((pid, .full, f)) }
                 }
+                dlog("auto-upload check: \(mac.pins.count) pins → \(thumbs.count) thumbs + \(fulls.count) full files on disk", tag: "Photos")
                 await PhotoStorageService.shared.uploadLocalPhotos(thumbs + fulls)
             }
             try? await Task.sleep(for: .seconds(300))

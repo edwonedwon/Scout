@@ -1,5 +1,6 @@
 import Foundation
 import Supabase
+import ScoutKit
 
 extension Notification.Name {
     /// Posted (main thread) after a photo file is downloaded from Storage to the local cache, so
@@ -74,6 +75,12 @@ struct PhotoStorageService {
             : present.filter { !ledger.contains(tier: $0.tier.rawValue, filename: $0.filename) }
         var done = total - pending.count   // "already on the server" per the ledger
 
+        guard !pending.isEmpty else {
+            dlog("upload: all \(total) local files already on the server — nothing to send", level: .success, tag: "Photos")
+            return
+        }
+        dlog("upload: \(total) local files, \(done) already sent, \(pending.count) to upload (force=\(force))", tag: "Photos")
+
         func report() async {
             let d = done, t = total
             await MainActor.run {
@@ -83,23 +90,35 @@ struct PhotoStorageService {
         }
         await report()
 
+        var sent = 0, failed = 0
         var i = 0
         while i < pending.count {
-            if Task.isCancelled { ledger.save(); return }
+            if Task.isCancelled {
+                ledger.save()
+                dlog("upload cancelled after \(sent) sent, \(failed) failed", level: .warning, tag: "Photos")
+                return
+            }
             let chunk = Array(pending[i ..< min(i + maxConcurrent, pending.count)])
-            await withTaskGroup(of: (Int, Bool).self) { group in
+            await withTaskGroup(of: (Int, Bool, String?).self) { group in
                 for (offset, job) in chunk.enumerated() {
                     group.addTask {
                         do {
                             try await self.upload(fileURL: PinPhotoStore.fileURL(job.filename),
                                                   projectId: job.projectId, tier: job.tier, filename: job.filename)
-                            return (offset, true)
-                        } catch { return (offset, false) }
+                            return (offset, true, nil)
+                        } catch { return (offset, false, "\(error)") }
                     }
                 }
-                for await (offset, ok) in group where ok {
+                for await (offset, ok, err) in group {
                     let job = chunk[offset]
-                    ledger.mark(tier: job.tier.rawValue, filename: job.filename)
+                    if ok {
+                        ledger.mark(tier: job.tier.rawValue, filename: job.filename)
+                        sent += 1
+                    } else {
+                        failed += 1
+                        // Log just the first failure's reason so the panel isn't flooded.
+                        if failed == 1 { dlog("upload FAILED \(job.tier.rawValue)/\(job.filename): \(err ?? "?")", level: .error, tag: "Photos") }
+                    }
                 }
             }
             done += chunk.count
@@ -107,6 +126,8 @@ struct PhotoStorageService {
             i += maxConcurrent
         }
         ledger.save()
+        dlog("upload done: sent \(sent), failed \(failed), \(total) total on disk",
+             level: failed > 0 ? .warning : .success, tag: "Photos")
         // Settle the bar at total/total so it hides itself.
         await MainActor.run { PhotoSyncProgress.shared.update(downloaded: total, total: total, verb: "Uploading") }
     }
@@ -173,7 +194,11 @@ struct PhotoStorageService {
             unique.filter { !FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0).path) }
         }
         let initialMissing = stillMissing().count
-        guard initialMissing > 0 else { await PhotoSyncProgress.shared.update(downloaded: 0, total: 0); return }
+        guard initialMissing > 0 else {
+            dlog("prefetch: all \(unique.count) thumbnails already cached", level: .success, tag: "Photos")
+            await PhotoSyncProgress.shared.update(downloaded: 0, total: 0); return
+        }
+        dlog("prefetch: \(initialMissing) of \(unique.count) thumbnails missing — downloading", tag: "Photos")
 
         var gotTotal = 0
         for pass in 0..<6 {
@@ -203,10 +228,38 @@ struct PhotoStorageService {
                 await PhotoSyncProgress.shared.update(downloaded: gotTotal, total: initialMissing)
                 i += maxConcurrent
             }
-            if gotThisPass == 0 { break }   // a whole pass got nothing new → the rest aren't available
+            dlog("prefetch pass \(pass + 1): +\(gotThisPass) (\(gotTotal)/\(initialMissing) cached)", tag: "Photos")
+            if gotThisPass == 0 {
+                // A whole pass got nothing new → the rest aren't available. Probe one to log WHY
+                // (e.g. "Object not found" = never uploaded; a 403 = auth/RLS) so the cause is visible.
+                let missing = stillMissing()
+                var why = "unknown"
+                if let first = missing.first {
+                    why = await diagnoseDownload(filename: first, projectId: projectId) ?? "downloaded OK on retry"
+                }
+                dlog("prefetch STALLED: \(missing.count) thumbnails won't download — e.g. \(missing.first ?? "?"): \(why)",
+                     level: .warning, tag: "Photos")
+                break
+            }
             if pass < 5 { try? await Task.sleep(nanoseconds: 1_500_000_000) }   // brief backoff before retry
         }
+        let remaining = stillMissing().count
+        dlog("prefetch complete: cached \(initialMissing - remaining)/\(initialMissing) (\(remaining) still missing)",
+             level: remaining == 0 ? .success : .warning, tag: "Photos")
         await PhotoSyncProgress.shared.update(downloaded: 0, total: 0)   // finished → hide the bar
+    }
+
+    /// One-shot diagnostic used when a prefetch stalls: try to download a thumbnail and return a
+    /// human description of any failure (nil on success), so the debug panel shows the real reason
+    /// the rest can't be pulled.
+    private func diagnoseDownload(filename: String, projectId: String) async -> String? {
+        guard let client else { return "Storage not configured" }
+        do {
+            _ = try await client.storage.from(Self.bucket).download(path: path(projectId, .thumbnail, filename))
+            return nil   // it actually worked this time (transient blip)
+        } catch {
+            return "\(error)"
+        }
     }
 
     /// Fetch every photo's thumbnail for a pin (the always-available tier). Originals are skipped
