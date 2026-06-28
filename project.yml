@@ -58,6 +58,13 @@ targets:
       configs:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          # Optimize the Debug build so it's responsive when run ATTACHED to Xcode. Unoptimized
+          # (-Onone) Swift is fine detached, but under the debugger every un-inlined call /
+          # objectWillChange send is instrumented, which made the heavy view-model reconcile crawl.
+          # -Osize keeps build times reasonable while removing that overhead. (Release is already -O.)
+          # Trade-off: breakpoints in optimized code are less precise — set this back to -Onone
+          # temporarily if you need to step through a specific area in detail.
+          SWIFT_OPTIMIZATION_LEVEL: "-Osize"
     entitlements:
       path: Scout/Scout.entitlements
       properties:
