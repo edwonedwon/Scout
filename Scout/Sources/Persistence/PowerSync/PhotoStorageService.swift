@@ -56,6 +56,35 @@ struct PhotoStorageService {
         try await upload(data, projectId: projectId, tier: tier, filename: filename)
     }
 
+    /// Repair pass: (re-)upload every locally-cached photo file for these jobs to Storage so other
+    /// devices can download them. Idempotent (upsert), skips files not present on disk, a few at a
+    /// time. Use when an import only partially uploaded and a device shows stuck placeholders.
+    /// `progress(done, total)` is called on the main actor as it advances.
+    func uploadLocalPhotos(_ jobs: [(projectId: String, tier: Tier, filename: String)],
+                           maxConcurrent: Int = 4,
+                           progress: @escaping @MainActor (Int, Int) -> Void) async {
+        guard client != nil else { return }
+        let present = jobs.filter { FileManager.default.fileExists(atPath: PinPhotoStore.fileURL($0.filename).path) }
+        await MainActor.run { progress(0, present.count) }
+        var done = 0
+        var i = 0
+        while i < present.count {
+            if Task.isCancelled { return }
+            let chunk = present[i ..< min(i + maxConcurrent, present.count)]
+            await withTaskGroup(of: Void.self) { group in
+                for job in chunk {
+                    group.addTask {
+                        try? await self.upload(fileURL: PinPhotoStore.fileURL(job.filename),
+                                               projectId: job.projectId, tier: job.tier, filename: job.filename)
+                    }
+                }
+            }
+            done += chunk.count
+            await MainActor.run { progress(done, present.count) }
+            i += maxConcurrent
+        }
+    }
+
     /// Best-effort upload of a freshly imported pin's locally-cached tiers (thumbnail + full) to
     /// Storage, so the photo reaches other devices. Resolves the pin's project for the Storage path.
     /// No-op when Storage isn't configured, or the pin isn't in any project (an unfiled pin doesn't

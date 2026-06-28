@@ -121,8 +121,12 @@ private struct BackupSection: View {
                 .disabled(isBusy)
             Button("Relink Originals…") { Task { await doRelink() } }
                 .disabled(isBusy)
+            Button("Upload Photos to Cloud") { Task { await doUploadPhotos() } }
+                .disabled(isBusy)
             if isBusy { ProgressView().controlSize(.small) }
         }
+        Text("\"Upload Photos to Cloud\" pushes every local thumbnail + full-res file to Storage so other devices can download them — use it if photos stay as placeholders on your phone.")
+            .font(.caption2).foregroundStyle(.secondary)
         if let msg = statusMessage {
             Text(msg).font(.caption).foregroundStyle(.secondary)
         }
@@ -151,6 +155,24 @@ private struct BackupSection: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func doUploadPhotos() async {
+        isBusy = true; statusMessage = nil; errorMessage = nil
+        defer { isBusy = false }
+        // Every live pin's thumbnail + full-res files, for whichever project they belong to.
+        var jobs: [(projectId: String, tier: PhotoStorageService.Tier, filename: String)] = []
+        for pin in MacStore.shared.pins where pin.deletedAt == nil {
+            guard let pid = pin.owningProjectId ?? pin.list?.projectId else { continue }
+            for f in pin.thumbnailFiles { jobs.append((pid, .thumbnail, f)) }
+            for f in pin.photoFiles { jobs.append((pid, .full, f)) }
+        }
+        guard !jobs.isEmpty else { statusMessage = "No local photos to upload."; return }
+        statusMessage = "Uploading photos to cloud…"
+        await PhotoStorageService.shared.uploadLocalPhotos(jobs) { done, total in
+            statusMessage = "Uploading photos to cloud… \(done) / \(total)"
+        }
+        statusMessage = "Photo upload complete — your phone can now download them."
     }
 
     private func doRelink() async {
