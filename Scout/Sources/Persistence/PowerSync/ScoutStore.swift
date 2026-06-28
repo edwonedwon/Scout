@@ -76,6 +76,26 @@ final class ScoutStore {
         ) { try PinRecord(cursor: $0) }
     }
 
+    // MARK: Global streams (whole DB, including trashed) — the Mac UI binds these via MacStore.
+    // Unlike the per-project watches above, these include soft-deleted rows so the Trash UI can
+    // show them; callers filter by `deletedAt` for live views.
+
+    func watchAllProjectsRaw() -> AsyncThrowingStream<[ProjectRecord], Error> {
+        try! db.watch(sql: "SELECT * FROM projects ORDER BY created_at", parameters: []) { try ProjectRecord(cursor: $0) }
+    }
+    func watchAllListsRaw() -> AsyncThrowingStream<[ListRecord], Error> {
+        try! db.watch(sql: "SELECT * FROM location_lists ORDER BY panel_order, created_at", parameters: []) { try ListRecord(cursor: $0) }
+    }
+    func watchAllPinsRaw() -> AsyncThrowingStream<[PinRecord], Error> {
+        try! db.watch(sql: "SELECT * FROM pins ORDER BY sort_order", parameters: []) { try PinRecord(cursor: $0) }
+    }
+    func watchAllScriptsRaw() -> AsyncThrowingStream<[ScriptRecord], Error> {
+        try! db.watch(sql: "SELECT * FROM scripts ORDER BY sort_order", parameters: []) { try ScriptRecord(cursor: $0) }
+    }
+    func watchAllHighlightsRaw() -> AsyncThrowingStream<[HighlightRecord], Error> {
+        try! db.watch(sql: "SELECT * FROM script_highlights ORDER BY range_start", parameters: []) { try HighlightRecord(cursor: $0) }
+    }
+
     /// Top-level lists in a project (no parent). Folders/children come via `watchChildLists`.
     func watchLists(projectId: String) -> AsyncThrowingStream<[ListRecord], Error> {
         try! db.watch(

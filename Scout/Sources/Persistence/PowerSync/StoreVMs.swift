@@ -1,0 +1,307 @@
+// StoreVMs.swift — store-backed view-model adapter for the Mac UI (migration plan P2, stage 2).
+//
+// The Mac UI (ContentView/ProjectsPanel + subviews) was built on Core Data NSManagedObjects, passed
+// throughout the view tree, two-way-bound, and keyed in selection sets. To move it onto ScoutStore
+// (PowerSync SQLite) with the least structural churn, these reference-type view-models MIRROR the
+// NSManagedObject API surface (same property names, `@Published` for two-way bindings, relationship
+// accessors that walk the in-memory graph). A single `MacStore` watches the whole DB and keeps a
+// stable VM per row id, so SwiftUI identity holds across sync updates and @ObservedObject works.
+//
+// Mutations write through to ScoutStore; the resulting watch update reconciles the VM graph.
+
+import Foundation
+import Combine
+import CoreLocation
+import SwiftUI
+import ScoutKit
+
+// MARK: - MacStore: the live VM graph over ScoutStore
+
+@MainActor
+final class MacStore: ObservableObject {
+    static let shared = MacStore()
+
+    // Stable VM per id (reused across updates so SwiftUI identity + @ObservedObject hold).
+    private var projectVMs: [String: ProjectVM] = [:]
+    private var listVMs: [String: ListVM] = [:]
+    private var pinVMs: [String: PinVM] = [:]
+    private var scriptVMs: [String: ScriptVM] = [:]
+    private var highlightVMs: [String: HighlightVM] = [:]
+
+    // Published snapshots (all rows incl. trashed; views filter via `deletedAt`).
+    @Published private(set) var projects: [ProjectVM] = []
+    @Published private(set) var lists: [ListVM] = []
+    @Published private(set) var pins: [PinVM] = []
+    @Published private(set) var scripts: [ScriptVM] = []
+    @Published private(set) var highlights: [HighlightVM] = []
+
+    private var tasks: [Task<Void, Never>] = []
+    let store = ScoutStore.shared
+
+    private init() {
+        tasks.append(Task { [weak self] in
+            do { for try await rows in ScoutStore.shared.watchAllProjectsRaw() { self?.applyProjects(rows) } } catch {}
+        })
+        tasks.append(Task { [weak self] in
+            do { for try await rows in ScoutStore.shared.watchAllListsRaw() { self?.applyLists(rows) } } catch {}
+        })
+        tasks.append(Task { [weak self] in
+            do { for try await rows in ScoutStore.shared.watchAllPinsRaw() { self?.applyPins(rows) } } catch {}
+        })
+        tasks.append(Task { [weak self] in
+            do { for try await rows in ScoutStore.shared.watchAllScriptsRaw() { self?.applyScripts(rows) } } catch {}
+        })
+        tasks.append(Task { [weak self] in
+            do { for try await rows in ScoutStore.shared.watchAllHighlightsRaw() { self?.applyHighlights(rows) } } catch {}
+        })
+    }
+    deinit { tasks.forEach { $0.cancel() } }
+
+    // MARK: Lookups (used by relationship accessors)
+
+    func project(_ id: String?) -> ProjectVM? { id.flatMap { projectVMs[$0] } }
+    func list(_ id: String?) -> ListVM? { id.flatMap { listVMs[$0] } }
+    func pin(_ id: String?) -> PinVM? { id.flatMap { pinVMs[$0] } }
+    func script(_ id: String?) -> ScriptVM? { id.flatMap { scriptVMs[$0] } }
+
+    func listsIn(projectId: String) -> [ListVM] { lists.filter { $0.projectId == projectId } }
+    func childLists(of listId: String) -> [ListVM] { lists.filter { $0.parentListId == listId } }
+    func pinsIn(listId: String) -> [PinVM] { pins.filter { $0.listId == listId } }
+    func loosePins(projectId: String) -> [PinVM] { pins.filter { $0.listId == nil && $0.owningProjectId == projectId } }
+    func scriptsIn(projectId: String) -> [ScriptVM] { scripts.filter { $0.projectId == projectId } }
+    func highlightsIn(scriptId: String) -> [HighlightVM] { highlights.filter { $0.scriptId == scriptId } }
+    func sceneLinks(listId: String) -> [HighlightVM] { highlights.filter { $0.listId == listId } }
+
+    // MARK: Reconciliation (upsert stable VMs, drop removed)
+
+    private func applyProjects(_ rows: [ProjectRecord]) {
+        var seen = Set<String>()
+        for r in rows { seen.insert(r.id); (projectVMs[r.id] ?? { let vm = ProjectVM(r, self); projectVMs[r.id] = vm; return vm }()).apply(r) }
+        projectVMs = projectVMs.filter { seen.contains($0.key) }
+        projects = rows.compactMap { projectVMs[$0.id] }
+    }
+    private func applyLists(_ rows: [ListRecord]) {
+        var seen = Set<String>()
+        for r in rows { seen.insert(r.id); (listVMs[r.id] ?? { let vm = ListVM(r, self); listVMs[r.id] = vm; return vm }()).apply(r) }
+        listVMs = listVMs.filter { seen.contains($0.key) }
+        lists = rows.compactMap { listVMs[$0.id] }
+    }
+    private func applyPins(_ rows: [PinRecord]) {
+        var seen = Set<String>()
+        for r in rows { seen.insert(r.id); (pinVMs[r.id] ?? { let vm = PinVM(r, self); pinVMs[r.id] = vm; return vm }()).apply(r) }
+        pinVMs = pinVMs.filter { seen.contains($0.key) }
+        pins = rows.compactMap { pinVMs[$0.id] }
+    }
+    private func applyScripts(_ rows: [ScriptRecord]) {
+        var seen = Set<String>()
+        for r in rows { seen.insert(r.id); (scriptVMs[r.id] ?? { let vm = ScriptVM(r, self); scriptVMs[r.id] = vm; return vm }()).apply(r) }
+        scriptVMs = scriptVMs.filter { seen.contains($0.key) }
+        scripts = rows.compactMap { scriptVMs[$0.id] }
+    }
+    private func applyHighlights(_ rows: [HighlightRecord]) {
+        var seen = Set<String>()
+        for r in rows { seen.insert(r.id); (highlightVMs[r.id] ?? { let vm = HighlightVM(r, self); highlightVMs[r.id] = vm; return vm }()).apply(r) }
+        highlightVMs = highlightVMs.filter { seen.contains($0.key) }
+        highlights = rows.compactMap { highlightVMs[$0.id] }
+    }
+}
+
+// MARK: - Project
+
+@MainActor
+final class ProjectVM: ObservableObject, Identifiable {
+    let id: String
+    unowned let s: MacStore
+    @Published var name: String = ""
+    @Published var notes: String = ""
+    @Published var uncategorizedPanelOrder: Int = 0
+    var createdAt: Date = Date()
+    @Published var deletedAt: Date?
+
+    init(_ r: ProjectRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
+    func apply(_ r: ProjectRecord) {
+        name = r.name; notes = r.notes; uncategorizedPanelOrder = r.uncategorizedPanelOrder
+        createdAt = r.createdAt; deletedAt = r.deletedAt
+    }
+
+    var uuid: UUID { UUID(uuidString: id) ?? UUID() }
+    var lists: [ListVM] { s.listsIn(projectId: id) }
+    var liveLists: [ListVM] { lists.filter { $0.deletedAt == nil } }
+    var importedPhotos: [PinVM] { s.loosePins(projectId: id) }
+    var livePhotos: [PinVM] { importedPhotos.filter { $0.deletedAt == nil } }
+    var scripts: [ScriptVM] { s.scriptsIn(projectId: id) }
+}
+
+// MARK: - Location list
+
+@MainActor
+final class ListVM: ObservableObject, Identifiable {
+    let id: String
+    unowned let s: MacStore
+    @Published var name: String = ""
+    @Published var colorHex: String = "#FF6B35"
+    @Published var sortOrder: Int = 0
+    @Published var panelOrder: Int = 0
+    @Published var sceneType: String?
+    @Published var deletedAt: Date?
+    var createdAt: Date = Date()
+    private(set) var projectId: String?
+    private(set) var parentListId: String?
+
+    init(_ r: ListRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
+    func apply(_ r: ListRecord) {
+        name = r.name; colorHex = r.colorHex; sortOrder = r.sortOrder; panelOrder = r.panelOrder
+        sceneType = r.sceneType; deletedAt = r.deletedAt; createdAt = r.createdAt
+        projectId = r.projectId; parentListId = r.parentListId
+    }
+
+    var uuid: UUID { UUID(uuidString: id) ?? UUID() }
+    var project: ProjectVM? { s.project(projectId) }
+    var parentList: ListVM? { s.list(parentListId) }
+    var pins: [PinVM] { s.pinsIn(listId: id) }
+    var livePins: [PinVM] { pins.filter { $0.deletedAt == nil } }
+    var childLists: [ListVM] { s.childLists(of: id) }
+    var liveChildLists: [ListVM] { childLists.filter { $0.deletedAt == nil } }
+    var sceneLinks: [HighlightVM] { s.sceneLinks(listId: id) }
+
+    var displayColor: Color { Color(hexString: colorHex) }
+
+    static let palette = LocationListData.palette
+}
+
+// MARK: - Pinned location
+
+@MainActor
+final class PinVM: ObservableObject, Identifiable {
+    let id: String
+    unowned let s: MacStore
+    @Published var name: String = ""
+    @Published var notes: String = ""
+    @Published var latitude: Double = 0
+    @Published var longitude: Double = 0
+    @Published var statusRaw: String = ""
+    @Published var sortOrder: Int = 0
+    @Published var panelOrder: Int = 0
+    @Published var isFlagged: Bool = false
+    @Published var rotationQuarterTurns: Int = 0
+    @Published var aspectRatio: Double = 0
+    @Published var deletedAt: Date?
+    var imageURL: String?
+    var googlePlaceId: String?
+    var sourceURLString: String?
+    var googleMapsURLString: String?
+    var imageSourceRaw: String?
+    var originalFilename: String?
+    var hasGPS: Bool = true
+    var gpsFromTimeline: Bool = false
+    var dateTaken: Date?
+    var createdAt: Date = Date()
+    var photoFiles: [String] = []
+    var thumbnailFiles: [String] = []
+    private(set) var listId: String?
+    private(set) var owningProjectId: String?
+
+    init(_ r: PinRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
+    func apply(_ r: PinRecord) {
+        name = r.name; notes = r.notes; latitude = r.latitude; longitude = r.longitude
+        statusRaw = r.statusRaw; sortOrder = r.sortOrder; panelOrder = r.panelOrder
+        isFlagged = r.isFlagged; rotationQuarterTurns = r.rotationQuarterTurns; aspectRatio = r.aspectRatio
+        deletedAt = r.deletedAt; imageURL = r.imageURL; googlePlaceId = r.googlePlaceId
+        sourceURLString = r.sourceURL; googleMapsURLString = r.googleMapsURL; imageSourceRaw = r.imageSourceRaw
+        originalFilename = r.originalFilename; hasGPS = r.hasGPS; gpsFromTimeline = r.gpsFromTimeline
+        dateTaken = r.dateTaken; createdAt = r.createdAt; photoFiles = r.photoFiles
+        thumbnailFiles = r.thumbnailFiles; listId = r.listId; owningProjectId = r.owningProjectId
+    }
+
+    var uuid: UUID { UUID(uuidString: id) ?? UUID() }
+    var list: ListVM? { s.list(listId) }
+    var owningProject: ProjectVM? { s.project(owningProjectId) }
+    var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: latitude, longitude: longitude) }
+
+    var thumbnailImages: [ScoutImage] {
+        let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .imported
+        let files = thumbnailFiles.isEmpty ? photoFiles : thumbnailFiles
+        return files.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken, rotationQuarterTurns: rotationQuarterTurns, aspectRatio: aspectRatio) }
+    }
+    var fullResImages: [ScoutImage] {
+        let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .imported
+        if !photoFiles.isEmpty {
+            return photoFiles.map { ScoutImage(url: PinPhotoStore.fileURL($0), source: source, dateTaken: dateTaken, rotationQuarterTurns: rotationQuarterTurns) }
+        }
+        return []
+    }
+
+    func asScoutLocation() -> ScoutLocation {
+        let source = imageSourceRaw.flatMap(ScoutImage.ImageSource.init(rawValue:)) ?? .googleMaps
+        let images: [ScoutImage]
+        if !photoFiles.isEmpty || !thumbnailFiles.isEmpty {
+            images = thumbnailImages
+        } else if let imageURL, let url = URL(string: imageURL) {
+            images = [ScoutImage(url: url, source: source)]
+        } else {
+            images = []
+        }
+        return ScoutLocation(
+            id: uuid, name: name, description: notes,
+            coordinate: coordinate,
+            sourceURL: sourceURLString.flatMap { URL(string: $0) },
+            images: images, fullResImages: fullResImages,
+            googleMapsURL: googleMapsURLString.flatMap { URL(string: $0) },
+            googlePlaceId: googlePlaceId,
+            status: LocationStatus(rawValue: statusRaw) ?? .scouted,
+            isFlagged: isFlagged
+        )
+    }
+}
+
+// MARK: - Script
+
+@MainActor
+final class ScriptVM: ObservableObject, Identifiable {
+    let id: String
+    unowned let s: MacStore
+    @Published var name: String = ""
+    @Published var rawText: String = ""
+    @Published var sortOrder: Int = 0
+    var importedAt: Date = Date()
+    var updatedAt: Date = Date()
+    private(set) var projectId: String?
+
+    init(_ r: ScriptRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
+    func apply(_ r: ScriptRecord) {
+        name = r.name; rawText = r.rawText; sortOrder = r.sortOrder
+        importedAt = r.importedAt; updatedAt = r.updatedAt; projectId = r.projectId
+    }
+
+    var uuid: UUID { UUID(uuidString: id) ?? UUID() }
+    var project: ProjectVM? { s.project(projectId) }
+    var highlights: [HighlightVM] { s.highlightsIn(scriptId: id) }
+}
+
+// MARK: - Script highlight
+
+@MainActor
+final class HighlightVM: ObservableObject, Identifiable {
+    let id: String
+    unowned let s: MacStore
+    @Published var rangeStart: Int = 0
+    @Published var rangeLength: Int = 0
+    @Published var excerpt: String = ""
+    @Published var contextBefore: String = ""
+    @Published var contextAfter: String = ""
+    @Published var sceneHeading: String?
+    var createdAt: Date = Date()
+    private(set) var scriptId: String?
+    private(set) var listId: String?
+
+    init(_ r: HighlightRecord, _ s: MacStore) { self.id = r.id; self.s = s; apply(r) }
+    func apply(_ r: HighlightRecord) {
+        rangeStart = r.rangeStart; rangeLength = r.rangeLength; excerpt = r.excerpt
+        contextBefore = r.contextBefore; contextAfter = r.contextAfter; sceneHeading = r.sceneHeading
+        createdAt = r.createdAt; scriptId = r.scriptId; listId = r.listId
+    }
+
+    var uuid: UUID { UUID(uuidString: id) ?? UUID() }
+    var script: ScriptVM? { s.script(scriptId) }
+    var list: ListVM? { s.list(listId) }
+}
