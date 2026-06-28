@@ -852,6 +852,31 @@ private struct ProjectDetailView: View {
         !hiddenUncategorizedProjectIDs.contains(project.persistentModelID)
     }
 
+    /// True when every list and the uncategorized photos are currently visible.
+    private var allListsVisible: Bool {
+        project.lists.allSatisfy { activeListIDs.contains($0.persistentModelID) } && uncategorizedVisible
+    }
+
+    /// Master visibility row at the top of the sidebar: one eye that shows/hides everything,
+    /// aligned with the per-row eyes. Same effect as Option-clicking any row's eye.
+    private var masterVisibilityRow: some View {
+        HStack {
+            Text("All Lists")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button { setProjectVisibility(!allListsVisible) } label: {
+                Image(systemName: allListsVisible ? "eye.fill" : "eye")
+                    .foregroundStyle(allListsVisible ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(allListsVisible ? "Hide all" : "Show all")
+        }
+        .padding(.vertical, 2)
+        .listRowSeparator(.hidden)
+        .contentShape(Rectangle())
+    }
+
     /// Toggles every list AND the uncategorized photos in this project on/off at once.
     /// Used by Option-clicking any eye.
     private func setProjectVisibility(_ visible: Bool) {
@@ -2415,13 +2440,16 @@ private struct ProjectDetailView: View {
         VStack(spacing: 0) {
         sidebarSearchField
         List {
-            // Scripts are pinned to the very top and are not part of the reorderable items, so
-            // nothing can be dragged above them.
-            scriptsSection
+            // Master visibility toggle — show/hide ALL lists + uncategorized at once (same as
+            // Option-clicking any row's eye). Sits above the lists, below the search field.
+            masterVisibilityRow
 
             ForEach(displayedItems) { item in
                 sidebarRow(item)
             }
+
+            // Scripts pinned at the bottom: below the lists, above Trash.
+            scriptsSection
 
             trashSection
 
