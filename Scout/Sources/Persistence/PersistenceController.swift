@@ -174,7 +174,7 @@ final class PersistenceController {
         }
         do {
             dlog("Creating/fetching CKShare for \(project.name)…", tag: "Share")
-            let share = try await withTimeout(30, step: "creating the share") {
+            let share = try await withTimeout(15, step: "creating the share") {
                 try await self.shareForProject(project)
             }
             share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
@@ -195,14 +195,14 @@ final class PersistenceController {
                 return url
             }
             dlog("Share created; waiting for iCloud to assign the link…", tag: "Share")
-            for attempt in 1...30 {
+            for attempt in 1...15 {
                 try await Task.sleep(nanoseconds: 1_000_000_000)
                 if let url = self.existingShare(for: project)?.url {
                     dlog("Invite link ready after \(attempt)s: \(url)", level: .success, tag: "Share")
                     return url
                 }
             }
-            dlog("No invite link after 30s", level: .error, tag: "Share")
+            dlog("No invite link after 15s", level: .error, tag: "Share")
             throw SharingError.timedOut("waiting for iCloud to assign the invite link")
         } catch {
             dlog("Share failed: \(error.localizedDescription)", level: .error, tag: "Share")
