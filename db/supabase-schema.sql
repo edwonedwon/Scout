@@ -149,3 +149,39 @@ create policy members_owner_all on project_members
   with check (exists (select 1 from projects p where p.id = project_id and p.owner_id = auth.uid()));
 create policy members_self_read on project_members
   for select using (user_id = auth.uid());
+
+-- ============================================================================
+-- Storage: photo files (migration plan P5). One private bucket; object paths are
+-- `{projectId}/{tier}/{filename}` so access is authorized by the project, exactly
+-- like the row tables. Members of a project can read/write its photos.
+-- ============================================================================
+
+insert into storage.buckets (id, name, public)
+values ('photos', 'photos', false)
+on conflict (id) do nothing;
+
+create policy photos_read on storage.objects
+  for select using (
+    bucket_id = 'photos' and can_access_project((storage.foldername(name))[1])
+  );
+create policy photos_write on storage.objects
+  for insert with check (
+    bucket_id = 'photos' and can_access_project((storage.foldername(name))[1])
+  );
+create policy photos_update on storage.objects
+  for update using (
+    bucket_id = 'photos' and can_access_project((storage.foldername(name))[1])
+  );
+create policy photos_delete on storage.objects
+  for delete using (
+    bucket_id = 'photos' and can_access_project((storage.foldername(name))[1])
+  );
+
+-- ============================================================================
+-- Look up a user id by email so the owner can add collaborators (migration plan
+-- P6). SECURITY DEFINER so it can read auth.users; only returns the bare id.
+-- ============================================================================
+create or replace function user_id_for_email(lookup_email text)
+returns uuid language sql security definer stable as $$
+  select id from auth.users where lower(email) = lower(lookup_email) limit 1;
+$$;

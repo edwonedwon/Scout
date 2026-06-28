@@ -5,6 +5,7 @@ import ScoutKit
 struct SettingsView: View {
     @EnvironmentObject private var apiKeyState: APIKeyState
     @AppStorage("map.scrollToZoom") private var scrollToZoom = false
+    @AppStorage(PhotoStorageService.autoDownloadOriginalsKey) private var autoDownloadOriginals = false
     @State private var showClearConfirm = false
 
     var body: some View {
@@ -68,6 +69,14 @@ struct SettingsView: View {
                 Text("Swipe up/down with two fingers to zoom instead of pinch.")
             }
             #endif
+
+            Section {
+                Toggle("Download originals automatically", isOn: $autoDownloadOriginals)
+            } header: {
+                Text("Photos")
+            } footer: {
+                Text("Thumbnails and standard full-resolution images are always available. Original camera files are large and stay in the cloud unless you turn this on or download them per-photo.")
+            }
 
             #if os(macOS)
             Section {

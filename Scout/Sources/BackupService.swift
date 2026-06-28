@@ -336,6 +336,143 @@ enum BackupService {
         return summary
     }
 
+    // MARK: - Import into the PowerSync store (migration plan P3)
+
+    /// Decode a backup zip and load it into `ScoutStore` (the new PowerSync local DB), instead of
+    /// Core Data. This is how pre-migration data comes across — there is no automatic Core Data
+    /// migration. Photo bytes are copied into the local cache; when Storage is configured they are
+    /// also uploaded so other devices/members can fetch them.
+    static func importIntoStore(from url: URL, store: ScoutStore = .shared) async throws -> ImportSummary {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("ScoutRestorePS-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tmp) }
+
+        try unzip(archive: url, to: tmp)
+        let data = try Data(contentsOf: tmp.appendingPathComponent("backup.json"))
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let manifest = try dec.decode(BackupManifest.self, from: data)
+
+        let photosDir = tmp.appendingPathComponent("photos")
+        var summary = ImportSummary()
+
+        // Accumulate all INSERTs as (sql, params) so the whole import is one atomic transaction.
+        var ops: [(String, [Any?])] = []
+        // Photo files to copy into the local cache (src basename), and per-project upload jobs.
+        var photoCopies = Set<String>()
+        var uploads: [(projectId: String, tier: PhotoStorageService.Tier, filename: String)] = []
+
+        func remember(photos files: [String]) { files.forEach { photoCopies.insert($0) } }
+
+        func addPin(_ bp: BackupPin, listId: String?, projectId: String) {
+            let id = ScoutStore.newID()
+            remember(photos: bp.photoFiles + bp.thumbnailFiles)
+            for f in bp.thumbnailFiles { uploads.append((projectId, .thumbnail, f)) }
+            for f in bp.photoFiles { uploads.append((projectId, .full, f)) }
+            let rec = PinRecord(
+                id: id, listId: listId, owningProjectId: listId == nil ? projectId : nil,
+                name: bp.name, notes: bp.notes, latitude: bp.latitude, longitude: bp.longitude,
+                hasGPS: bp.hasGPS, gpsFromTimeline: bp.gpsFromTimeline, isFlagged: bp.isFlagged,
+                rotationQuarterTurns: bp.rotationQuarterTurns, aspectRatio: bp.aspectRatio,
+                panelOrder: bp.panelOrder, sortOrder: bp.sortOrder, statusRaw: bp.statusRaw,
+                imageSourceRaw: bp.imageSourceRaw, imageURL: bp.imageURL, googlePlaceId: bp.googlePlaceId,
+                googleMapsURL: bp.googleMapsURLString, sourceURL: bp.sourceURLString,
+                originalFilename: bp.originalFilename, photoFiles: bp.photoFiles,
+                thumbnailFiles: bp.thumbnailFiles, dateTaken: bp.dateTaken,
+                createdAt: bp.createdAt, deletedAt: bp.deletedAt
+            )
+            ops.append((ScoutStore.pinInsertSQL, ScoutStore.pinParams(rec)))
+            summary.pinsAdded += 1
+        }
+
+        func addList(_ bl: BackupList, projectId: String, parentId: String?) {
+            let id = ScoutStore.newID()
+            ops.append((listInsertSQL, [id, projectId, parentId as Any, bl.name, bl.colorHex,
+                                        bl.sceneType as Any, bl.panelOrder, bl.sortOrder,
+                                        ISO8601DateFormatter.string(bl.createdAt),
+                                        bl.deletedAt.map { ISO8601DateFormatter.string($0) } as Any]))
+            summary.listsAdded += 1
+            for bp in bl.pins { addPin(bp, listId: id, projectId: projectId) }
+            for child in (bl.childLists ?? []) { addList(child, projectId: projectId, parentId: id) }
+        }
+
+        func addProject(_ bp: BackupProject) {
+            let id = ScoutStore.newID()
+            ops.append((projectInsertSQL, [id, bp.name, bp.notes, 0,
+                                           ISO8601DateFormatter.string(bp.createdAt), nil]))
+            summary.projectsAdded += 1
+            for bl in bp.lists { addList(bl, projectId: id, parentId: nil) }
+            for pin in bp.importedPhotos { addPin(pin, listId: nil, projectId: id) }
+            for bs in bp.scripts ?? [] {
+                let sid = ScoutStore.newID()
+                ops.append((scriptInsertSQL, [sid, id, bs.name, bs.rawText, bs.sortOrder,
+                                              ISO8601DateFormatter.string(bs.importedAt),
+                                              ISO8601DateFormatter.string(bs.updatedAt)]))
+                summary.scriptsAdded += 1
+                // Highlights re-link to lists by original uuid only where the list was imported;
+                // since list ids are freshly generated, we drop scene→list links on store import
+                // (the text + highlight ranges are preserved). Re-link is a later refinement.
+                for bh in bs.highlights {
+                    let hid = ScoutStore.newID()
+                    ops.append((highlightInsertSQL, [hid, sid, nil, bh.rangeStart, bh.rangeLength,
+                                                     bh.excerpt, bh.contextBefore, bh.contextAfter,
+                                                     bh.sceneHeading as Any,
+                                                     ISO8601DateFormatter.string(bh.createdAt)]))
+                }
+            }
+        }
+
+        for bp in manifest.projects { addProject(bp) }
+        if !manifest.standaloneLists.isEmpty || !manifest.unfiledPins.isEmpty {
+            var wrapper = BackupProject(uuid: UUID(), name: "Imported", notes: "", createdAt: Date(),
+                                        lists: manifest.standaloneLists, importedPhotos: manifest.unfiledPins)
+            wrapper.scripts = []
+            addProject(wrapper)
+        }
+
+        // Copy photo bytes into the local cache so thumbnails/full-res work immediately offline.
+        for f in photoCopies {
+            let src = photosDir.appendingPathComponent(f)
+            let dst = PinPhotoStore.fileURL(f)
+            if fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) {
+                try? fm.copyItem(at: src, to: dst)
+                summary.photoFilesCopied += 1
+            }
+        }
+
+        let captured = ops
+        try await store.transaction { tx in
+            for (sql, params) in captured { try tx.execute(sql: sql, parameters: params) }
+        }
+
+        // Best-effort: push photo bytes to Storage when configured (no-op otherwise).
+        for job in uploads {
+            let local = photosDir.appendingPathComponent(job.filename)
+            if fm.fileExists(atPath: local.path) {
+                try? await PhotoStorageService.shared.upload(fileURL: local, projectId: job.projectId,
+                                                             tier: job.tier, filename: job.filename)
+            }
+        }
+        return summary
+    }
+
+    private static let projectInsertSQL = """
+    INSERT INTO projects (id, name, notes, uncategorized_panel_order, created_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """
+    private static let listInsertSQL = """
+    INSERT INTO location_lists (id, project_id, parent_list_id, name, color_hex, scene_type, panel_order, sort_order, created_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    private static let scriptInsertSQL = """
+    INSERT INTO scripts (id, project_id, name, raw_text, sort_order, imported_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    """
+    private static let highlightInsertSQL = """
+    INSERT INTO script_highlights (id, script_id, list_id, range_start, range_length, excerpt, context_before, context_after, scene_heading, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
     // MARK: - Relink original files
 
     struct RelinkSummary {

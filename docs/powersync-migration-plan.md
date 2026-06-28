@@ -21,23 +21,27 @@ predictable cost, and sharing via Postgres Row-Level Security instead of CKShare
 
 ## Phases (each stays buildable)
 
-- [ ] **P0 — Foundation (no cloud needed).** Add PowerSync + supabase-swift SPM deps (done).
-      Define the PowerSync `Schema` (local tables) and the Supabase SQL schema. Build green.
-- [ ] **P1 — Local data layer.** A `Store` abstraction over PowerSync SQLite with typed
-      models (Project/List/Pin/Script/Highlight) + CRUD + `watch` queries. Seedable; fully
-      testable offline with NO Supabase account.
-- [ ] **P2 — Wire the UI.** Replace `@FetchRequest`/`@ObservedObject`(NSManagedObject) usage in
-      ContentView, ProjectsPanel, iOS views, DataInspector, DebugPanel with the new store +
-      observable queries. App runs entirely on local SQLite.
-- [ ] **P3 — Data import.** One-time import of the user's existing data (via the current backup
-      export, or a direct Core Data → SQLite migration) so nothing is lost.
-- [ ] **P4 — Cloud sync.** Stand up Supabase project + PowerSync instance; add the
-      `PowerSyncBackendConnector` (Supabase auth + upload). Verify Mac ⇄ iPhone sync.
-- [ ] **P5 — Photos.** Upload/download derivatives via Supabase Storage; local cache; the
-      always-visible download progress bar repurposed for Storage fetches.
-- [ ] **P6 — Sharing.** `project_members` + RLS (owner/editor/viewer); invite by email; a share
-      sheet that adds a member row (no more CKShare hangs).
-- [ ] **P7 — Cleanup.** Delete Core Data/CloudKit code + entitlements; update CLAUDE.md.
+- [x] **P0 — Foundation.** PowerSync + supabase-swift deps; PowerSync `Schema` + `db/supabase-schema.sql`.
+- [x] **P1 — Local data layer.** `ScoutStore` over PowerSync SQLite + `*Record` models, full CRUD,
+      `watch` queries, transactions. Testable offline with no account.
+- [ ] **P2 — Wire the UI.** Replace `@FetchRequest`/NSManagedObject usage in ContentView,
+      ProjectsPanel, iOS views, DataInspector, DebugPanel with `ScoutStore` + observable queries.
+      **NOT STARTED — the one risky phase.** Deliberately deferred until accounts are live so each
+      screen can be verified against real sync; swapping it blind would break live TestFlight data.
+      Plan: one screen at a time (start with the iOS sidebar), Core Data path staying until proven.
+- [x] **P3 — Data import.** `BackupService.importIntoStore(from:)` loads a pre-migration Export zip
+      into `ScoutStore` (no auto Core Data migration). Copies photo bytes locally + uploads to
+      Storage when configured. (Wire the Import menu action to it as part of P2.)
+- [x] **P4 — Cloud sync (code).** `SupabaseConnector` (`fetchCredentials` + `uploadData`), Supabase
+      Auth (email/password + Apple), login UI, `ScoutStore.connectIfPossible()`. Needs the user's
+      accounts (see `account-setup.md`) to verify Mac ⇄ iPhone end-to-end.
+- [x] **P5 — Photos (code).** `PhotoStorageService` (thumbnail/full/original tiers) over Supabase
+      Storage; local cache; **originals download is opt-in, off by default** (Settings toggle).
+      Storage bucket + RLS in the schema. Hook into pin display/import during P2.
+- [x] **P6 — Sharing (code).** `project_members` + RLS; `ProjectSharing` (invite by email via the
+      `user_id_for_email` RPC, roles, remove); `ShareProjectView`. Replaces CKShare — no hang.
+- [ ] **P7 — Cleanup.** Delete Core Data/CloudKit code + entitlements; update CLAUDE.md. Do this
+      only AFTER P2 lands and sync is verified (it removes the fallback path).
 
 ## Auth (DONE in code — P4 backend wiring)
 Supabase Auth (GoTrue) with **email/password** and **Sign in with Apple** (OIDC id-token flow).

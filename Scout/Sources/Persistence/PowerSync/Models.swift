@@ -101,6 +101,23 @@ struct PinRecord: Identifiable, Hashable {
     var createdAt: Date
     var deletedAt: Date?
 
+    init(id: String, listId: String?, owningProjectId: String?, name: String, notes: String,
+         latitude: Double, longitude: Double, hasGPS: Bool, gpsFromTimeline: Bool, isFlagged: Bool,
+         rotationQuarterTurns: Int, aspectRatio: Double, panelOrder: Int, sortOrder: Int,
+         statusRaw: String, imageSourceRaw: String?, imageURL: String?, googlePlaceId: String?,
+         googleMapsURL: String?, sourceURL: String?, originalFilename: String?, photoFiles: [String],
+         thumbnailFiles: [String], dateTaken: Date?, createdAt: Date, deletedAt: Date?) {
+        self.id = id; self.listId = listId; self.owningProjectId = owningProjectId; self.name = name
+        self.notes = notes; self.latitude = latitude; self.longitude = longitude; self.hasGPS = hasGPS
+        self.gpsFromTimeline = gpsFromTimeline; self.isFlagged = isFlagged
+        self.rotationQuarterTurns = rotationQuarterTurns; self.aspectRatio = aspectRatio
+        self.panelOrder = panelOrder; self.sortOrder = sortOrder; self.statusRaw = statusRaw
+        self.imageSourceRaw = imageSourceRaw; self.imageURL = imageURL; self.googlePlaceId = googlePlaceId
+        self.googleMapsURL = googleMapsURL; self.sourceURL = sourceURL; self.originalFilename = originalFilename
+        self.photoFiles = photoFiles; self.thumbnailFiles = thumbnailFiles; self.dateTaken = dateTaken
+        self.createdAt = createdAt; self.deletedAt = deletedAt
+    }
+
     init(cursor c: SqlCursor) throws {
         id = try c.getString(name: "id")
         listId = try c.getStringOptional(name: "list_id")
