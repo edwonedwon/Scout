@@ -1,5 +1,6 @@
 import CoreData
 import CloudKit
+import ScoutKit
 
 /// Core Data + CloudKit stack for project sharing (docs/collaboration-plan.md, Path B).
 ///
@@ -158,20 +159,31 @@ final class PersistenceController {
     /// cross-platform path (no dependency on the flaky AppKit sharing picker): the owner copies
     /// the link and sends it; the recipient opens it and the app's accept handler runs.
     func makeShareLink(for project: ProjectData, editor: Bool) async throws -> URL {
-        guard let privateStore else { throw SharingError.noPrivateStore }
-        print("makeShareLink: creating/fetching share…")
-        let share = try await withTimeout(30, step: "creating the share") {
-            try await self.shareForProject(project)
+        guard let privateStore else {
+            dlog("No private store loaded", level: .error, tag: "Share")
+            throw SharingError.noPrivateStore
         }
-        print("makeShareLink: got share, setting permission + persisting…")
-        share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
-        share.publicPermission = editor ? .readWrite : .readOnly
-        let saved = try await withTimeout(30, step: "saving the share to iCloud") {
-            try await self.container.persistUpdatedShare(share, in: privateStore)
+        do {
+            dlog("Creating/fetching CKShare for \(project.name)…", tag: "Share")
+            let share = try await withTimeout(30, step: "creating the share") {
+                try await self.shareForProject(project)
+            }
+            dlog("Got share; setting \(editor ? "edit" : "view") permission + persisting…", tag: "Share")
+            share[CKShare.SystemFieldKey.title] = project.name as CKRecordValue
+            share.publicPermission = editor ? .readWrite : .readOnly
+            let saved = try await withTimeout(30, step: "saving the share to iCloud") {
+                try await self.container.persistUpdatedShare(share, in: privateStore)
+            }
+            guard let url = saved.url else {
+                dlog("Share saved but no URL returned", level: .error, tag: "Share")
+                throw SharingError.noURL
+            }
+            dlog("Invite link ready: \(url)", level: .success, tag: "Share")
+            return url
+        } catch {
+            dlog("Share failed: \(error.localizedDescription)", level: .error, tag: "Share")
+            throw error
         }
-        guard let url = saved.url else { throw SharingError.noURL }
-        print("makeShareLink: success — \(url)")
-        return url
     }
 
     /// Runs `work`, throwing `SharingError.timedOut(step)` if it doesn't finish within `seconds`
