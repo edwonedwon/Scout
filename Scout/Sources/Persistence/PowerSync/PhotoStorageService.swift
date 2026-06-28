@@ -86,6 +86,16 @@ struct PhotoStorageService {
             return
         }
 
+        #if os(macOS)
+        // Keep this long pass running when the app is in the background / not attached to Xcode —
+        // macOS App Nap would otherwise throttle the network and stall the upload (the "works when
+        // attached" symptom). Released when the pass finishes (defer).
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .suddenTerminationDisabled],
+            reason: "Uploading photos to Storage")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+        #endif
+
         func report() async {
             let d = done, t = total
             await MainActor.run {
@@ -95,7 +105,7 @@ struct PhotoStorageService {
         }
         await report()
 
-        var sent = 0, failed = 0
+        var sent = 0, failed = 0, chunkCount = 0
         var i = 0
         while i < pending.count {
             if Task.isCancelled {
@@ -128,6 +138,10 @@ struct PhotoStorageService {
             }
             done += chunk.count
             await report()
+            // Persist progress periodically so quitting mid-pass doesn't re-upload everything next
+            // launch (the final save() at the end covers normal completion).
+            chunkCount += 1
+            if chunkCount % 10 == 0 { ledger.save() }
             i += maxConcurrent
         }
         ledger.save()
