@@ -34,11 +34,11 @@ extension ProjectVM {
         for list in topLevelLists {
             if list.isFolder {
                 for child in list.iosSortedChildren where !child.livePins.isEmpty && shown(child) {
-                    out += child.sortedPins
+                    out += child.proximitySortedPins
                 }
-                if !list.livePins.isEmpty && shown(list) { out += list.sortedPins }
+                if !list.livePins.isEmpty && shown(list) { out += list.proximitySortedPins }
             } else if !list.livePins.isEmpty && shown(list) {
-                out += list.sortedPins
+                out += list.proximitySortedPins
             }
         }
         // Visible lists first (above); append the rest so everything still eventually downloads.
@@ -54,6 +54,38 @@ extension ListVM {
     var iosSortedChildren: [ListVM] { liveChildLists.sorted { $0.panelOrder < $1.panelOrder } }
     var sortedPins: [PinVM] { livePins.sorted { $0.sortOrder < $1.sortOrder } }
     var isFolder: Bool { !liveChildLists.isEmpty }
+
+    /// Pins ordered so geographically-close photos sit next to each other in the grid, via a Morton
+    /// (Z-order space-filling curve) over their coordinates within this list's bounding box. Nearby
+    /// points get nearby codes, so the grid reads as spatial clusters rather than import order. Pins
+    /// without a location keep to the end in their normal sortOrder. Only reorders *within* a list —
+    /// the section order (and the sidebar order) is unchanged.
+    var proximitySortedPins: [PinVM] {
+        let pins = sortedPins
+        let located = pins.filter { $0.latitude != 0 || $0.longitude != 0 }
+        let unlocated = pins.filter { $0.latitude == 0 && $0.longitude == 0 }
+        guard located.count > 2 else { return located + unlocated }
+
+        let lats = located.map(\.latitude), lons = located.map(\.longitude)
+        let minLat = lats.min()!, minLon = lons.min()!
+        let latSpan = max(lats.max()! - minLat, 1e-9), lonSpan = max(lons.max()! - minLon, 1e-9)
+        let keyed = located.map { pin -> (UInt32, PinVM) in
+            let x = UInt32(max(0, min(65535, (pin.longitude - minLon) / lonSpan * 65535)))
+            let y = UInt32(max(0, min(65535, (pin.latitude - minLat) / latSpan * 65535)))
+            return (Self.interleaveBits(x) | (Self.interleaveBits(y) << 1), pin)
+        }
+        return keyed.sorted { $0.0 < $1.0 }.map(\.1) + unlocated
+    }
+
+    /// Spread the low 16 bits of `v` so bit i lands at position 2i (Morton/Z-order interleave).
+    private static func interleaveBits(_ v: UInt32) -> UInt32 {
+        var x = v & 0x0000_FFFF
+        x = (x | (x << 8)) & 0x00FF_00FF
+        x = (x | (x << 4)) & 0x0F0F_0F0F
+        x = (x | (x << 2)) & 0x3333_3333
+        x = (x | (x << 1)) & 0x5555_5555
+        return x
+    }
     /// Pins in this list plus any in its child lists (folder rollup count).
     var rollupPinCount: Int { livePins.count + liveChildLists.reduce(0) { $0 + $1.livePins.count } }
 }

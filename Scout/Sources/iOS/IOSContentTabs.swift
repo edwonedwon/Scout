@@ -21,11 +21,11 @@ struct IOSPhotosTab: View {
         for list in project.topLevelLists {
             if list.isFolder {
                 for child in list.iosSortedChildren where !child.livePins.isEmpty && shown(child) {
-                    out.append((child, child.sortedPins))
+                    out.append((child, child.proximitySortedPins))
                 }
-                if !list.livePins.isEmpty && shown(list) { out.append((list, list.sortedPins)) }
+                if !list.livePins.isEmpty && shown(list) { out.append((list, list.proximitySortedPins)) }
             } else if !list.livePins.isEmpty && shown(list) {
-                out.append((list, list.sortedPins))
+                out.append((list, list.proximitySortedPins))
             }
         }
         return out
