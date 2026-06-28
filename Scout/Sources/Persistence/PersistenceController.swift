@@ -35,10 +35,19 @@ final class PersistenceController {
             fatalError("PersistenceController: no base store description")
         }
 
+        // Debug (Xcode) builds use separate local files so dev test data never mixes with the
+        // TestFlight/App Store store (both builds share one sandbox container — same bundle id).
+        // The cloud sides are already isolated: Debug → CloudKit Development, TestFlight → Production.
+        #if DEBUG
+        let storeSuffix = "-dev"
+        #else
+        let storeSuffix = ""
+        #endif
+
         // --- Private database store (the user's own data) ---
         let privateDesc = base
         privateDesc.url = inMemory ? URL(fileURLWithPath: "/dev/null")
-                                   : baseURL.appendingPathComponent("private.sqlite")
+                                   : baseURL.appendingPathComponent("private\(storeSuffix).sqlite")
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
 
@@ -72,7 +81,7 @@ final class PersistenceController {
             container.persistentStoreDescriptions = [privateDesc]
         } else {
             let sharedDesc = privateDesc.copy() as! NSPersistentStoreDescription
-            sharedDesc.url = baseURL.appendingPathComponent("shared.sqlite")
+            sharedDesc.url = baseURL.appendingPathComponent("shared\(storeSuffix).sqlite")
             let sharedOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
             sharedOpts.databaseScope = .shared
             sharedDesc.cloudKitContainerOptions = sharedOpts

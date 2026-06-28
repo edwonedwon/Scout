@@ -182,7 +182,14 @@ enum PhotoLoader {
 enum PinPhotoStore {
     static let directory: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dir = base.appendingPathComponent("ScoutPhotos", isDirectory: true)
+        // Debug (Xcode) builds keep photos in a separate folder so dev data doesn't mix with the
+        // TestFlight/App Store store (mirrors the "-dev" Core Data files in PersistenceController).
+        #if DEBUG
+        let folder = "ScoutPhotos-Dev"
+        #else
+        let folder = "ScoutPhotos"
+        #endif
+        let dir = base.appendingPathComponent(folder, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
