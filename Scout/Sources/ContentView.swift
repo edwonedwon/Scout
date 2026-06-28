@@ -1678,6 +1678,8 @@ struct ContentView: View {
             let result = await PinPhotoStore.download(for: location, placeId: placeId, pinUUID: uuid)
             if !result.files.isEmpty {
                 try? await ScoutStore.shared.setPinPhotoFiles(id: pinId, photoFiles: result.files, thumbnailFiles: [])
+                // Push the freshly downloaded bytes to Storage so the pin's photo reaches other devices.
+                await PhotoStorageService.shared.uploadLocalTiers(pinId: pinId, fullFiles: result.files, thumbnailFiles: [])
             }
             // googleMapsURL / sourceURL are captured at insert time from the location.
         }

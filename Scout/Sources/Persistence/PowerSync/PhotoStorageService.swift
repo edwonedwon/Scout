@@ -50,6 +50,21 @@ struct PhotoStorageService {
         try await upload(data, projectId: projectId, tier: tier, filename: filename)
     }
 
+    /// Best-effort upload of a freshly imported pin's locally-cached tiers (thumbnail + full) to
+    /// Storage, so the photo reaches other devices. Resolves the pin's project for the Storage path.
+    /// No-op when Storage isn't configured, or the pin isn't in any project (an unfiled pin doesn't
+    /// sync, so its bytes have nowhere to live). Originals stay local — matching backup import.
+    func uploadLocalTiers(pinId: String, fullFiles: [String], thumbnailFiles: [String]) async {
+        guard client != nil, !(fullFiles.isEmpty && thumbnailFiles.isEmpty) else { return }
+        guard let projectId = await projectId(forPin: pinId) else { return }
+        for f in thumbnailFiles {
+            try? await upload(fileURL: PinPhotoStore.fileURL(f), projectId: projectId, tier: .thumbnail, filename: f)
+        }
+        for f in fullFiles {
+            try? await upload(fileURL: PinPhotoStore.fileURL(f), projectId: projectId, tier: .full, filename: f)
+        }
+    }
+
     // MARK: - Download (with local cache)
 
     /// Return a local file URL for the given photo, downloading it from Storage into the local
@@ -100,6 +115,19 @@ struct PhotoStorageService {
     }
 
     // MARK: - Helpers
+
+    /// Resolve a pin's owning project — directly (unfiled pin) or via its list. Nil for a pin that
+    /// belongs to no project (it won't sync, so its photos have no Storage home).
+    private func projectId(forPin pinId: String) async -> String? {
+        try? await ScoutStore.shared.db.getOptional(
+            sql: """
+            SELECT coalesce(p.owning_project_id, l.project_id) AS project_id
+            FROM pins p LEFT JOIN location_lists l ON l.id = p.list_id
+            WHERE p.id = ?
+            """,
+            parameters: [pinId]
+        ) { try $0.getStringOptional(name: "project_id") } ?? nil
+    }
 
     /// Look up which project a list belongs to (needed to build the Storage path for list pins).
     private func projectId(forList listId: String) async -> String? {

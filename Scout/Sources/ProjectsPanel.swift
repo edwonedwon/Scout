@@ -2742,11 +2742,15 @@ private struct ProjectDetailView: View {
             let listId = list.id
             for result in results {
                 try? await ScoutStore.shared.insertPin(result.storeRecord(listId: listId, owningProjectId: nil, panelOrder: 0))
+                await PhotoStorageService.shared.uploadLocalTiers(
+                    pinId: result.id.uuidString, fullFiles: [result.fullFilename], thumbnailFiles: [result.thumbFilename])
             }
         } else {
             var nextOrder = sidebarItems.count
             for result in results {
                 try? await ScoutStore.shared.insertPin(result.storeRecord(listId: nil, owningProjectId: pid, panelOrder: nextOrder))
+                await PhotoStorageService.shared.uploadLocalTiers(
+                    pinId: result.id.uuidString, fullFiles: [result.fullFilename], thumbnailFiles: [result.thumbFilename])
                 nextOrder += 1
             }
         }
