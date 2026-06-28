@@ -47,18 +47,12 @@ final class ScoutAppDelegate: NSObject, NSApplicationDelegate {
 /// share to the SCENE delegate, not the app delegate. We register this scene delegate via
 /// `configurationForConnecting` below so opening an invite link actually joins the project.
 final class ScoutSceneDelegate: NSObject, UIWindowSceneDelegate {
-    // App already running / backgrounded when the invite is tapped.
+    // Accept an invite when the app is running or backgrounded. We deliberately do NOT implement
+    // scene(_:willConnectTo:) — doing so makes this delegate take over window setup and prevents
+    // SwiftUI's WindowGroup from installing its UI (the app launches to a blank screen).
     func windowScene(_ windowScene: UIWindowScene,
                      userDidAcceptCloudKitShareWith metadata: CKShare.Metadata) {
         PersistenceController.shared.acceptShare(metadata: metadata)
-    }
-
-    // Cold launch via the invite link: the metadata arrives in the connection options.
-    func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
-               options connectionOptions: UIScene.ConnectionOptions) {
-        if let metadata = connectionOptions.cloudKitShareMetadata {
-            PersistenceController.shared.acceptShare(metadata: metadata)
-        }
     }
 }
 
