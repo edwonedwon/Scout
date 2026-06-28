@@ -92,12 +92,20 @@ struct ProjectShareSheet: View {
         copied = false
         let editor = editor
         Task {
-            do {
-                let url = try await PersistenceController.shared.makeShareLink(for: project, editor: editor)
-                await MainActor.run { phase = .ready(url) }
-            } catch {
-                await MainActor.run { phase = .failed(error.localizedDescription) }
+            // The first attempt can fail fast if CloudKit isn't ready yet (the project record is
+            // still exporting). Retry a couple of times before surfacing an error.
+            var lastError: Error?
+            for attempt in 1...3 {
+                do {
+                    let url = try await PersistenceController.shared.makeShareLink(for: project, editor: editor)
+                    await MainActor.run { phase = .ready(url) }
+                    return
+                } catch {
+                    lastError = error
+                    if attempt < 3 { try? await Task.sleep(nanoseconds: 1_500_000_000) }
+                }
             }
+            await MainActor.run { phase = .failed(lastError?.localizedDescription ?? "Unknown error") }
         }
     }
 
