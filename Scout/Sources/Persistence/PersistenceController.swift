@@ -51,45 +51,15 @@ final class PersistenceController {
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         privateDesc.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
 
-        // Private CloudKit sync — explicitly ON. This is the user's own data mirrored to their
-        // private CloudKit database (iCloud.com.cutetech.scout), so projects sync Mac ↔ iPhone.
-        //
-        // NOTE: `NSPersistentCloudKitContainer` already auto-attaches CloudKit options to its
-        // default store description when the app carries the CloudKit entitlement, so sync was
-        // in fact live even when these lines were commented out. We now set them explicitly so
-        // the behaviour is intentional, visible, and not dependent on that implicit default.
-        // For a true LOCAL-ONLY store, set `privateDesc.cloudKitContainerOptions = nil` instead.
-        //
-        // CloudKit schema requirements (audited — the model satisfies all): every relationship
-        // is optional, has an explicit inverse, and uses a Nullify delete rule (no .cascade on
-        // optional relationships); every attribute is optional or has a default value.
-        if inMemory {
-            // Previews / tests: never touch iCloud.
-            privateDesc.cloudKitContainerOptions = nil
-        } else {
-            let privateOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
-            privateOpts.databaseScope = .private
-            privateDesc.cloudKitContainerOptions = privateOpts
-        }
-
-        // --- Shared database store (projects shared TO this user) ---
-        // Required for CKShare collaboration: accepted shares land in the shared CloudKit
-        // database, mirrored into this local store. New objects the user creates still default
-        // to the FIRST store (private) — Core Data auto-assigns to the first applicable store —
-        // so normal inserts need no explicit `assign(_:to:)`. Skip entirely for in-memory.
-        if inMemory {
-            container.persistentStoreDescriptions = [privateDesc]
-        } else {
-            let sharedDesc = privateDesc.copy() as! NSPersistentStoreDescription
-            sharedDesc.url = baseURL.appendingPathComponent("shared\(storeSuffix).sqlite")
-            let sharedOpts = NSPersistentCloudKitContainerOptions(containerIdentifier: Self.cloudContainerID)
-            sharedOpts.databaseScope = .shared
-            sharedDesc.cloudKitContainerOptions = sharedOpts
-            sharedDesc.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-            sharedDesc.setOption(true as NSNumber, forKey: NSPersistentStoreRemoteChangeNotificationPostOptionKey)
-            // Private MUST come first so plain inserts auto-assign to it.
-            container.persistentStoreDescriptions = [privateDesc, sharedDesc]
-        }
+        // CloudKit sync is OFF. The app's data layer is now PowerSync + Supabase — the iOS and Mac
+        // UIs read the store, not Core Data. Leaving NSPersistentCloudKitContainer's CloudKit options
+        // on spun up a sync engine that downloaded the old pre-migration iCloud dataset on launch, a
+        // ~60s main-thread stall before the user could even log in. This residual Core Data store is
+        // now LOCAL-ONLY and unused (full removal is migration plan P7). The former two-store
+        // (private + shared) CKShare setup is gone too — collaboration is Supabase (project_members
+        // + RLS) now.
+        privateDesc.cloudKitContainerOptions = nil
+        container.persistentStoreDescriptions = [privateDesc]
 
         container.loadPersistentStores { [weak self] desc, error in
             if let error { fatalError("PersistenceController: failed to load store: \(error)") }
@@ -102,26 +72,10 @@ final class PersistenceController {
             }
         }
 
-        // The shared DB pushes changes in via the parent context; merge them live, and let the
-        // most recent write win at the property level (location data, not prose — see plan).
         container.viewContext.automaticallyMergesChangesFromParent = true
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
-
-        // Photo blobs (CKAssets) sync independently of the disk cache. Reconcile once on launch
-        // (uploads any local derivatives not yet synced; materializes any synced blobs missing
-        // locally) and again on every remote change (so blobs arriving from another device land
-        // on disk where the file-based image views can render them). Skip for in-memory stores.
-        if !inMemory {
-            PhotoBlobSync.reconcile(container: container)
-            NotificationCenter.default.addObserver(
-                forName: .NSPersistentStoreRemoteChange,
-                object: container.persistentStoreCoordinator,
-                queue: .main
-            ) { [weak self] _ in
-                guard let self else { return }
-                PhotoBlobSync.reconcile(container: self.container)
-            }
-        }
+        // No PhotoBlobSync / CloudKit remote-change observers: photos now live in Supabase Storage,
+        // and nothing reads this store, so launch does zero Core Data sync work.
     }
 
     var viewContext: NSManagedObjectContext { container.viewContext }
