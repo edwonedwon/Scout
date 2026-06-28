@@ -51,7 +51,6 @@ struct SupabaseConnector: PowerSyncBackendConnectorProtocol {
 
         // Only clear the queue once every change in the batch was accepted by the backend.
         try await batch.complete()
-        NSLog("SCOUTSYNC: uploadData batch accepted")
         await Self.log("uploadData: batch accepted ✅", .success)
     }
 

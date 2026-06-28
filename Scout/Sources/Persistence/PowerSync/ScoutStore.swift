@@ -33,6 +33,10 @@ final class ScoutStore {
     // produces while syncing a burst of changes — turning ~100 full MacStore reconciles into a
     // handful. The SDK still delivers the FIRST result immediately, so initial load isn't delayed.
     private static let watchThrottle: TimeInterval = 0.25
+    // The browse (projects) screen doesn't need 4 Hz updates — a coarser throttle means far fewer
+    // re-runs of the (correlated-subquery) summary count + SwiftUI re-renders on the main thread
+    // during the connect/initial-sync burst, which is what made the projects screen jank on open.
+    private static let summaryThrottle: TimeInterval = 1.0
 
     /// Projects with live list/pin counts computed in SQL — the iOS browse screen binds this so it
     /// never has to load every pin into a view-model just to show counts.
@@ -50,7 +54,7 @@ final class ScoutStore {
             WHERE p.deleted_at IS NULL
             ORDER BY p.created_at DESC
             """,
-            parameters: [], throttle: Self.watchThrottle
+            parameters: [], throttle: Self.summaryThrottle
         ) { c in
             ProjectSummary(
                 id: try c.getString(name: "id"),

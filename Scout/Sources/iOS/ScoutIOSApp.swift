@@ -50,7 +50,9 @@ final class ProjectSummariesModel: ObservableObject {
     private var task: Task<Void, Never>?
     init() {
         task = Task { [weak self] in
-            do { for try await rows in ScoutStore.shared.watchProjectSummaries() { self?.summaries = rows } } catch {}
+            // Skip identical re-emissions (common on reconnect) so the browse screen doesn't re-render
+            // for no change.
+            do { for try await rows in ScoutStore.shared.watchProjectSummaries() where self?.summaries != rows { self?.summaries = rows } } catch {}
         }
     }
     deinit { task?.cancel() }
