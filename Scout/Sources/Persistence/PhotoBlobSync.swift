@@ -106,14 +106,13 @@ enum PhotoBlobSync {
 
             if ctx.hasChanges { try? ctx.save() }
 
-            // Progress reflects BLOBS (actual downloadable units), not every referenced filename.
-            // On the owner, every blob was created from a local file → all on disk → bar hides.
-            // On a recipient, blobs sync down with no local file yet → bar shows and climbs as
-            // they materialize. Orphan references (no blob, e.g. missing full-res) are ignored,
-            // so the bar can't get stuck on files that will never arrive.
-            let allBlobs = Array(blobsByName.values)
-            let total = allBlobs.count
-            let onDisk = allBlobs.reduce(0) { acc, blob in
+            // Progress is counted in PHOTOS, not files: each photo has one thumbnail + one
+            // full-res blob, so we count the THUMBNAIL blobs only (one per photo). On the owner
+            // every blob was created from a local file → all on disk → bar hides. On a recipient,
+            // blobs sync down with no local file yet → bar shows and climbs as they materialize.
+            let photoBlobs = blobsByName.values.filter { ($0.filename ?? "").contains("-thumb") }
+            let total = photoBlobs.count
+            let onDisk = photoBlobs.reduce(0) { acc, blob in
                 guard let name = blob.filename else { return acc }
                 return FileManager.default.fileExists(atPath: PinPhotoStore.fileURL(name).path) ? acc + 1 : acc
             }
