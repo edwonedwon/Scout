@@ -306,6 +306,7 @@ struct IOSSidebarDrawer: View {
 
     @State private var expanded: Set<UUID> = []
     @State private var search = ""
+    @State private var showShare = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -334,6 +335,9 @@ struct IOSSidebarDrawer: View {
             searchBar
         }
         .tint(.accentColor)
+        .sheet(isPresented: $showShare) {
+            ProjectShareSheet(project: project, onDismiss: { showShare = false })
+        }
     }
 
     private var header: some View {
@@ -346,6 +350,12 @@ struct IOSSidebarDrawer: View {
                         .background(Color(.secondarySystemFill), in: Circle())
                 }
                 Spacer()
+                Button { showShare = true } label: {
+                    Image(systemName: "person.badge.plus")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                        .frame(width: 34, height: 34)
+                        .background(Color(.secondarySystemFill), in: Circle())
+                }
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
