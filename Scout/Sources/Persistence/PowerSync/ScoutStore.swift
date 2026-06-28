@@ -256,7 +256,7 @@ final class ScoutStore {
             INSERT INTO location_lists (id, project_id, parent_list_id, name, color_hex, scene_type, panel_order, sort_order, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            parameters: [id, projectId, parentListId as Any, name, colorHex, sceneType as Any, panelOrder, sortOrder, now()]
+            parameters: [id, projectId, parentListId, name, colorHex, sceneType, panelOrder, sortOrder, now()]
         )
         return id
     }
@@ -270,7 +270,7 @@ final class ScoutStore {
     }
 
     func setListSceneType(id: String, sceneType: String?) async throws {
-        try await db.execute(sql: "UPDATE location_lists SET scene_type = ? WHERE id = ?", parameters: [sceneType as Any, id])
+        try await db.execute(sql: "UPDATE location_lists SET scene_type = ? WHERE id = ?", parameters: [sceneType, id])
     }
 
     func setListPanelOrder(id: String, order: Int) async throws {
@@ -283,7 +283,7 @@ final class ScoutStore {
 
     /// Re-parent a list (drag into/out of a folder). Pass nil to move it back to top level.
     func setListParent(id: String, parentListId: String?) async throws {
-        try await db.execute(sql: "UPDATE location_lists SET parent_list_id = ? WHERE id = ?", parameters: [parentListId as Any, id])
+        try await db.execute(sql: "UPDATE location_lists SET parent_list_id = ? WHERE id = ?", parameters: [parentListId, id])
     }
 
     func softDeleteList(id: String) async throws {
@@ -346,12 +346,12 @@ final class ScoutStore {
         if let sortOrder {
             try await db.execute(
                 sql: "UPDATE pins SET list_id = ?, owning_project_id = ?, sort_order = ? WHERE id = ?",
-                parameters: [listId as Any, owningProjectId as Any, sortOrder, id]
+                parameters: [listId, owningProjectId, sortOrder, id]
             )
         } else {
             try await db.execute(
                 sql: "UPDATE pins SET list_id = ?, owning_project_id = ? WHERE id = ?",
-                parameters: [listId as Any, owningProjectId as Any, id]
+                parameters: [listId, owningProjectId, id]
             )
         }
     }
@@ -418,14 +418,14 @@ final class ScoutStore {
             INSERT INTO script_highlights (id, script_id, list_id, range_start, range_length, excerpt, context_before, context_after, scene_heading, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            parameters: [id, scriptId, listId as Any, rangeStart, rangeLength, excerpt, contextBefore, contextAfter, sceneHeading as Any, now()]
+            parameters: [id, scriptId, listId, rangeStart, rangeLength, excerpt, contextBefore, contextAfter, sceneHeading, now()]
         )
         return id
     }
 
     /// Assign (or clear) the list a script section maps to.
     func setHighlightList(id: String, listId: String?) async throws {
-        try await db.execute(sql: "UPDATE script_highlights SET list_id = ? WHERE id = ?", parameters: [listId as Any, id])
+        try await db.execute(sql: "UPDATE script_highlights SET list_id = ? WHERE id = ?", parameters: [listId, id])
     }
 
     func deleteHighlight(id: String) async throws {
@@ -457,14 +457,14 @@ final class ScoutStore {
 
     static func pinParams(_ p: PinRecord) -> [Any?] {
         [
-            p.id, p.listId as Any, p.owningProjectId as Any, p.name, p.notes, p.latitude, p.longitude,
+            p.id, p.listId, p.owningProjectId, p.name, p.notes, p.latitude, p.longitude,
             p.hasGPS ? 1 : 0, p.gpsFromTimeline ? 1 : 0, p.isFlagged ? 1 : 0, p.rotationQuarterTurns,
-            p.aspectRatio, p.panelOrder, p.sortOrder, p.statusRaw, p.imageSourceRaw as Any,
-            p.imageURL as Any, p.googlePlaceId as Any, p.googleMapsURL as Any, p.sourceURL as Any,
-            p.originalFilename as Any, encodeJSON(p.photoFiles), encodeJSON(p.thumbnailFiles),
-            p.dateTaken.map { ISO8601DateFormatter.string($0) } as Any,
+            p.aspectRatio, p.panelOrder, p.sortOrder, p.statusRaw, p.imageSourceRaw,
+            p.imageURL, p.googlePlaceId, p.googleMapsURL, p.sourceURL,
+            p.originalFilename, encodeJSON(p.photoFiles), encodeJSON(p.thumbnailFiles),
+            p.dateTaken.map { ISO8601DateFormatter.string($0) },
             ISO8601DateFormatter.string(p.createdAt),
-            p.deletedAt.map { ISO8601DateFormatter.string($0) } as Any,
+            p.deletedAt.map { ISO8601DateFormatter.string($0) },
         ]
     }
 }
