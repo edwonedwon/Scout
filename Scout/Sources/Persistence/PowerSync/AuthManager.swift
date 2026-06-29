@@ -8,9 +8,45 @@ import CryptoKit
 enum SupabaseService {
     static let client: SupabaseClient? = {
         guard SupabaseConfig.isConfigured, let url = SupabaseConfig.supabaseURL else { return nil }
+        #if os(macOS)
+        // On macOS the default session store is the login Keychain, which prompts for the keychain
+        // password on every launch when a dev-signed app's code signature changes between builds.
+        // Store the session in the app's sandbox container instead — no prompt. (iOS keeps the
+        // seamless Keychain.)
+        let options = SupabaseClientOptions(auth: .init(storage: FileAuthStorage()))
+        return SupabaseClient(supabaseURL: url, supabaseKey: SupabaseConfig.anonKey, options: options)
+        #else
         return SupabaseClient(supabaseURL: url, supabaseKey: SupabaseConfig.anonKey)
+        #endif
     }()
 }
+
+#if os(macOS)
+/// File-based Supabase auth-session storage for macOS — keeps the session in Application Support
+/// (inside the app sandbox) so it survives launches without the login-Keychain password prompt.
+struct FileAuthStorage: AuthLocalStorage {
+    private var dir: URL {
+        let base = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true))
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let d = base.appendingPathComponent("SupabaseAuth", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+    private func fileURL(_ key: String) -> URL {
+        dir.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_"))
+    }
+    func store(key: String, value: Data) throws { try value.write(to: fileURL(key), options: .atomic) }
+    func retrieve(key: String) throws -> Data? {
+        let url = fileURL(key)
+        return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+    }
+    func remove(key: String) throws {
+        let url = fileURL(key)
+        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+    }
+}
+#endif
 
 /// Owns the authenticated session and drives the login UI. Backed by Supabase Auth (GoTrue):
 /// email/password and Sign in with Apple (OIDC id-token flow). Secure-by-default — the SDK stores
