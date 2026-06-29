@@ -151,6 +151,9 @@ struct ProjectsPanel: View {
     var onOpenScript: ((ScriptVM) -> Void)? = nil
     /// Opens a script scene (highlight) in the Script view, scrolled to its range.
     var onOpenScriptHighlight: ((HighlightVM) -> Void)? = nil
+    /// Selecting a list while the Script view is open scrolls the script to that list's scene
+    /// (ContentView gates on viewMode). No-op when not in script view or the list has no scene link.
+    var onSelectListForScript: ((ListVM) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView): show the pin in the grid / on the map.
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -196,6 +199,7 @@ struct ProjectsPanel: View {
                         onOpenCarousel: onOpenCarousel,
                         onOpenScript: onOpenScript,
                         onOpenScriptHighlight: onOpenScriptHighlight,
+                        onSelectListForScript: onSelectListForScript,
                         onRevealInGrid: onRevealInGrid,
                         onRevealOnMap: onRevealOnMap,
                         onExpandedChanged: { uuids in
@@ -598,6 +602,7 @@ private struct ProjectDetailView: View {
     var onOpenCarousel: ((PinVM) -> Void)? = nil
     var onOpenScript: ((ScriptVM) -> Void)? = nil
     var onOpenScriptHighlight: ((HighlightVM) -> Void)? = nil
+    var onSelectListForScript: ((ListVM) -> Void)? = nil
     /// Context-menu reveal handlers (route to ContentView).
     var onRevealInGrid: ((UUID) -> Void)? = nil
     var onRevealOnMap: ((UUID) -> Void)? = nil
@@ -753,6 +758,9 @@ private struct ProjectDetailView: View {
                 // would otherwise blow out the fit region (a phantom "ghost pin").
                 onFitToList?(list.pins.filter { $0.hasGPS && $0.deletedAt == nil })
             }
+            // While the Script view is open, also scroll it to this list's scene (ContentView
+            // checks viewMode + whether the list actually has a scene link).
+            onSelectListForScript?(list)
         }
     }
 

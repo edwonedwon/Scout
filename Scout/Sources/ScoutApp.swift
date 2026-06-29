@@ -1,5 +1,8 @@
 import SwiftUI
 import ScoutKit
+#if os(macOS)
+import AppKit
+#endif
 
 extension Notification.Name {
     static let scoutExportBackup    = Notification.Name("scout.exportBackup")
@@ -106,6 +109,24 @@ struct ScoutApp: App {
         #endif
         .commands {
             #if os(macOS)
+            // Custom About panel so the build configuration (Debug/Release) shows under the version.
+            CommandGroup(replacing: .appInfo) {
+                Button("About Script Scout") {
+                    #if DEBUG
+                    let config = "Debug"
+                    #else
+                    let config = "Release"
+                    #endif
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                        .credits: NSAttributedString(
+                            string: "\(config) build",
+                            attributes: [
+                                .font: NSFont.systemFont(ofSize: 11),
+                                .foregroundColor: NSColor.secondaryLabelColor,
+                            ])
+                    ])
+                }
+            }
             CommandGroup(after: .newItem) {
                 Divider()
                 ExportProjectCommand()

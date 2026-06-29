@@ -548,6 +548,7 @@ struct ContentView: View {
                         withAnimation(.spring(duration: 0.3)) { viewMode = .script }
                     },
                     onOpenScriptHighlight: { highlight in openScriptHighlight(highlight) },
+                    onSelectListForScript: { list in scrollScriptToList(list) },
                     onRevealInGrid: { id in revealInGrid(id) },
                     onRevealOnMap: { id in revealOnMap(id) },
                     scrollToPinUUID: highlightedPinID,
@@ -1584,6 +1585,15 @@ struct ContentView: View {
         selection.anchor = list.uuid
         revealListUUID = nil
         DispatchQueue.main.async { revealListUUID = list.uuid }
+    }
+
+    /// Selecting a list in the sidebar while the Script view is open scrolls the script to that
+    /// list's earliest scene — same effect as clicking the list's little script-scene icon. No-op
+    /// when not in script view or the list has no scene link.
+    private func scrollScriptToList(_ list: ListVM) {
+        guard viewMode == .script else { return }
+        guard let link = list.sceneLinks.min(by: { $0.rangeStart < $1.rangeStart }) else { return }
+        openScriptHighlight(link)
     }
 
     private func openScriptHighlight(_ highlight: HighlightVM) {
