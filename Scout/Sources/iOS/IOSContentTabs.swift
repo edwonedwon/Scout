@@ -10,6 +10,8 @@ import ScoutKit
 struct IOSPhotosTab: View {
     @ObservedObject var project: ProjectVM
     @Binding var visibleListIDs: Set<UUID>
+    let link: MapGridLink
+    @Binding var scrollToPinID: String?
     let onMenu: () -> Void
 
     private func shown(_ list: ListVM) -> Bool { visibleListIDs.contains(list.uuid) }
@@ -38,7 +40,7 @@ struct IOSPhotosTab: View {
                     ContentUnavailableView("No Photos", systemImage: "photo.on.rectangle",
                                            description: Text("Photos you add to lists appear here."))
                 } else {
-                    IOSMasonryGridView(sections: sections)
+                    IOSMasonryGridView(sections: sections, link: link, scrollToPinID: $scrollToPinID)
                 }
             }
             // Photo-download progress, pinned just under the nav bar, only while downloading.
@@ -60,6 +62,8 @@ struct IOSPhotosTab: View {
 
 private struct IOSMasonryGridView: View {
     let sections: [(list: ListVM, pins: [PinVM])]
+    let link: MapGridLink
+    @Binding var scrollToPinID: String?
     @State private var columns = 3
     private let gap: CGFloat = 2
 
@@ -67,6 +71,7 @@ private struct IOSMasonryGridView: View {
         GeometryReader { geo in
             let colWidth = (geo.size.width - gap * CGFloat(columns - 1)) / CGFloat(columns)
             ZStack(alignment: .bottom) {
+                ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(sections, id: \.list.uuid) { section in
@@ -79,6 +84,16 @@ private struct IOSMasonryGridView: View {
                         }
                     }
                     .padding(.bottom, 60)
+                }
+                // Map → Photos: scroll the requested pin to the top.
+                .onChange(of: scrollToPinID) { _, target in
+                    guard let target else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(60))   // let the tab transition settle
+                        withAnimation(.easeInOut(duration: 0.4)) { proxy.scrollTo(target, anchor: .top) }
+                        scrollToPinID = nil
+                    }
+                }
                 }
 
                 HStack(spacing: 8) {
@@ -104,12 +119,17 @@ private struct IOSMasonryGridView: View {
             ForEach(0..<columns, id: \.self) { col in
                 LazyVStack(spacing: gap) {
                     ForEach(pins.indices.filter { $0 % columns == col }, id: \.self) { idx in
+                        let pin = pins[idx]
                         NavigationLink {
-                            IOSPinDetailView(pin: pins[idx])
+                            IOSPinDetailView(pin: pin)
                         } label: {
-                            IOSPhotoCell(pin: pins[idx], width: colWidth)
+                            IOSPhotoCell(pin: pin, width: colWidth)
                         }
                         .buttonStyle(.plain)
+                        .id(pin.id)
+                        // Track which photos are on screen so returning to the map can frame them.
+                        .onAppear { link.gridVisibleIDs.insert(pin.id) }
+                        .onDisappear { link.gridVisibleIDs.remove(pin.id) }
                     }
                 }
             }

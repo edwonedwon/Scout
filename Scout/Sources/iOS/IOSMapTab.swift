@@ -10,6 +10,8 @@ struct IOSMapTab: View {
     @ObservedObject var project: ProjectVM
     @Binding var visibleListIDs: Set<UUID>
     @Binding var focusPin: PinVM?
+    let link: MapGridLink
+    @Binding var focusRequest: MapFocusRequest?
     let onMenu: () -> Void
 
     @State private var selectedPin: PinVM?
@@ -123,7 +125,15 @@ struct IOSMapTab: View {
             .onAppear { cameraPosition = .region(defaultRegion); visibleSpan = defaultRegion.span }
             .onMapCameraChange(frequency: .onEnd) { ctx in
                 visibleSpan = ctx.region.span
+                link.mapCenter = ctx.region.center   // remembered for the Photos tab to scroll to
                 snapNorthIfNudged(ctx.camera)
+            }
+            // Photos → Map: zoom to fit the photos the grid was showing.
+            .onChange(of: focusRequest) { _, req in
+                guard let req else { return }
+                withAnimation(.easeInOut(duration: 0.5)) { cameraPosition = .region(req.region) }
+                visibleSpan = req.span
+                focusRequest = nil
             }
             // When the locate button gets a fresh fix, zoom in on the user.
             .onChange(of: location.lastFixID) { _, _ in

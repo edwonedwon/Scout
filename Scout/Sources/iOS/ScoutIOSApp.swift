@@ -224,6 +224,24 @@ struct InProjectLoader: View {
 
 // MARK: - In-project shell (tabs + sidebar drawer)
 
+/// Shared scratchpad so the Map and Photos tabs can hand each other a focus point across a tab
+/// switch. The fields are written continuously (map pans, grid scrolls) but read only on tab change,
+/// so it's a plain class held in @State — mutating it never triggers a re-render.
+final class MapGridLink {
+    var mapCenter: CLLocationCoordinate2D?   // last center of the map view
+    var gridVisibleIDs: Set<String> = []     // pin ids currently on screen in the photo grid
+}
+
+/// A one-shot request for the map to animate to a region. Carries a unique id so two requests with
+/// the same coordinates still register as a change (and re-trigger the focus).
+struct MapFocusRequest: Equatable {
+    let id = UUID()
+    let center: CLLocationCoordinate2D
+    let span: MKCoordinateSpan
+    static func == (l: Self, r: Self) -> Bool { l.id == r.id }
+    var region: MKCoordinateRegion { MKCoordinateRegion(center: center, span: span) }
+}
+
 struct InProjectShell: View {
     @ObservedObject var project: ProjectVM
     let onSwitchProject: () -> Void
@@ -231,6 +249,10 @@ struct InProjectShell: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var prefetchGen = 0
     @State private var visibleListIDs: Set<UUID> = []
+    // Map ⇄ grid navigation sync.
+    @State private var link = MapGridLink()
+    @State private var gridScrollTarget: String?
+    @State private var mapFocusRequest: MapFocusRequest?
     @State private var selectedTab = {
         #if DEBUG
         if let t = ProcessInfo.processInfo.environment["SCOUT_TAB"], let i = Int(t) { return i }
@@ -244,14 +266,44 @@ struct InProjectShell: View {
     private func openSidebar() { withAnimation(.easeOut(duration: 0.28)) { showSidebar = true } }
     private func closeSidebar() { withAnimation(.easeIn(duration: 0.24)) { showSidebar = false } }
 
+    /// The grid photo (in the same set the grid shows) geographically closest to the map center.
+    private func nearestGridPinID(to center: CLLocationCoordinate2D?) -> String? {
+        guard let center else { return nil }
+        let pins = project.photoGridPins(visible: visibleListIDs).filter { $0.latitude != 0 || $0.longitude != 0 }
+        return pins.min { Self.sqDist($0.coordinate, center) < Self.sqDist($1.coordinate, center) }?.id
+    }
+
+    /// A region (with a little padding + a minimum span) fitting the given grid pins, for the map to
+    /// zoom to when returning from the grid.
+    private func focusRequest(fitting ids: Set<String>) -> MapFocusRequest? {
+        let pins = project.photoGridPins(visible: visibleListIDs)
+            .filter { ids.contains($0.id) && ($0.latitude != 0 || $0.longitude != 0) }
+        guard !pins.isEmpty else { return nil }
+        let lats = pins.map(\.latitude), lons = pins.map(\.longitude)
+        let minLat = lats.min()!, maxLat = lats.max()!, minLon = lons.min()!, maxLon = lons.max()!
+        let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2)
+        let span = MKCoordinateSpan(latitudeDelta: max((maxLat - minLat) * 1.4, 0.004),
+                                    longitudeDelta: max((maxLon - minLon) * 1.4, 0.004))
+        return MapFocusRequest(center: center, span: span)
+    }
+
+    /// Squared distance, longitude scaled by cos(lat) so it's roughly metric.
+    private static func sqDist(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
+        let dLat = a.latitude - b.latitude
+        let dLon = (a.longitude - b.longitude) * cos(a.latitude * .pi / 180)
+        return dLat * dLat + dLon * dLon
+    }
+
     var body: some View {
         ZStack {
             TabView(selection: $selectedTab) {
-                IOSMapTab(project: project, visibleListIDs: $visibleListIDs, focusPin: $mapFocusPin, onMenu: openSidebar)
+                IOSMapTab(project: project, visibleListIDs: $visibleListIDs, focusPin: $mapFocusPin,
+                          link: link, focusRequest: $mapFocusRequest, onMenu: openSidebar)
                     .tabItem { Label("Map", systemImage: "map.fill") }
                     .tag(0)
 
-                IOSPhotosTab(project: project, visibleListIDs: $visibleListIDs, onMenu: openSidebar)
+                IOSPhotosTab(project: project, visibleListIDs: $visibleListIDs,
+                             link: link, scrollToPinID: $gridScrollTarget, onMenu: openSidebar)
                     .tabItem { Label("Photos", systemImage: "photo.on.rectangle") }
                     .tag(1)
 
@@ -268,7 +320,11 @@ struct InProjectShell: View {
                     .tag(4)
             }
             .onChange(of: selectedTab) { old, new in
-                if new == 2 { selectedTab = old; showCamera = true }
+                if new == 2 { selectedTab = old; showCamera = true; return }
+                // Map → Photos: scroll the grid to the photo nearest the map's center.
+                if new == 1 && old == 0 { gridScrollTarget = nearestGridPinID(to: link.mapCenter) }
+                // Photos → Map: zoom the map to fit the photos currently on screen in the grid.
+                else if new == 0 && old == 1 { mapFocusRequest = focusRequest(fitting: link.gridVisibleIDs) }
             }
 
             if showSidebar {
