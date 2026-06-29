@@ -566,8 +566,9 @@ struct ContentView: View {
                 )
             }
             centerPanel
-                // Photo upload progress (the periodic "are all photos on the server?" check).
-                .overlay(alignment: .top) { PhotoSyncBar().padding(.top, 10) }
+                // Photo upload progress (the periodic "are all photos on the server?" check). Drops
+                // below the top map toolbar (matches the 58pt clearance used elsewhere).
+                .overlay(alignment: .top) { PhotoSyncBar().padding(.top, 58) }
             if showRightPanel {
                 Divider()
                 scoutPanel
