@@ -401,7 +401,7 @@ struct ContentView: View {
     /// bar shows progress while an upload is actually in flight.
     private func photoUploadCheckLoop() async {
         while !Task.isCancelled {
-            if !mac.pins.isEmpty {
+            if !mac.pins.isEmpty && !PhotoImportActivity.isImporting {
                 // Thumbnails for every pin first (what the grid needs), then full-res.
                 var thumbs: [(projectId: String, tier: PhotoStorageService.Tier, filename: String)] = []
                 var fulls: [(projectId: String, tier: PhotoStorageService.Tier, filename: String)] = []

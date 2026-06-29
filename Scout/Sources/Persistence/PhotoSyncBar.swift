@@ -3,6 +3,11 @@ import SwiftUI
 /// Observable photo-download progress for the always-visible sync bar. Driven by the photo
 /// download flow (e.g. Supabase Storage prefetch); idle (`isDownloading == false`) when nothing
 /// is in flight, which hides the bar.
+/// True while a photo import is running, so the periodic "upload all photos" check pauses — its
+/// global count (e.g. 1600+) would otherwise pop up over the import and look like the import's own
+/// progress.
+@MainActor enum PhotoImportActivity { static var isImporting = false }
+
 @MainActor
 final class PhotoSyncProgress: ObservableObject {
     static let shared = PhotoSyncProgress()

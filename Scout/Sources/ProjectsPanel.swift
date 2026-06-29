@@ -628,7 +628,7 @@ private struct ProjectDetailView: View {
     /// The list whose scene-type popover is open (anchored to its row), or nil. Set by pressing "e".
     @State private var sceneTypeEditID: UUID? = nil
     @State private var searchText = ""
-    @State private var importProgress: (current: Int, total: Int)? = nil
+    @State private var importProgress: (label: String, current: Int, total: Int)? = nil
     @State private var timelineProgress: (current: Int, total: Int, name: String)? = nil
     // Selection lives in a reference-type model owned via plain @State (NOT @StateObject),
     // so mutating it never re-renders this view or re-runs ForEach(sidebarItems). Only the
@@ -2622,7 +2622,7 @@ private struct ProjectDetailView: View {
         }
         .overlay {
             if let prog = importProgress {
-                ImportProgressOverlay(current: prog.current, total: prog.total)
+                ImportProgressOverlay(label: prog.label, current: prog.current, total: prog.total)
             } else if let prog = timelineProgress {
                 TimelineProgressOverlay(current: prog.current, total: prog.total, currentName: prog.name)
             }
@@ -2705,35 +2705,55 @@ private struct ProjectDetailView: View {
     /// pins and wiring their relationship. Shared by the Import menu and Finder drag-drop.
     @MainActor
     private func importImageURLs(_ urls: [URL], into list: ListVM?) async {
+        PhotoImportActivity.isImporting = true            // pause the global upload bar during import
+        defer { PhotoImportActivity.isImporting = false }
+        let dest = list?.name ?? "Uncategorized"
+        dlog("import: \(urls.count) file(s) → \(dest)", tag: "Import")
+
         // Collect all existing pins across this project for duplicate detection. Build the dedup
         // index here (main thread) — it reads managed objects, which importPhotos must not touch.
         let existingPins = (project.lists.flatMap(\.pins)) + project.importedPhotos
         let dedup = PhotoImportService.DedupIndex(existingPins: existingPins)
         let baseSortOrder = list?.pins.count ?? 0
-        importProgress = (0, urls.count)
+
+        // Stage 1 — decode + compress (thumbnail + full-res JPEG). This is the CPU-heavy part.
+        importProgress = (label: "Importing & compressing", current: 0, total: urls.count)
         let results = await PhotoImportService.importPhotos(from: urls, dedup: dedup,
                                                             baseSortOrder: baseSortOrder) { current, total in
-            importProgress = (current, total)
+            importProgress = (label: "Importing & compressing", current: current, total: total)
+        }
+        let gpsCount = results.filter(\.hasGPS).count
+        dlog("import: decoded \(results.count)/\(urls.count) (\(gpsCount) geo-tagged, \(urls.count - results.count) skipped/dupe)",
+             level: results.isEmpty ? .warning : .info, tag: "Import")
+
+        // Stage 2 — save each pin to the store and upload its tiers to cloud. Keep the overlay up:
+        // for large files the upload is the slow part (the old code hid the bar before this began).
+        let pid = project.id
+        importProgress = (label: "Saving & uploading to cloud", current: 0, total: results.count)
+        var nextOrder = sidebarItems.count
+        var done = 0, failed = 0
+        for result in results {
+            let owning = list == nil ? pid : nil
+            let panelOrder = list == nil ? nextOrder : 0
+            do {
+                try await ScoutStore.shared.insertPin(
+                    result.storeRecord(listId: list?.id, owningProjectId: owning, panelOrder: panelOrder))
+                let thumbOK = FileManager.default.fileExists(atPath: PinPhotoStore.fileURL(result.thumbFilename).path)
+                if !thumbOK { dlog("import: \(result.name) — thumbnail file missing on disk!", level: .warning, tag: "Import") }
+            } catch {
+                failed += 1
+                dlog("import: insert FAILED \(result.name): \(error)", level: .error, tag: "Import")
+            }
+            await PhotoStorageService.shared.uploadLocalTiers(
+                pinId: result.id.uuidString, fullFiles: [result.fullFilename], thumbnailFiles: [result.thumbFilename])
+            if list == nil { nextOrder += 1 }
+            done += 1
+            importProgress = (label: "Saving & uploading to cloud", current: done, total: results.count)
         }
         importProgress = nil
-        let pid = project.id
-        if let list {
-            let listId = list.id
-            for result in results {
-                try? await ScoutStore.shared.insertPin(result.storeRecord(listId: listId, owningProjectId: nil, panelOrder: 0))
-                await PhotoStorageService.shared.uploadLocalTiers(
-                    pinId: result.id.uuidString, fullFiles: [result.fullFilename], thumbnailFiles: [result.thumbFilename])
-            }
-        } else {
-            var nextOrder = sidebarItems.count
-            for result in results {
-                try? await ScoutStore.shared.insertPin(result.storeRecord(listId: nil, owningProjectId: pid, panelOrder: nextOrder))
-                await PhotoStorageService.shared.uploadLocalTiers(
-                    pinId: result.id.uuidString, fullFiles: [result.fullFilename], thumbnailFiles: [result.thumbFilename])
-                nextOrder += 1
-            }
-        }
         normalizeOrder()
+        dlog("import: done — \(done - failed) pin(s) added to \(dest)\(failed > 0 ? ", \(failed) failed" : "")",
+             level: failed > 0 ? .warning : .success, tag: "Import")
     }
 
     /// If `providers` carry Finder image files, kicks off an import into `list`
@@ -3264,6 +3284,7 @@ struct NewListForSceneSheet: View {
 // MARK: - Import progress overlay
 
 private struct ImportProgressOverlay: View {
+    let label: String
     let current: Int
     let total: Int
 
@@ -3274,11 +3295,11 @@ private struct ImportProgressOverlay: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            Text("Importing Photos…")
+            Text(label)
                 .font(.subheadline.weight(.semibold))
             ProgressView(value: fraction)
                 .progressViewStyle(.linear)
-                .frame(width: 200)
+                .frame(width: 220)
             Text("\(current) of \(total)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
