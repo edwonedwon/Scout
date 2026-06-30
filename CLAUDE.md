@@ -8,11 +8,32 @@
   compile into both the iOS and macOS targets).
 
 ## Build / verify
-- macOS: `xcodebuild -project Scout.xcodeproj -scheme Scout_macOS -destination 'platform=macOS' build`
-- iOS:   `xcodebuild -project Scout.xcodeproj -scheme Scout_iOS -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build`
+- **Preferred:** `./build.sh` (both platforms) — also `./build.sh mac`, `./build.sh ios`,
+  `./build.sh gen` (runs `xcodegen generate` first). It filters output to errors + the final
+  BUILD result and exits non-zero on failure.
+- Raw commands if needed:
+  - macOS: `xcodebuild -project Scout.xcodeproj -scheme Scout_macOS -destination 'platform=macOS' build`
+  - iOS:   `xcodebuild -project Scout.xcodeproj -scheme Scout_iOS -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build`
 - Always build after changes and fix errors before finishing. SourceKit "No such module
   ScoutKit" / "cannot find in scope" diagnostics are false positives — ignore them; trust the
   `xcodebuild` result.
+
+## File organization (post-refactor)
+The two former mega-files were split by type/concern; same module, no behavior change.
+- **`ContentView`** (the macOS root view) keeps its stored properties + `body` in
+  `ContentView.swift`; its methods live in `ContentView+Views/Script/Backup.swift` and
+  `Map/ContentView+Map.swift` / `Map/ContentView+Pins.swift` as `extension ContentView`.
+  Chrome types (SavedRegion, LocationRow, enums) are in `ContentViewChrome.swift`; the shared
+  pin context-menu helpers are in `PinMenu.swift`; map popovers in `Map/MapPanels.swift`.
+- **`ProjectDetailView`** (the sidebar) keeps stored props + `body` in `ProjectsPanel.swift`;
+  its methods live in `Sidebar/ProjectDetailView+DragDrop/Trash/Rows/Import.swift`. Sidebar
+  rows/sheets/helpers are in `Sidebar/SidebarRows.swift`, `SidebarSheets.swift`,
+  `SidebarSupport.swift`.
+- **`ScoutMapView`** map subviews (ZoomableMapView + annotation views) are in
+  `Map/MapMacViews.swift`; boundary/menu helpers in `Map/MapBoundaryViews.swift`.
+- Because these are `extension`s of a type, the type and its members are `internal` (not
+  `private`) — keep new cross-file members internal, and add new stored properties to the main
+  file (extensions can't hold stored properties).
 
 ## Release / version bump ritual
 When the user says **"set version to X"** (e.g. "set version to 1.2"), do all of this:
