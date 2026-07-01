@@ -95,4 +95,38 @@ extension PinVM {
     /// Best thumbnail URL: a stored thumbnail/full file, else the remote source image.
     var thumbURL: URL? { thumbnailImages.first?.url ?? imageURL.flatMap { URL(string: $0) } }
 }
+
+/// Per-project UI state persisted across launches (the iOS equivalent of the Mac sidebar's
+/// AppStorage). Keyed by project id so each project remembers its own list visibility, the
+/// "show all" state (implied by whether every list id is in the visible set), folder/list
+/// collapse state, and the sidebar's scroll position.
+enum IOSProjectPrefs {
+    private static let d = UserDefaults.standard
+    private static func csv(_ ids: Set<UUID>) -> String { ids.map(\.uuidString).joined(separator: ",") }
+    private static func ids(_ s: String) -> Set<UUID> { Set(s.split(separator: ",").compactMap { UUID(uuidString: String($0)) }) }
+
+    /// Visible list ids, or nil if never set (caller should default to "all visible"). An empty
+    /// set is distinct from nil — it means the user explicitly hid everything.
+    static func visibleLists(_ pid: String) -> Set<UUID>? {
+        d.string(forKey: "ios.visibleLists.\(pid)").map(ids)
+    }
+    static func setVisibleLists(_ pid: String, _ v: Set<UUID>) {
+        d.set(csv(v), forKey: "ios.visibleLists.\(pid)")
+    }
+
+    static func expandedLists(_ pid: String) -> Set<UUID> {
+        ids(d.string(forKey: "ios.expandedLists.\(pid)") ?? "")
+    }
+    static func setExpandedLists(_ pid: String, _ v: Set<UUID>) {
+        d.set(csv(v), forKey: "ios.expandedLists.\(pid)")
+    }
+
+    static func sidebarTopID(_ pid: String) -> UUID? {
+        d.string(forKey: "ios.sidebarTop.\(pid)").flatMap { UUID(uuidString: $0) }
+    }
+    static func setSidebarTopID(_ pid: String, _ id: UUID?) {
+        if let id { d.set(id.uuidString, forKey: "ios.sidebarTop.\(pid)") }
+        else { d.removeObject(forKey: "ios.sidebarTop.\(pid)") }
+    }
+}
 #endif

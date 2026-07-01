@@ -260,6 +260,24 @@ extension ProjectDetailView {
                 ))
 
         if isExpanded {
+            // The flag filter is hiding every loose photo here — say so plainly and offer a
+            // one-click way out, right where the photos would otherwise be.
+            if photos.isEmpty && flaggedOnly && !loosePhotos.isEmpty {
+                Button { flaggedOnly = false } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "flag.slash")
+                        Text("\(loosePhotos.count) hidden by flag filter — Show all")
+                            .lineLimit(1)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .padding(.leading, 24).padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 0))
+            }
             ForEach(photos) { pin in
                 PinRow(
                     pin: pin,

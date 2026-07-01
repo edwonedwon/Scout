@@ -23,6 +23,8 @@ struct IOSMapTab: View {
     @Namespace private var mapScope
     @StateObject private var location = MapLocationProvider()
     @State private var focusUserPending = false
+    /// Frame-on-open runs once per project so switching tabs doesn't re-frame the map.
+    @State private var didInitialFrame = false
 
     // Rotation is allowed (so the compass can reset it and deliberate turns work), but the camera's
     // onEnd handler snaps small accidental twists back to north — so a stray rotation while
@@ -80,6 +82,33 @@ struct IOSMapTab: View {
         return MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: 0.12, longitudeDelta: 0.12))
     }
 
+    /// A region that fits the given pins, with padding and a sensible minimum span. nil if empty.
+    private func regionFitting(_ pins: [PinVM]) -> MKCoordinateRegion? {
+        guard !pins.isEmpty else { return nil }
+        let lats = pins.map(\.latitude), lons = pins.map(\.longitude)
+        let minLat = lats.min()!, maxLat = lats.max()!, minLon = lons.min()!, maxLon = lons.max()!
+        let center = CLLocationCoordinate2D(latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2)
+        let span = MKCoordinateSpan(latitudeDelta: max((maxLat - minLat) * 1.4, 0.005),
+                                    longitudeDelta: max((maxLon - minLon) * 1.4, 0.005))
+        return MKCoordinateRegion(center: center, span: span)
+    }
+
+    /// On opening a project: frame all currently-visible map data; if there's none, fall back to the
+    /// user's location (the existing locate flow zooms in when the fix arrives). Runs once.
+    private func frameOnOpen() {
+        guard !didInitialFrame else { return }
+        didInitialFrame = true
+        if let region = regionFitting(visiblePins) {
+            cameraPosition = .region(region)
+            visibleSpan = region.span
+        } else {
+            cameraPosition = .region(defaultRegion)
+            visibleSpan = defaultRegion.span
+            focusUserPending = true
+            location.requestOneShot()
+        }
+    }
+
     /// Tapping a cluster zooms to fit its pins (or just tightens if they're stacked).
     private func zoomInto(_ cluster: MapCluster) {
         let lats = cluster.pins.map(\.latitude), lngs = cluster.pins.map(\.longitude)
@@ -122,7 +151,7 @@ struct IOSMapTab: View {
             }
             .mapStyle(mapStyleChoice.style)
             .ignoresSafeArea()
-            .onAppear { cameraPosition = .region(defaultRegion); visibleSpan = defaultRegion.span }
+            .onAppear { frameOnOpen() }
             .onMapCameraChange(frequency: .onEnd) { ctx in
                 visibleSpan = ctx.region.span
                 link.mapCenter = ctx.region.center   // remembered for the Photos tab to scroll to

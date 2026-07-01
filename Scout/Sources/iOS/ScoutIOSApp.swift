@@ -263,6 +263,15 @@ struct InProjectShell: View {
     @State private var showSidebar = false
     @State private var mapFocusPin: PinVM?
 
+    init(project: ProjectVM, onSwitchProject: @escaping () -> Void) {
+        self.project = project
+        self.onSwitchProject = onSwitchProject
+        // Load this project's saved list visibility BEFORE the first render, so the map can frame
+        // the visible data on open. Never-set → default to all lists visible.
+        let loaded = IOSProjectPrefs.visibleLists(project.id) ?? project.allListIDs
+        _visibleListIDs = State(initialValue: loaded)
+    }
+
     private func openSidebar() { withAnimation(.easeOut(duration: 0.28)) { showSidebar = true } }
     private func closeSidebar() { withAnimation(.easeIn(duration: 0.24)) { showSidebar = false } }
 
@@ -353,8 +362,9 @@ struct InProjectShell: View {
                 .transition(.move(edge: .leading))
             }
         }
-        .onAppear {
-            if visibleListIDs.isEmpty { visibleListIDs = project.allListIDs }
+        // Persist list visibility (and the implied "show all" state) per project, like the Mac.
+        .onChange(of: visibleListIDs) { _, new in
+            IOSProjectPrefs.setVisibleLists(project.id, new)
         }
         // Warm the local thumbnail cache, a few downloads at a time, in photo-grid order (top to
         // bottom) with currently-visible lists first — so whatever the user is looking at downloads
@@ -397,6 +407,10 @@ struct IOSSidebarDrawer: View {
     @State private var expanded: Set<UUID> = []
     @State private var search = ""
     @State private var showShare = false
+    /// Top-most visible row id — persisted so the lists bar reopens at the same scroll position.
+    @State private var sidebarTopID: UUID?
+    /// Set true once saved prefs have loaded, so the initial load doesn't overwrite them.
+    @State private var didLoadPrefs = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -420,11 +434,25 @@ struct IOSSidebarDrawer: View {
                     }
                 }
                 .padding(.vertical, 6)
+                .scrollTargetLayout()
             }
+            .scrollPosition(id: $sidebarTopID, anchor: .top)
             Divider()
             searchBar
         }
         .tint(.accentColor)
+        // Restore saved collapse + scroll state for this project, then keep them persisted.
+        .onAppear {
+            expanded = IOSProjectPrefs.expandedLists(project.id)
+            sidebarTopID = IOSProjectPrefs.sidebarTopID(project.id)
+            didLoadPrefs = true
+        }
+        .onChange(of: expanded) { _, new in
+            if didLoadPrefs { IOSProjectPrefs.setExpandedLists(project.id, new) }
+        }
+        .onChange(of: sidebarTopID) { _, new in
+            if didLoadPrefs { IOSProjectPrefs.setSidebarTopID(project.id, new) }
+        }
         .sheet(isPresented: $showShare) {
             // Account-based sharing (project_members + RLS).
             ShareProjectView(projectId: project.uuid.uuidString, projectName: project.name)
